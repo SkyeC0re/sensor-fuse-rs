@@ -4,17 +4,23 @@ use core::{
 };
 use parking_lot;
 
-pub trait RwLock<'a> {
+pub trait RwLock {
     type Target;
-    type ReadGuard: Deref<Target = Self::Target>;
-    type WriteGuard: Deref<Target = Self::Target> + DerefMut;
+    type ReadGuard<'read>: Deref<Target = Self::Target>
+    where
+        Self::Target: 'read,
+        Self: 'read;
+    type WriteGuard<'write>: Deref<Target = Self::Target> + DerefMut
+    where
+        Self::Target: 'write,
+        Self: 'write;
 
     /// Contruct a new lock from the given initial value.
     fn new(init: Self::Target) -> Self;
     /// Immutable access to the current value inside the lock.
-    fn read(&'a self) -> Self::ReadGuard;
+    fn read(&self) -> Self::ReadGuard<'_>;
     /// Mutable access to the current value inside the lock.
-    fn write(&'a self) -> Self::WriteGuard;
+    fn write(&self) -> Self::WriteGuard<'_>;
 
     /// Downgrade mutable access to immutable access for a write guard originating from this lock instance.
     ///
@@ -24,7 +30,7 @@ pub trait RwLock<'a> {
     /// May panic if `wirte_guard` does not originate from `self`. Implementations may also downgrade the guard
     /// regardless or return a new read guard originating from `self`.
     #[inline(always)]
-    fn downgrade(&'a self, write_guard: Self::WriteGuard) -> Self::ReadGuard {
+    fn downgrade<'a>(&'a self, write_guard: Self::WriteGuard<'a>) -> Self::ReadGuard<'a> {
         drop(write_guard);
         self.read()
     }
@@ -36,19 +42,16 @@ pub trait RwLock<'a> {
     /// May panic if `read_guard` does not originate from `self`. Implementations may also upgrade the guard
     /// regardless or return a new write guard originating from `self`.
     #[inline(always)]
-    fn upgrade(&'a self, read_guard: Self::ReadGuard) -> Self::WriteGuard {
+    fn upgrade<'a>(&'a self, read_guard: Self::ReadGuard<'a>) -> Self::WriteGuard<'a> {
         drop(read_guard);
         self.write()
     }
 }
 
-impl<'a, T> RwLock<'a> for parking_lot::RwLock<T>
-where
-    T: 'a,
-{
+impl<T> RwLock for parking_lot::RwLock<T> {
     type Target = T;
-    type ReadGuard = parking_lot::RwLockReadGuard<'a, T>;
-    type WriteGuard = parking_lot::RwLockWriteGuard<'a, T>;
+    type ReadGuard<'me> = parking_lot::RwLockReadGuard<'me, T> where T: 'me;
+    type WriteGuard<'me> = parking_lot::RwLockWriteGuard<'me, T> where T: 'me;
 
     #[inline(always)]
     fn new(init: T) -> Self {
@@ -56,51 +59,67 @@ where
     }
 
     #[inline(always)]
-    fn read(&'a self) -> Self::ReadGuard {
+    fn read(&self) -> Self::ReadGuard<'_> {
         self.read()
     }
 
     #[inline(always)]
-    fn write(&'a self) -> Self::WriteGuard {
+    fn write(&self) -> Self::WriteGuard<'_> {
         self.write()
     }
 
     #[inline(always)]
-    fn downgrade(&self, write_guard: Self::WriteGuard) -> Self::ReadGuard {
+    fn downgrade<'a>(&'a self, write_guard: Self::WriteGuard<'a>) -> Self::ReadGuard<'a> {
         parking_lot::RwLockWriteGuard::downgrade(write_guard)
     }
 }
 
-impl<'a, T> RwLock<'a> for std::sync::RwLock<T>
-where
-    T: 'a,
-{
+impl<T> RwLock for std::sync::RwLock<T> {
     type Target = T;
 
-    type ReadGuard = std::sync::RwLockReadGuard<'a, T>;
+    type ReadGuard<'read> = std::sync::RwLockReadGuard<'read, T> where T: 'read;
 
-    type WriteGuard = std::sync::RwLockWriteGuard<'a, T>;
+    type WriteGuard<'write> = std::sync::RwLockWriteGuard<'write, T> where T: 'write;
 
     fn new(init: Self::Target) -> Self {
         Self::new(init)
     }
 
-    fn read(&'a self) -> Self::ReadGuard {
+    fn read(&self) -> Self::ReadGuard<'_> {
         self.read().unwrap()
     }
 
-    fn write(&'a self) -> Self::WriteGuard {
+    fn write(&self) -> Self::WriteGuard<'_> {
         self.write().unwrap()
     }
 }
 
-pub struct SyncronizedData<T> {
-    pub data: T,
+pub struct SyncronizedData<L> {
+    pub data: L,
     rev: AtomicUsize,
 }
 
-pub struct SyncronizedDataObserver<'a, T> {
-    inner: &'a SyncronizedData<T>,
+impl<L> SyncronizedData<L>
+where
+    L: RwLock,
+{
+    pub fn new(init: L::Target) -> Self {
+        Self {
+            data: RwLock::new(init),
+            rev: AtomicUsize::default(),
+        }
+    }
+
+    pub fn spawn_observer(&self) -> SyncronizedDataObserver<L> {
+        SyncronizedDataObserver {
+            inner: self,
+            rev: self.rev.load(Ordering::SeqCst),
+        }
+    }
+}
+
+pub struct SyncronizedDataObserver<'a, L> {
+    inner: &'a SyncronizedData<L>,
     rev: usize,
 }
 
@@ -114,19 +133,19 @@ impl<T> SyncronizedData<T> {
     }
 }
 
-trait SensorWrite<'a> {
-    type Lock: RwLock<'a>;
-    fn borrow_mut(&'a self) -> <Self::Lock as RwLock<'a>>::WriteGuard;
-    fn borrow(&'a self) -> <Self::Lock as RwLock<'a>>::ReadGuard;
+trait SensorWrite {
+    type Lock: RwLock;
+    fn borrow_mut(&self) -> <Self::Lock as RwLock>::WriteGuard<'_>;
+    fn borrow(&self) -> <Self::Lock as RwLock>::ReadGuard<'_>;
     #[inline]
-    fn update(&'a self, sample: <Self::Lock as RwLock<'a>>::Target) {
+    fn update(&self, sample: <Self::Lock as RwLock>::Target) {
         let mut guard = self.borrow_mut();
         *guard = sample;
         self.mark_all_unseen();
         drop(guard);
     }
     #[inline(always)]
-    fn modify_with(&'a self, f: impl FnOnce(&mut <Self::Lock as RwLock<'a>>::Target)) {
+    fn modify_with(&self, f: impl FnOnce(&mut <Self::Lock as RwLock>::Target)) {
         let mut guard = self.borrow_mut();
         f(&mut guard);
         self.mark_all_unseen();
@@ -135,33 +154,33 @@ trait SensorWrite<'a> {
     fn mark_all_unseen(&self);
 }
 
-trait SensorRead<'a> {
-    type Lock: RwLock<'a>;
+pub trait SensorRead {
+    type Lock: RwLock;
 
     #[inline(always)]
-    fn borrow_and_update(&'a mut self) -> <Self::Lock as RwLock<'a>>::ReadGuard {
+    fn borrow_and_update(&mut self) -> <Self::Lock as RwLock>::ReadGuard<'_> {
         self.mark_seen();
         self.borrow()
     }
-    fn borrow(&'a self) -> <Self::Lock as RwLock<'a>>::ReadGuard;
+    fn borrow(&self) -> <Self::Lock as RwLock>::ReadGuard<'_>;
     fn mark_seen(&mut self);
     fn mark_unseen(&mut self);
     fn has_changed(&self) -> bool;
 }
 
-impl<'a, T, L> SensorWrite<'a> for SyncronizedData<L>
+impl<T, L> SensorWrite for SyncronizedData<L>
 where
-    L: RwLock<'a, Target = T> + 'a,
+    L: RwLock<Target = T>,
 {
     type Lock = L;
 
     #[inline(always)]
-    fn borrow_mut(&'a self) -> L::WriteGuard {
+    fn borrow_mut(&self) -> L::WriteGuard<'_> {
         self.data.write()
     }
 
     #[inline(always)]
-    fn borrow(&'a self) -> L::ReadGuard {
+    fn borrow(&self) -> L::ReadGuard<'_> {
         self.data.read()
     }
 
@@ -171,19 +190,19 @@ where
     }
 }
 
-impl<'a, T, L, S> SensorWrite<'a> for S
+impl<'a, T, L, S> SensorWrite for S
 where
-    L: RwLock<'a, Target = T> + 'a,
+    L: RwLock<Target = T>,
     S: Deref<Target = SyncronizedData<L>> + ?Sized,
 {
     type Lock = L;
     #[inline(always)]
-    fn borrow_mut(&'a self) -> L::WriteGuard {
+    fn borrow_mut(&self) -> L::WriteGuard<'_> {
         self.data.write()
     }
 
     #[inline(always)]
-    fn borrow(&'a self) -> L::ReadGuard {
+    fn borrow(&self) -> L::ReadGuard<'_> {
         self.data.read()
     }
 
@@ -193,12 +212,12 @@ where
     }
 }
 
-impl<'a, T, L> SensorRead<'a> for SyncronizedDataObserver<'a, L>
+impl<'a, T, L> SensorRead for SyncronizedDataObserver<'a, L>
 where
-    L: RwLock<'a, Target = T> + 'a,
+    L: RwLock<Target = T>,
 {
     type Lock = L;
-    fn borrow(&'a self) -> L::ReadGuard {
+    fn borrow(&self) -> L::ReadGuard<'_> {
         self.inner.data.read()
     }
 
@@ -225,19 +244,40 @@ pub struct FusedSensorObserver<T1, T2, L, F> {
     compute_func: F,
 }
 
-impl<'a, T1, O1, L1, T2, O2, L2, O, L, F> SensorRead<'a> for FusedSensorObserver<T1, T2, L, F>
+impl<'a, T1, T2, L, F> FusedSensorObserver<T1, T2, L, F>
 where
-    T1: SensorRead<'a, Lock = L1>,
-    L1: RwLock<'a, Target = O1>,
-    T2: SensorRead<'a, Lock = L2>,
-    L2: RwLock<'a, Target = O2>,
-    L: RwLock<'a, Target = O>,
-    F: FnMut(&O1, &O2) -> O,
+    T1: SensorRead,
+    T2: SensorRead,
+    L: RwLock,
+    F: FnMut(
+        &<<T1 as SensorRead>::Lock as RwLock>::Target,
+        &<<T2 as SensorRead>::Lock as RwLock>::Target,
+    ) -> <L as RwLock>::Target,
+{
+    #[inline(always)]
+    pub fn new(a: T1, b: T2, mut f: F) -> Self {
+        let lock = L::new(f(&a.borrow(), &b.borrow()));
+        Self {
+            t1: a,
+            t2: b,
+            lock,
+            compute_func: f,
+        }
+    }
+}
+pub type RwSensor<T> = SyncronizedData<parking_lot::RwLock<T>>;
+
+impl<T1, T2, L, F> SensorRead for FusedSensorObserver<T1, T2, L, F>
+where
+    T1: SensorRead,
+    T2: SensorRead,
+    L: RwLock,
+    F: FnMut(&<T1::Lock as RwLock>::Target, &<T2::Lock as RwLock>::Target) -> L::Target,
 {
     type Lock = L;
 
     #[inline]
-    fn borrow_and_update(&'a mut self) -> L::ReadGuard {
+    fn borrow_and_update<'c>(&'c mut self) -> L::ReadGuard<'_> {
         let new_val = (self.compute_func)(&self.t1.borrow(), &self.t2.borrow());
         let mut guard = self.lock.write();
         *guard = new_val;
@@ -245,7 +285,7 @@ where
     }
 
     #[inline(always)]
-    fn borrow(&'a self) -> <Self::Lock as RwLock<'a>>::ReadGuard {
+    fn borrow(&self) -> L::ReadGuard<'_> {
         self.lock.read()
     }
 
@@ -268,4 +308,20 @@ where
 }
 
 #[cfg(test)]
-mod tests {}
+mod tests {
+    use crate::{FusedSensorObserver, RwSensor, SensorRead};
+
+    #[test]
+    fn test_1() {
+        let s1 = RwSensor::new(-3);
+        let s2 = RwSensor::new(5);
+
+        let x = FusedSensorObserver::<_, _, parking_lot::RwLock<_>, _>::new(
+            s1.spawn_observer(),
+            s2.spawn_observer(),
+            |x, y| *x + *y,
+        );
+
+        assert_eq!(*x.borrow(), 2);
+    }
+}
