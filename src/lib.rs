@@ -7,7 +7,6 @@ use core::{
 };
 
 use derived_deref::{Deref, DerefMut};
-use parking_lot::FusedSensorObserver;
 
 pub trait DataLock: DataReadLock {
     type WriteGuard<'write>: Deref<Target = Self::Target> + DerefMut
@@ -241,7 +240,7 @@ where
 
     #[inline(always)]
     fn has_changed(&self) -> bool {
-        self.rev == self.inner.rev.load(Ordering::SeqCst)
+        self.rev != self.inner.rev.load(Ordering::SeqCst)
     }
     #[inline(always)]
     fn cached(&self) -> bool {
@@ -284,7 +283,7 @@ where
 
     #[inline]
     fn pull_updated(&mut self) -> <Self::Lock as DataReadLock>::ReadGuard<'_> {
-        *self.cached = (self.compute_func)(&self.a.pull(), &self.b.pull());
+        *self.cached = (self.compute_func)(&self.a.pull_updated(), &self.b.pull_updated());
         &self.cached
     }
 
@@ -329,9 +328,13 @@ mod tests {
             .spawn_observer()
             .fuse(s2.spawn_observer(), |x, y| *x + *y);
 
-        assert_eq!(*x.pull(), 2);
-        *s1.write() = 3;
+        assert!(!x.has_changed());
 
+        assert_eq!(*x.pull(), 2);
+        s1.update(3);
+        assert!(x.has_changed());
+        assert_eq!(*x.pull(), 2);
         assert_eq!(*x.pull_updated(), 8);
+        assert!(!x.has_changed());
     }
 }
