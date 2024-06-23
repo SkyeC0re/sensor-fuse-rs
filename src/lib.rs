@@ -132,8 +132,11 @@ impl<T> RevisedData<T> {
 
 trait SensorIn {
     type Lock: DataLock;
+    /// Provide write access to the underlying sensor data.
     fn write(&self) -> <Self::Lock as DataLock>::WriteGuard<'_>;
+    /// Provide at least read access to the underlying sensor data.
     fn read(&self) -> <Self::Lock as DataReadLock>::ReadGuard<'_>;
+    /// Update the value of the sensor and notify observers.
     #[inline]
     fn update(&self, sample: <Self::Lock as DataReadLock>::Target) {
         let mut guard = self.write();
@@ -141,6 +144,7 @@ trait SensorIn {
         self.mark_all_unseen();
         drop(guard);
     }
+    /// Modify the sensor value in place and notify observers.
     #[inline(always)]
     fn modify_with(&self, f: impl FnOnce(&mut <Self::Lock as DataReadLock>::Target)) {
         let mut guard = self.write();
@@ -148,6 +152,8 @@ trait SensorIn {
         self.mark_all_unseen();
         drop(guard);
     }
+
+    /// Mark the current sensor value as unseen to all observers.
     fn mark_all_unseen(&self);
 }
 
