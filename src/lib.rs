@@ -1,10 +1,12 @@
+pub mod parking_lot;
+pub mod std_sync;
+
 use core::{
     ops::{Deref, DerefMut},
     sync::atomic::{AtomicUsize, Ordering},
 };
-use parking_lot;
 
-pub trait RwLock {
+pub trait DataLock {
     type Target;
     type ReadGuard<'read>: Deref<Target = Self::Target>
     where
@@ -48,82 +50,36 @@ pub trait RwLock {
     }
 }
 
-impl<T> RwLock for parking_lot::RwLock<T> {
-    type Target = T;
-    type ReadGuard<'me> = parking_lot::RwLockReadGuard<'me, T> where T: 'me;
-    type WriteGuard<'me> = parking_lot::RwLockWriteGuard<'me, T> where T: 'me;
-
-    #[inline(always)]
-    fn new(init: T) -> Self {
-        Self::new(init)
-    }
-
-    #[inline(always)]
-    fn read(&self) -> Self::ReadGuard<'_> {
-        self.read()
-    }
-
-    #[inline(always)]
-    fn write(&self) -> Self::WriteGuard<'_> {
-        self.write()
-    }
-
-    #[inline(always)]
-    fn downgrade<'a>(&'a self, write_guard: Self::WriteGuard<'a>) -> Self::ReadGuard<'a> {
-        parking_lot::RwLockWriteGuard::downgrade(write_guard)
-    }
-}
-
-impl<T> RwLock for std::sync::RwLock<T> {
-    type Target = T;
-
-    type ReadGuard<'read> = std::sync::RwLockReadGuard<'read, T> where T: 'read;
-
-    type WriteGuard<'write> = std::sync::RwLockWriteGuard<'write, T> where T: 'write;
-
-    fn new(init: Self::Target) -> Self {
-        Self::new(init)
-    }
-
-    fn read(&self) -> Self::ReadGuard<'_> {
-        self.read().unwrap()
-    }
-
-    fn write(&self) -> Self::WriteGuard<'_> {
-        self.write().unwrap()
-    }
-}
-
-pub struct SyncronizedData<L> {
+pub struct RevisedData<L> {
     pub data: L,
     rev: AtomicUsize,
 }
 
-impl<L> SyncronizedData<L>
+impl<L> RevisedData<L>
 where
-    L: RwLock,
+    L: DataLock,
 {
     pub fn new(init: L::Target) -> Self {
         Self {
-            data: RwLock::new(init),
+            data: DataLock::new(init),
             rev: AtomicUsize::default(),
         }
     }
 
-    pub fn spawn_observer(&self) -> SyncronizedDataObserver<L> {
-        SyncronizedDataObserver {
+    pub fn spawn_observer(&self) -> RevisedDataObserver<L> {
+        RevisedDataObserver {
             inner: self,
             rev: self.rev.load(Ordering::SeqCst),
         }
     }
 }
 
-pub struct SyncronizedDataObserver<'a, L> {
-    inner: &'a SyncronizedData<L>,
+pub struct RevisedDataObserver<'a, L> {
+    inner: &'a RevisedData<L>,
     rev: usize,
 }
 
-impl<T> SyncronizedData<T> {
+impl<T> RevisedData<T> {
     pub fn update_rev(&self) {
         self.rev.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     }
@@ -134,18 +90,18 @@ impl<T> SyncronizedData<T> {
 }
 
 trait SensorWrite {
-    type Lock: RwLock;
-    fn borrow_mut(&self) -> <Self::Lock as RwLock>::WriteGuard<'_>;
-    fn borrow(&self) -> <Self::Lock as RwLock>::ReadGuard<'_>;
+    type Lock: DataLock;
+    fn borrow_mut(&self) -> <Self::Lock as DataLock>::WriteGuard<'_>;
+    fn borrow(&self) -> <Self::Lock as DataLock>::ReadGuard<'_>;
     #[inline]
-    fn update(&self, sample: <Self::Lock as RwLock>::Target) {
+    fn update(&self, sample: <Self::Lock as DataLock>::Target) {
         let mut guard = self.borrow_mut();
         *guard = sample;
         self.mark_all_unseen();
         drop(guard);
     }
     #[inline(always)]
-    fn modify_with(&self, f: impl FnOnce(&mut <Self::Lock as RwLock>::Target)) {
+    fn modify_with(&self, f: impl FnOnce(&mut <Self::Lock as DataLock>::Target)) {
         let mut guard = self.borrow_mut();
         f(&mut guard);
         self.mark_all_unseen();
@@ -155,22 +111,22 @@ trait SensorWrite {
 }
 
 pub trait SensorRead {
-    type Lock: RwLock;
+    type Lock: DataLock;
 
     #[inline(always)]
-    fn borrow_and_update(&mut self) -> <Self::Lock as RwLock>::ReadGuard<'_> {
+    fn borrow_and_update(&mut self) -> <Self::Lock as DataLock>::ReadGuard<'_> {
         self.mark_seen();
         self.borrow()
     }
-    fn borrow(&self) -> <Self::Lock as RwLock>::ReadGuard<'_>;
+    fn borrow(&self) -> <Self::Lock as DataLock>::ReadGuard<'_>;
     fn mark_seen(&mut self);
     fn mark_unseen(&mut self);
     fn has_changed(&self) -> bool;
 }
 
-impl<T, L> SensorWrite for SyncronizedData<L>
+impl<T, L> SensorWrite for RevisedData<L>
 where
-    L: RwLock<Target = T>,
+    L: DataLock<Target = T>,
 {
     type Lock = L;
 
@@ -192,8 +148,8 @@ where
 
 impl<'a, T, L, S> SensorWrite for S
 where
-    L: RwLock<Target = T>,
-    S: Deref<Target = SyncronizedData<L>> + ?Sized,
+    L: DataLock<Target = T>,
+    S: Deref<Target = RevisedData<L>> + ?Sized,
 {
     type Lock = L;
     #[inline(always)]
@@ -212,9 +168,9 @@ where
     }
 }
 
-impl<'a, T, L> SensorRead for SyncronizedDataObserver<'a, L>
+impl<'a, T, L> SensorRead for RevisedDataObserver<'a, L>
 where
-    L: RwLock<Target = T>,
+    L: DataLock<Target = T>,
 {
     type Lock = L;
     fn borrow(&self) -> L::ReadGuard<'_> {
@@ -237,91 +193,93 @@ where
     }
 }
 
-pub struct FusedSensorObserver<T1, T2, L, F> {
-    t1: T1,
-    t2: T2,
-    lock: L,
+pub struct RevisedDataObserverFused<A, B, L, F> {
+    a: A,
+    b: B,
+    cached: L,
     compute_func: F,
 }
 
-impl<'a, T1, T2, L, F> FusedSensorObserver<T1, T2, L, F>
+impl<'a, A, B, L, F> RevisedDataObserverFused<A, B, L, F>
 where
-    T1: SensorRead,
-    T2: SensorRead,
-    L: RwLock,
+    A: SensorRead,
+    B: SensorRead,
+    L: DataLock,
     F: FnMut(
-        &<<T1 as SensorRead>::Lock as RwLock>::Target,
-        &<<T2 as SensorRead>::Lock as RwLock>::Target,
-    ) -> <L as RwLock>::Target,
+        &<<A as SensorRead>::Lock as DataLock>::Target,
+        &<<B as SensorRead>::Lock as DataLock>::Target,
+    ) -> <L as DataLock>::Target,
 {
     #[inline(always)]
-    pub fn new(a: T1, b: T2, mut f: F) -> Self {
-        let lock = L::new(f(&a.borrow(), &b.borrow()));
+    pub fn new(a: A, b: B, mut f: F) -> Self {
+        let cached = L::new(f(&a.borrow(), &b.borrow()));
         Self {
-            t1: a,
-            t2: b,
-            lock,
+            a,
+            b,
+            cached,
             compute_func: f,
         }
     }
 }
-pub type RwSensor<T> = SyncronizedData<parking_lot::RwLock<T>>;
 
-impl<T1, T2, L, F> SensorRead for FusedSensorObserver<T1, T2, L, F>
+impl<A, B, L, F> SensorRead for RevisedDataObserverFused<A, B, L, F>
 where
-    T1: SensorRead,
-    T2: SensorRead,
-    L: RwLock,
-    F: FnMut(&<T1::Lock as RwLock>::Target, &<T2::Lock as RwLock>::Target) -> L::Target,
+    A: SensorRead,
+    B: SensorRead,
+    L: DataLock,
+    F: FnMut(&<A::Lock as DataLock>::Target, &<B::Lock as DataLock>::Target) -> L::Target,
 {
     type Lock = L;
 
     #[inline]
     fn borrow_and_update<'c>(&'c mut self) -> L::ReadGuard<'_> {
-        let new_val = (self.compute_func)(&self.t1.borrow(), &self.t2.borrow());
-        let mut guard = self.lock.write();
+        let new_val = (self.compute_func)(&self.a.borrow(), &self.b.borrow());
+        let mut guard = self.cached.write();
         *guard = new_val;
-        self.lock.downgrade(guard)
+        self.cached.downgrade(guard)
     }
 
     #[inline(always)]
     fn borrow(&self) -> L::ReadGuard<'_> {
-        self.lock.read()
+        self.cached.read()
     }
 
     #[inline(always)]
     fn mark_seen(&mut self) {
-        self.t1.mark_seen();
-        self.t2.mark_seen();
+        self.a.mark_seen();
+        self.b.mark_seen();
     }
 
     #[inline(always)]
     fn mark_unseen(&mut self) {
-        self.t1.mark_unseen();
-        self.t2.mark_unseen();
+        self.a.mark_unseen();
+        self.b.mark_unseen();
     }
 
     #[inline(always)]
     fn has_changed(&self) -> bool {
-        self.t1.has_changed() || self.t2.has_changed()
+        self.a.has_changed() || self.b.has_changed()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::{FusedSensorObserver, RwSensor, SensorRead};
+    use crate::{
+        parking_lot::{FusedSensorObserver, Sensor},
+        SensorRead, SensorWrite,
+    };
 
     #[test]
     fn test_1() {
-        let s1 = RwSensor::new(-3);
-        let s2 = RwSensor::new(5);
+        let s1 = Sensor::new(-3);
+        let s2 = Sensor::new(5);
 
-        let x = FusedSensorObserver::<_, _, parking_lot::RwLock<_>, _>::new(
-            s1.spawn_observer(),
-            s2.spawn_observer(),
-            |x, y| *x + *y,
-        );
+        let mut x =
+            FusedSensorObserver::new(s1.spawn_observer(), s2.spawn_observer(), |x, y| *x + *y);
 
         assert_eq!(*x.borrow(), 2);
+        *s1.borrow_mut() = 3;
+
+        assert_eq!(*x.borrow_and_update(), 8);
     }
 }
