@@ -31,3 +31,33 @@ impl<T> DataLock for parking_lot::RwLock<T> {
         parking_lot::RwLockWriteGuard::downgrade(write_guard)
     }
 }
+
+impl<T> DataLock for parking_lot::Mutex<T> {
+    type Target = T;
+    type ReadGuard<'read> = parking_lot::MutexGuard<'read, T> where T: 'read;
+    type WriteGuard<'write> = parking_lot::MutexGuard<'write, T> where T: 'write;
+
+    #[inline(always)]
+    fn new(init: T) -> Self {
+        Self::new(init)
+    }
+
+    #[inline(always)]
+    fn read(&self) -> Self::ReadGuard<'_> {
+        self.lock()
+    }
+
+    #[inline(always)]
+    fn write(&self) -> Self::WriteGuard<'_> {
+        self.lock()
+    }
+
+    #[inline(always)]
+    fn downgrade<'a>(&'a self, write_guard: Self::WriteGuard<'a>) -> Self::ReadGuard<'a> {
+        write_guard
+    }
+    #[inline(always)]
+    fn upgrade<'a>(&'a self, read_guard: Self::WriteGuard<'a>) -> Self::WriteGuard<'a> {
+        read_guard
+    }
+}

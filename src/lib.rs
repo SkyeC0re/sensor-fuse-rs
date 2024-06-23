@@ -19,9 +19,9 @@ pub trait DataLock {
 
     /// Contruct a new lock from the given initial value.
     fn new(init: Self::Target) -> Self;
-    /// Immutable access to the current value inside the lock.
+    /// Provides at least immutable access to the current value inside the lock.
     fn read(&self) -> Self::ReadGuard<'_>;
-    /// Mutable access to the current value inside the lock.
+    /// Provides mutable access to the current value inside the lock.
     fn write(&self) -> Self::WriteGuard<'_>;
 
     /// Downgrade mutable access to immutable access for a write guard originating from this lock instance.
@@ -89,20 +89,20 @@ impl<T> RevisedData<T> {
     }
 }
 
-trait SensorWrite {
+trait SensorIn {
     type Lock: DataLock;
-    fn borrow_mut(&self) -> <Self::Lock as DataLock>::WriteGuard<'_>;
-    fn borrow(&self) -> <Self::Lock as DataLock>::ReadGuard<'_>;
+    fn write(&self) -> <Self::Lock as DataLock>::WriteGuard<'_>;
+    fn read(&self) -> <Self::Lock as DataLock>::ReadGuard<'_>;
     #[inline]
     fn update(&self, sample: <Self::Lock as DataLock>::Target) {
-        let mut guard = self.borrow_mut();
+        let mut guard = self.write();
         *guard = sample;
         self.mark_all_unseen();
         drop(guard);
     }
     #[inline(always)]
     fn modify_with(&self, f: impl FnOnce(&mut <Self::Lock as DataLock>::Target)) {
-        let mut guard = self.borrow_mut();
+        let mut guard = self.write();
         f(&mut guard);
         self.mark_all_unseen();
         drop(guard);
@@ -110,33 +110,41 @@ trait SensorWrite {
     fn mark_all_unseen(&self);
 }
 
-pub trait SensorRead {
+pub trait SensorOut {
     type Lock: DataLock;
 
+    /// Returns the latest value obtainable by the sensor. The sesnor's internal cache is guaranteed to
+    /// be updated after this call if the sensor is cached.
     #[inline(always)]
-    fn borrow_and_update(&mut self) -> <Self::Lock as DataLock>::ReadGuard<'_> {
+    fn pull_updated(&mut self) -> <Self::Lock as DataLock>::ReadGuard<'_> {
         self.mark_seen();
-        self.borrow()
+        self.pull()
     }
-    fn borrow(&self) -> <Self::Lock as DataLock>::ReadGuard<'_>;
+    /// Returns the current cached value of the sensor. This is guaranteed to be the latest value if the sensor
+    /// is not cached.
+    fn pull(&self) -> <Self::Lock as DataLock>::ReadGuard<'_>;
+    /// Mark the current sensor data as seen.
     fn mark_seen(&mut self);
+    /// Mark the current sensor data as unseen.
     fn mark_unseen(&mut self);
     fn has_changed(&self) -> bool;
+    /// Returns true if `pull` may produce stale results.
+    fn cached(&self) -> bool;
 }
 
-impl<T, L> SensorWrite for RevisedData<L>
+impl<T, L> SensorIn for RevisedData<L>
 where
     L: DataLock<Target = T>,
 {
     type Lock = L;
 
     #[inline(always)]
-    fn borrow_mut(&self) -> L::WriteGuard<'_> {
+    fn write(&self) -> L::WriteGuard<'_> {
         self.data.write()
     }
 
     #[inline(always)]
-    fn borrow(&self) -> L::ReadGuard<'_> {
+    fn read(&self) -> L::ReadGuard<'_> {
         self.data.read()
     }
 
@@ -146,19 +154,19 @@ where
     }
 }
 
-impl<'a, T, L, S> SensorWrite for S
+impl<T, L, S> SensorIn for S
 where
     L: DataLock<Target = T>,
     S: Deref<Target = RevisedData<L>> + ?Sized,
 {
     type Lock = L;
     #[inline(always)]
-    fn borrow_mut(&self) -> L::WriteGuard<'_> {
+    fn write(&self) -> L::WriteGuard<'_> {
         self.data.write()
     }
 
     #[inline(always)]
-    fn borrow(&self) -> L::ReadGuard<'_> {
+    fn read(&self) -> L::ReadGuard<'_> {
         self.data.read()
     }
 
@@ -168,21 +176,23 @@ where
     }
 }
 
-impl<'a, T, L> SensorRead for RevisedDataObserver<'a, L>
+impl<'a, T, L> SensorOut for RevisedDataObserver<'a, L>
 where
     L: DataLock<Target = T>,
 {
     type Lock = L;
-    fn borrow(&self) -> L::ReadGuard<'_> {
+
+    #[inline(always)]
+    fn pull(&self) -> L::ReadGuard<'_> {
         self.inner.data.read()
     }
 
-    #[inline]
+    #[inline(always)]
     fn mark_seen(&mut self) {
         self.rev = self.inner.rev.load(Ordering::SeqCst);
     }
 
-    #[inline]
+    #[inline(always)]
     fn mark_unseen(&mut self) {
         self.rev = self.inner.rev.load(Ordering::SeqCst).wrapping_sub(1);
     }
@@ -190,6 +200,10 @@ where
     #[inline(always)]
     fn has_changed(&self) -> bool {
         self.rev == self.inner.rev.load(Ordering::SeqCst)
+    }
+    #[inline(always)]
+    fn cached(&self) -> bool {
+        false
     }
 }
 
@@ -202,17 +216,17 @@ pub struct RevisedDataObserverFused<A, B, L, F> {
 
 impl<'a, A, B, L, F> RevisedDataObserverFused<A, B, L, F>
 where
-    A: SensorRead,
-    B: SensorRead,
+    A: SensorOut,
+    B: SensorOut,
     L: DataLock,
     F: FnMut(
-        &<<A as SensorRead>::Lock as DataLock>::Target,
-        &<<B as SensorRead>::Lock as DataLock>::Target,
+        &<<A as SensorOut>::Lock as DataLock>::Target,
+        &<<B as SensorOut>::Lock as DataLock>::Target,
     ) -> <L as DataLock>::Target,
 {
     #[inline(always)]
     pub fn new(a: A, b: B, mut f: F) -> Self {
-        let cached = L::new(f(&a.borrow(), &b.borrow()));
+        let cached = L::new(f(&a.pull(), &b.pull()));
         Self {
             a,
             b,
@@ -222,25 +236,25 @@ where
     }
 }
 
-impl<A, B, L, F> SensorRead for RevisedDataObserverFused<A, B, L, F>
+impl<A, B, L, F> SensorOut for RevisedDataObserverFused<A, B, L, F>
 where
-    A: SensorRead,
-    B: SensorRead,
+    A: SensorOut,
+    B: SensorOut,
     L: DataLock,
     F: FnMut(&<A::Lock as DataLock>::Target, &<B::Lock as DataLock>::Target) -> L::Target,
 {
     type Lock = L;
 
     #[inline]
-    fn borrow_and_update<'c>(&'c mut self) -> L::ReadGuard<'_> {
-        let new_val = (self.compute_func)(&self.a.borrow(), &self.b.borrow());
+    fn pull_updated(&mut self) -> L::ReadGuard<'_> {
+        let new_val = (self.compute_func)(&self.a.pull(), &self.b.pull());
         let mut guard = self.cached.write();
         *guard = new_val;
         self.cached.downgrade(guard)
     }
 
     #[inline(always)]
-    fn borrow(&self) -> L::ReadGuard<'_> {
+    fn pull(&self) -> L::ReadGuard<'_> {
         self.cached.read()
     }
 
@@ -260,13 +274,18 @@ where
     fn has_changed(&self) -> bool {
         self.a.has_changed() || self.b.has_changed()
     }
+
+    #[inline(always)]
+    fn cached(&self) -> bool {
+        true
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use crate::{
         parking_lot::{FusedSensorObserver, Sensor},
-        SensorRead, SensorWrite,
+        SensorIn, SensorOut,
     };
 
     #[test]
@@ -277,9 +296,9 @@ mod tests {
         let mut x =
             FusedSensorObserver::new(s1.spawn_observer(), s2.spawn_observer(), |x, y| *x + *y);
 
-        assert_eq!(*x.borrow(), 2);
-        *s1.borrow_mut() = 3;
+        assert_eq!(*x.pull(), 2);
+        *s1.write() = 3;
 
-        assert_eq!(*x.borrow_and_update(), 8);
+        assert_eq!(*x.pull_updated(), 8);
     }
 }
