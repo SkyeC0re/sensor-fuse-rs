@@ -1,19 +1,19 @@
 use parking_lot;
 
-use crate::{DataLock, DataLockFactory, DataReadLock, RevisedData, RevisedDataObserverFused};
+use crate::{DataLockFactory, DataReadLock, DataWriteLock, RevisedData};
 
 pub type RwSensor<T> = RevisedData<parking_lot::RwLock<T>>;
 pub type MutexSensor<T> = RevisedData<parking_lot::Mutex<T>>;
-pub type FusedSensorObserver<A, B, O, F> =
-    RevisedDataObserverFused<A, B, parking_lot::RwLock<O>, F>;
 
 impl<T> RwSensor<T> {
+    #[inline(always)]
     pub fn new(init: T) -> Self {
         Self::new_from::<parking_lot::RwLock<T>>(init)
     }
 }
 
 impl<T> MutexSensor<T> {
+    #[inline(always)]
     pub fn new(init: T) -> Self {
         Self::new_from::<parking_lot::Mutex<T>>(init)
     }
@@ -28,7 +28,7 @@ impl<T> DataReadLock for parking_lot::RwLock<T> {
     }
 }
 
-impl<T> DataLock for parking_lot::RwLock<T> {
+impl<T> DataWriteLock for parking_lot::RwLock<T> {
     type WriteGuard<'write> = parking_lot::RwLockWriteGuard<'write, T> where T: 'write;
 
     #[inline(always)]
@@ -51,7 +51,7 @@ impl<T> DataLockFactory<T> for parking_lot::RwLock<T> {
     }
 }
 
-impl<T> DataLock for parking_lot::Mutex<T> {
+impl<T> DataWriteLock for parking_lot::Mutex<T> {
     type WriteGuard<'write> = parking_lot::MutexGuard<'write, T> where T: 'write;
     #[inline(always)]
     fn write(&self) -> Self::WriteGuard<'_> {

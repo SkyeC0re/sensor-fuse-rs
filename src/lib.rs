@@ -8,7 +8,7 @@ use core::{
 
 use derived_deref::{Deref, DerefMut};
 
-pub trait DataLock: DataReadLock {
+pub trait DataWriteLock: DataReadLock {
     type WriteGuard<'write>: Deref<Target = Self::Target> + DerefMut
     where
         Self::Target: 'write,
@@ -69,7 +69,7 @@ impl<T> DataReadLock for FalseReadLock<T> {
 }
 
 pub trait DataLockFactory<T> {
-    type Lock: DataLock<Target = T>;
+    type Lock: DataWriteLock<Target = T>;
     /// Contruct a new lock from the given initial value.
     fn new(init: T) -> Self::Lock;
 }
@@ -81,7 +81,7 @@ pub struct RevisedData<T> {
 
 impl<L> RevisedData<L>
 where
-    L: DataLock,
+    L: DataWriteLock,
 {
     pub fn new_from<LF: DataLockFactory<L::Target, Lock = L>>(init: L::Target) -> Self {
         Self {
@@ -103,23 +103,6 @@ pub struct RevisedDataObserver<'a, L> {
     rev: usize,
 }
 
-impl<'a, L> RevisedDataObserver<'a, L>
-where
-    Self: SensorOut,
-{
-    pub fn fuse<B, T, F>(self, other: B, f: F) -> RevisedDataObserverFused<Self, B, T, F>
-    where
-        B: SensorOut + 'a,
-        F: 'a
-            + FnMut(
-                &<<Self as SensorOut>::Lock as DataReadLock>::Target,
-                &<<B as SensorOut>::Lock as DataReadLock>::Target,
-            ) -> T,
-    {
-        RevisedDataObserverFused::fuse_with(self, other, f)
-    }
-}
-
 impl<T> RevisedData<T> {
     pub fn update_rev(&self) {
         self.rev.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
@@ -131,9 +114,9 @@ impl<T> RevisedData<T> {
 }
 
 trait SensorIn {
-    type Lock: DataLock;
+    type Lock: DataWriteLock;
     /// Provide write access to the underlying sensor data.
-    fn write(&self) -> <Self::Lock as DataLock>::WriteGuard<'_>;
+    fn write(&self) -> <Self::Lock as DataWriteLock>::WriteGuard<'_>;
     /// Provide at least read access to the underlying sensor data.
     fn read(&self) -> <Self::Lock as DataReadLock>::ReadGuard<'_>;
     /// Update the value of the sensor and notify observers.
@@ -177,11 +160,31 @@ pub trait SensorOut {
     fn has_changed(&self) -> bool;
     /// Returns true if `pull` may produce stale results.
     fn cached(&self) -> bool;
+
+    fn fuse<B, T, F>(self, other: B, f: F) -> RevisedDataObserverFused<Self, B, T, F>
+    where
+        Self: Sized,
+        B: SensorOut,
+        F: FnMut(
+            &<<Self as SensorOut>::Lock as DataReadLock>::Target,
+            &<<B as SensorOut>::Lock as DataReadLock>::Target,
+        ) -> T,
+    {
+        RevisedDataObserverFused::fuse_with(self, other, f)
+    }
+
+    fn map<T, F>(self, f: F) -> RevisedDataObserverMapped<Self, T, F>
+    where
+        Self: Sized,
+        F: FnMut(&<<Self as SensorOut>::Lock as DataReadLock>::Target) -> T,
+    {
+        RevisedDataObserverMapped::map_with(self, f)
+    }
 }
 
 impl<T, L> SensorIn for RevisedData<L>
 where
-    L: DataLock<Target = T>,
+    L: DataWriteLock<Target = T>,
 {
     type Lock = L;
 
@@ -203,7 +206,7 @@ where
 
 impl<T, L, S> SensorIn for S
 where
-    L: DataLock<Target = T>,
+    L: DataWriteLock<Target = T>,
     S: Deref<Target = RevisedData<L>> + ?Sized,
 {
     type Lock = L;
@@ -254,11 +257,67 @@ where
     }
 }
 
+pub struct RevisedDataObserverMapped<A, T, F> {
+    a: A,
+    cached: FalseReadLock<T>,
+    map: F,
+}
+
+impl<A, T, F> RevisedDataObserverMapped<A, T, F>
+where
+    A: SensorOut,
+    F: FnMut(&<A::Lock as DataReadLock>::Target) -> T,
+{
+    #[inline(always)]
+    pub fn map_with(a: A, mut f: F) -> Self {
+        let cached = FalseReadLock(f(&a.pull()));
+        Self { a, cached, map: f }
+    }
+}
+
+impl<A, T, F> SensorOut for RevisedDataObserverMapped<A, T, F>
+where
+    A: SensorOut,
+    F: FnMut(&<A::Lock as DataReadLock>::Target) -> T,
+{
+    type Lock = FalseReadLock<T>;
+
+    #[inline]
+    fn pull_updated(&mut self) -> <Self::Lock as DataReadLock>::ReadGuard<'_> {
+        *self.cached = (self.map)(&self.a.pull_updated());
+        &self.cached
+    }
+
+    #[inline(always)]
+    fn pull(&self) -> <Self::Lock as DataReadLock>::ReadGuard<'_> {
+        &self.cached
+    }
+
+    #[inline(always)]
+    fn mark_seen(&mut self) {
+        self.a.mark_seen();
+    }
+
+    #[inline(always)]
+    fn mark_unseen(&mut self) {
+        self.a.mark_unseen();
+    }
+
+    #[inline(always)]
+    fn has_changed(&self) -> bool {
+        self.a.has_changed()
+    }
+
+    #[inline(always)]
+    fn cached(&self) -> bool {
+        true
+    }
+}
 pub struct RevisedDataObserverFused<A, B, T, F> {
     a: A,
     b: B,
     cached: FalseReadLock<T>,
-    compute_func: F,
+    fuse: F,
 }
 
 impl<A, B, T, F> RevisedDataObserverFused<A, B, T, F>
@@ -274,7 +333,7 @@ where
             a,
             b,
             cached,
-            compute_func: f,
+            fuse: f,
         }
     }
 }
@@ -289,7 +348,7 @@ where
 
     #[inline]
     fn pull_updated(&mut self) -> <Self::Lock as DataReadLock>::ReadGuard<'_> {
-        *self.cached = (self.compute_func)(&self.a.pull_updated(), &self.b.pull_updated());
+        *self.cached = (self.fuse)(&self.a.pull_updated(), &self.b.pull_updated());
         &self.cached
     }
 
@@ -342,5 +401,8 @@ mod tests {
         assert_eq!(*x.pull(), 2);
         assert_eq!(*x.pull_updated(), 8);
         assert!(!x.has_changed());
+        let x = x.map(|x| x + 2);
+
+        assert_eq!(*x.pull(), 10);
     }
 }
