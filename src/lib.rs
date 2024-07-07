@@ -1,13 +1,16 @@
 pub mod parking_lot;
 pub mod std_sync;
 
+use core::marker::PhantomData;
 use core::{
     ops::{Deref, DerefMut},
     sync::atomic::{AtomicUsize, Ordering},
 };
-use std::marker::PhantomData;
 
 use derived_deref::{Deref, DerefMut};
+
+const CLOSED_BIT: usize = 1;
+const STEP_SIZE: usize = 2;
 
 pub trait DataWriteLock: DataReadLock {
     type WriteGuard<'write>: Deref<Target = Self::Target> + DerefMut
@@ -22,7 +25,7 @@ pub trait DataWriteLock: DataReadLock {
     ///
     /// # Panics
     ///
-    /// Behaviour is only well defined if and only if `write_guard` originates from self.
+    /// Behaviour is only well defined if and only if `write_guard` originates from `self`.
     /// May panic if `wirte_guard` does not originate from `self`. Implementations may also downgrade the guard
     /// regardless or return a new read guard originating from `self`.
     #[inline(always)]
@@ -34,7 +37,7 @@ pub trait DataWriteLock: DataReadLock {
     ///
     /// # Panics
     ///
-    /// Behaviour is only well defined if and only if `read_guard` originates from self.
+    /// Behaviour is only well defined if and only if `read_guard` originates from `self`.
     /// May panic if `read_guard` does not originate from `self`. Implementations may also upgrade the guard
     /// regardless or return a new write guard originating from `self`.
     #[inline(always)]
@@ -98,37 +101,26 @@ pub trait DataLockFactory<T> {
 
 pub struct RevisedData<T> {
     pub data: T,
-    rev: AtomicUsize,
-}
-
-impl<T> Clone for RevisedData<T>
-where
-    T: Clone,
-{
-    #[inline(always)]
-    fn clone(&self) -> Self {
-        Self {
-            data: self.data.clone(),
-            rev: AtomicUsize::new(self.rev.load(Ordering::SeqCst)),
-        }
-    }
+    version: AtomicUsize,
 }
 
 impl<L> RevisedData<L>
 where
     L: DataWriteLock,
 {
+    #[inline(always)]
     pub fn new_from<LF: DataLockFactory<L::Target, Lock = L>>(init: L::Target) -> Self {
         Self {
             data: LF::new(init),
-            rev: AtomicUsize::default(),
+            version: AtomicUsize::default(),
         }
     }
 
+    #[inline(always)]
     pub fn spawn_observer(&self) -> RevisedDataObserver<L> {
         RevisedDataObserver {
             inner: self,
-            rev: self.rev.load(Ordering::SeqCst),
+            version: self.version.load(Ordering::Acquire),
         }
     }
 }
@@ -136,16 +128,19 @@ where
 #[derive(Clone)]
 pub struct RevisedDataObserver<'a, L> {
     inner: &'a RevisedData<L>,
-    rev: usize,
+    version: usize,
 }
 
 impl<T> RevisedData<T> {
-    pub fn update_rev(&self) {
-        self.rev.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    #[inline(always)]
+    pub fn update_version(&self, step_size: usize) {
+        self.version
+            .fetch_add(step_size, core::sync::atomic::Ordering::Release);
     }
 
-    pub fn rev(&self) -> usize {
-        self.rev.load(core::sync::atomic::Ordering::SeqCst)
+    #[inline(always)]
+    pub fn version(&self) -> usize {
+        self.version.load(core::sync::atomic::Ordering::Acquire)
     }
 }
 
@@ -164,7 +159,7 @@ trait SensorIn {
         drop(guard);
     }
     /// Modify the sensor value in place and notify observers.
-    #[inline(always)]
+    #[inline]
     fn modify_with(&self, f: impl FnOnce(&mut <Self::Lock as ReadGuardSpecifier>::Target)) {
         let mut guard = self.write();
         f(&mut guard);
@@ -177,18 +172,14 @@ trait SensorIn {
 }
 
 pub trait SensorOut {
-    type Output: ReadGuardSpecifier;
+    type Lock: ReadGuardSpecifier;
 
     /// Returns the latest value obtainable by the sensor. The sesnor's internal cache is guaranteed to
     /// be updated after this call if the sensor is cached.
-    #[inline(always)]
-    fn pull_updated(&mut self) -> <Self::Output as ReadGuardSpecifier>::ReadGuard<'_> {
-        self.mark_seen();
-        self.pull()
-    }
+    fn pull_updated(&mut self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_>;
     /// Returns the current cached value of the sensor. This is guaranteed to be the latest value if the sensor
     /// is not cached.
-    fn pull(&mut self) -> <Self::Output as ReadGuardSpecifier>::ReadGuard<'_>;
+    fn pull(&mut self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_>;
     /// Mark the current sensor data as seen.
     fn mark_seen(&mut self);
     /// Mark the current sensor data as unseen.
@@ -202,8 +193,8 @@ pub trait SensorOut {
         Self: Sized,
         B: SensorOut,
         F: FnMut(
-            &<<Self as SensorOut>::Output as ReadGuardSpecifier>::Target,
-            &<<B as SensorOut>::Output as ReadGuardSpecifier>::Target,
+            &<<Self as SensorOut>::Lock as ReadGuardSpecifier>::Target,
+            &<<B as SensorOut>::Lock as ReadGuardSpecifier>::Target,
         ) -> T,
     {
         RevisedDataObserverFused::fuse_with(self, other, f)
@@ -214,8 +205,8 @@ pub trait SensorOut {
         Self: Sized,
         B: SensorOut,
         F: FnMut(
-            &<<Self as SensorOut>::Output as ReadGuardSpecifier>::Target,
-            &<<B as SensorOut>::Output as ReadGuardSpecifier>::Target,
+            &<<Self as SensorOut>::Lock as ReadGuardSpecifier>::Target,
+            &<<B as SensorOut>::Lock as ReadGuardSpecifier>::Target,
         ) -> T,
     {
         RevisedDataObserverFusedCached::fuse_with(self, other, f)
@@ -224,7 +215,7 @@ pub trait SensorOut {
     fn map<T, F>(self, f: F) -> RevisedDataObserverMapped<Self, T, F>
     where
         Self: Sized,
-        F: FnMut(&<<Self as SensorOut>::Output as ReadGuardSpecifier>::Target) -> T,
+        F: FnMut(&<<Self as SensorOut>::Lock as ReadGuardSpecifier>::Target) -> T,
     {
         RevisedDataObserverMapped::map_with(self, f)
     }
@@ -232,7 +223,7 @@ pub trait SensorOut {
     fn map_cached<T, F>(self, f: F) -> RevisedDataObserverMappedCached<Self, T, F>
     where
         Self: Sized,
-        F: FnMut(&<<Self as SensorOut>::Output as ReadGuardSpecifier>::Target) -> T,
+        F: FnMut(&<<Self as SensorOut>::Lock as ReadGuardSpecifier>::Target) -> T,
     {
         RevisedDataObserverMappedCached::map_with(self, f)
     }
@@ -256,7 +247,7 @@ where
 
     #[inline(always)]
     fn mark_all_unseen(&self) {
-        self.update_rev()
+        self.update_version(STEP_SIZE)
     }
 }
 
@@ -266,6 +257,7 @@ where
     S: Deref<Target = RevisedData<L>> + ?Sized,
 {
     type Lock = L;
+
     #[inline(always)]
     fn write(&self) -> L::WriteGuard<'_> {
         self.data.write()
@@ -278,7 +270,7 @@ where
 
     #[inline(always)]
     fn mark_all_unseen(&self) {
-        self.update_rev()
+        self.update_version(STEP_SIZE)
     }
 }
 
@@ -286,7 +278,7 @@ impl<'a, T, L> SensorOut for RevisedDataObserver<'a, L>
 where
     L: DataReadLock<Target = T>,
 {
-    type Output = L;
+    type Lock = L;
 
     #[inline(always)]
     fn pull(&mut self) -> L::ReadGuard<'_> {
@@ -294,18 +286,24 @@ where
     }
 
     #[inline(always)]
+    fn pull_updated(&mut self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_> {
+        self.mark_seen();
+        self.inner.data.read()
+    }
+
+    #[inline(always)]
     fn mark_seen(&mut self) {
-        self.rev = self.inner.rev.load(Ordering::SeqCst);
+        self.version = self.inner.version();
     }
 
     #[inline(always)]
     fn mark_unseen(&mut self) {
-        self.rev = self.inner.rev.load(Ordering::SeqCst).wrapping_sub(1);
+        self.version = self.inner.version().wrapping_sub(1);
     }
 
     #[inline(always)]
     fn has_changed(&self) -> bool {
-        self.rev != self.inner.rev.load(Ordering::SeqCst)
+        self.version != self.inner.version()
     }
     #[inline(always)]
     fn is_cached(&self) -> bool {
@@ -322,7 +320,7 @@ pub struct RevisedDataObserverMapped<A, T, F> {
 impl<A, T, F> RevisedDataObserverMapped<A, T, F>
 where
     A: SensorOut,
-    F: FnMut(&<A::Output as ReadGuardSpecifier>::Target) -> T,
+    F: FnMut(&<A::Lock as ReadGuardSpecifier>::Target) -> T,
 {
     #[inline(always)]
     pub fn map_with(a: A, f: F) -> Self {
@@ -337,17 +335,17 @@ where
 impl<A, T, F> SensorOut for RevisedDataObserverMapped<A, T, F>
 where
     A: SensorOut,
-    F: FnMut(&<A::Output as ReadGuardSpecifier>::Target) -> T,
+    F: FnMut(&<A::Lock as ReadGuardSpecifier>::Target) -> T,
 {
-    type Output = OwnedFalseLock<T>;
+    type Lock = OwnedFalseLock<T>;
 
     #[inline]
-    fn pull_updated(&mut self) -> <Self::Output as ReadGuardSpecifier>::ReadGuard<'_> {
+    fn pull_updated(&mut self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_> {
         OwnedData((self.map)(&self.a.pull_updated()))
     }
 
     #[inline(always)]
-    fn pull(&mut self) -> <Self::Output as ReadGuardSpecifier>::ReadGuard<'_> {
+    fn pull(&mut self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_> {
         OwnedData((self.map)(&self.a.pull()))
     }
 
@@ -381,7 +379,7 @@ pub struct RevisedDataObserverMappedCached<A, T, F> {
 impl<A, T, F> RevisedDataObserverMappedCached<A, T, F>
 where
     A: SensorOut,
-    F: FnMut(&<A::Output as ReadGuardSpecifier>::Target) -> T,
+    F: FnMut(&<A::Lock as ReadGuardSpecifier>::Target) -> T,
 {
     #[inline(always)]
     pub fn map_with(mut a: A, mut f: F) -> Self {
@@ -393,18 +391,18 @@ where
 impl<A, T, F> SensorOut for RevisedDataObserverMappedCached<A, T, F>
 where
     A: SensorOut,
-    F: FnMut(&<A::Output as ReadGuardSpecifier>::Target) -> T,
+    F: FnMut(&<A::Lock as ReadGuardSpecifier>::Target) -> T,
 {
-    type Output = FalseReadLock<T>;
+    type Lock = FalseReadLock<T>;
 
     #[inline]
-    fn pull_updated(&mut self) -> <Self::Output as ReadGuardSpecifier>::ReadGuard<'_> {
+    fn pull_updated(&mut self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_> {
         *self.cached = (self.map)(&self.a.pull_updated());
         &self.cached
     }
 
     #[inline(always)]
-    fn pull(&mut self) -> <Self::Output as ReadGuardSpecifier>::ReadGuard<'_> {
+    fn pull(&mut self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_> {
         &self.cached
     }
 
@@ -440,8 +438,8 @@ where
     A: SensorOut,
     B: SensorOut,
     F: FnMut(
-        &<A::Output as ReadGuardSpecifier>::Target,
-        &<B::Output as ReadGuardSpecifier>::Target,
+        &<A::Lock as ReadGuardSpecifier>::Target,
+        &<B::Lock as ReadGuardSpecifier>::Target,
     ) -> T,
 {
     #[inline(always)]
@@ -460,19 +458,19 @@ where
     A: SensorOut,
     B: SensorOut,
     F: FnMut(
-        &<A::Output as ReadGuardSpecifier>::Target,
-        &<B::Output as ReadGuardSpecifier>::Target,
+        &<A::Lock as ReadGuardSpecifier>::Target,
+        &<B::Lock as ReadGuardSpecifier>::Target,
     ) -> T,
 {
-    type Output = OwnedFalseLock<T>;
+    type Lock = OwnedFalseLock<T>;
 
     #[inline(always)]
-    fn pull_updated(&mut self) -> <Self::Output as ReadGuardSpecifier>::ReadGuard<'_> {
+    fn pull_updated(&mut self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_> {
         OwnedData((self.fuse)(&self.a.pull_updated(), &self.b.pull_updated()))
     }
 
     #[inline(always)]
-    fn pull(&mut self) -> <Self::Output as ReadGuardSpecifier>::ReadGuard<'_> {
+    fn pull(&mut self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_> {
         OwnedData((self.fuse)(&self.a.pull(), &self.b.pull()))
     }
 
@@ -511,8 +509,8 @@ where
     A: SensorOut,
     B: SensorOut,
     F: FnMut(
-        &<A::Output as ReadGuardSpecifier>::Target,
-        &<B::Output as ReadGuardSpecifier>::Target,
+        &<A::Lock as ReadGuardSpecifier>::Target,
+        &<B::Lock as ReadGuardSpecifier>::Target,
     ) -> T,
 {
     #[inline(always)]
@@ -532,20 +530,20 @@ where
     A: SensorOut,
     B: SensorOut,
     F: FnMut(
-        &<A::Output as ReadGuardSpecifier>::Target,
-        &<B::Output as ReadGuardSpecifier>::Target,
+        &<A::Lock as ReadGuardSpecifier>::Target,
+        &<B::Lock as ReadGuardSpecifier>::Target,
     ) -> T,
 {
-    type Output = FalseReadLock<T>;
+    type Lock = FalseReadLock<T>;
 
     #[inline(always)]
-    fn pull_updated(&mut self) -> <Self::Output as ReadGuardSpecifier>::ReadGuard<'_> {
+    fn pull_updated(&mut self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_> {
         *self.cache = (self.fuse)(&self.a.pull_updated(), &self.b.pull_updated());
         &self.cache
     }
 
     #[inline(always)]
-    fn pull(&mut self) -> <Self::Output as ReadGuardSpecifier>::ReadGuard<'_> {
+    fn pull(&mut self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_> {
         &self.cache
     }
 
