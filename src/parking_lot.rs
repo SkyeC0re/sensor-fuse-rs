@@ -1,9 +1,12 @@
+use std::sync::Arc;
+
 use parking_lot;
 
 use crate::{DataLockFactory, DataReadLock, DataWriteLock, ReadGuardSpecifier, RevisedData};
 
 pub type RwSensor<T> = RevisedData<parking_lot::RwLock<T>>;
 pub type MutexSensor<T> = RevisedData<parking_lot::Mutex<T>>;
+pub type ArcRwSensor<T> = Arc<RevisedData<parking_lot::RwLock<T>>>;
 
 impl<T> RwSensor<T> {
     #[inline(always)]

@@ -6,6 +6,7 @@ use core::{
     ops::{Deref, DerefMut},
     sync::atomic::{AtomicUsize, Ordering},
 };
+use std::sync::Arc;
 
 use derived_deref::{Deref, DerefMut};
 
@@ -117,18 +118,60 @@ where
     }
 
     #[inline(always)]
-    pub fn spawn_observer(&self) -> RevisedDataObserver<L> {
+    pub fn spawn_observer(&self) -> RevisedDataObserver<&RevisedData<L>, L> {
         RevisedDataObserver {
             inner: self,
             version: self.version.load(Ordering::Acquire),
+            // _share: PhantomData,
         }
     }
 }
 
+pub trait StateShare<'share, 'state, L>
+where
+    L: 'state + DataReadLock,
+{
+    type Shared: Deref<Target = RevisedData<L>> + 'state;
+    fn share_lock(&'share self) -> Self::Shared;
+
+    fn spawn_observer_trait(&'share self) -> RevisedDataObserver<Self::Shared, L> {
+        let inner = self.share_lock();
+        RevisedDataObserver {
+            version: inner.version(),
+            inner,
+        }
+    }
+}
+
+impl<'share, L: 'share> StateShare<'share, 'share, L> for RevisedData<L>
+where
+    L: DataReadLock,
+{
+    type Shared = &'share Self;
+
+    fn share_lock(&'share self) -> &Self {
+        self
+    }
+}
+
+impl<'share, L: 'static> StateShare<'share, 'static, L> for Arc<RevisedData<L>>
+where
+    L: 'static + DataReadLock,
+{
+    type Shared = Self;
+
+    fn share_lock(&'share self) -> Self {
+        self.clone()
+    }
+}
 #[derive(Clone)]
-pub struct RevisedDataObserver<'a, L> {
-    inner: &'a RevisedData<L>,
+pub struct RevisedDataObserver<R, L>
+where
+    R: Deref<Target = RevisedData<L>>,
+{
+    inner: R,
     version: usize,
+    // _share: PhantomData<(&'state ())>,
 }
 
 impl<T> RevisedData<T> {
@@ -172,7 +215,7 @@ trait SensorIn {
 }
 
 pub trait SensorOut {
-    type Lock: ReadGuardSpecifier;
+    type Lock: ReadGuardSpecifier + ?Sized;
 
     /// Returns the latest value obtainable by the sensor. The sesnor's internal cache is guaranteed to
     /// be updated after this call if the sensor is cached.
@@ -274,14 +317,15 @@ where
     }
 }
 
-impl<'a, T, L> SensorOut for RevisedDataObserver<'a, L>
+impl<'share, 'state, T, L, R> SensorOut for RevisedDataObserver<R, L>
 where
     L: DataReadLock<Target = T>,
+    R: Deref<Target = RevisedData<L>>,
 {
     type Lock = L;
 
     #[inline(always)]
-    fn pull(&mut self) -> L::ReadGuard<'_> {
+    fn pull(&mut self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_> {
         self.inner.data.read()
     }
 
@@ -572,21 +616,27 @@ where
 
 #[cfg(test)]
 mod tests {
-    use crate::{parking_lot::RwSensor, SensorIn, SensorOut};
+    use std::sync::Arc;
+
+    use crate::{
+        parking_lot::{ArcRwSensor, RwSensor},
+        SensorIn, SensorOut, StateShare,
+    };
 
     #[test]
     fn test_1() {
-        let s1 = RwSensor::new(-3);
+        let s1 = Arc::new(RwSensor::new(-3));
         let s2 = RwSensor::new(5);
 
         let mut x = s1
-            .spawn_observer()
+            .spawn_observer_trait()
             .fuse_cached(s2.spawn_observer(), |x, y| *x + *y);
 
         assert!(!x.has_changed());
 
         assert_eq!(*x.pull(), 2);
         s1.update(3);
+        drop(s1);
         assert!(x.has_changed());
         assert_eq!(*x.pull(), 2);
         assert_eq!(*x.pull_updated(), 8);
