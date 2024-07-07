@@ -1,6 +1,6 @@
 use parking_lot;
 
-use crate::{DataLockFactory, DataReadLock, DataWriteLock, RevisedData};
+use crate::{DataLockFactory, DataReadLock, DataWriteLock, ReadGuardSpecifier, RevisedData};
 
 pub type RwSensor<T> = RevisedData<parking_lot::RwLock<T>>;
 pub type MutexSensor<T> = RevisedData<parking_lot::Mutex<T>>;
@@ -18,10 +18,11 @@ impl<T> MutexSensor<T> {
         Self::new_from::<parking_lot::Mutex<T>>(init)
     }
 }
-
-impl<T> DataReadLock for parking_lot::RwLock<T> {
+impl<T> ReadGuardSpecifier for parking_lot::RwLock<T> {
     type Target = T;
     type ReadGuard<'read> = parking_lot::RwLockReadGuard<'read, T> where T: 'read;
+}
+impl<T> DataReadLock for parking_lot::RwLock<T> {
     #[inline(always)]
     fn read(&self) -> Self::ReadGuard<'_> {
         self.read()
@@ -68,10 +69,12 @@ impl<T> DataWriteLock for parking_lot::Mutex<T> {
     }
 }
 
-impl<T> DataReadLock for parking_lot::Mutex<T> {
+impl<T> ReadGuardSpecifier for parking_lot::Mutex<T> {
     type Target = T;
     type ReadGuard<'read> = parking_lot::MutexGuard<'read, T> where T: 'read;
+}
 
+impl<T> DataReadLock for parking_lot::Mutex<T> {
     #[inline(always)]
     fn read(&self) -> Self::ReadGuard<'_> {
         self.lock()

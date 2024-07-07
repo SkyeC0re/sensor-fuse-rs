@@ -1,4 +1,4 @@
-use crate::{DataLockFactory, DataReadLock, DataWriteLock, RevisedData};
+use crate::{DataLockFactory, DataReadLock, DataWriteLock, ReadGuardSpecifier, RevisedData};
 
 pub type RwSensor<T> = RevisedData<std::sync::RwLock<T>>;
 pub type MutexSensor<T> = RevisedData<std::sync::Mutex<T>>;
@@ -17,10 +17,12 @@ impl<T> MutexSensor<T> {
     }
 }
 
-impl<T> DataReadLock for std::sync::RwLock<T> {
+impl<T> ReadGuardSpecifier for std::sync::RwLock<T> {
     type Target = T;
     type ReadGuard<'read> = std::sync::RwLockReadGuard<'read, T> where T: 'read;
+}
 
+impl<T> DataReadLock for std::sync::RwLock<T> {
     #[inline(always)]
     fn read(&self) -> Self::ReadGuard<'_> {
         self.read().unwrap()
@@ -45,16 +47,17 @@ impl<T> DataLockFactory<T> for std::sync::RwLock<T> {
     }
 }
 
-impl<T> DataReadLock for std::sync::Mutex<T> {
+impl<T> ReadGuardSpecifier for std::sync::Mutex<T> {
     type Target = T;
     type ReadGuard<'read> = std::sync::MutexGuard<'read, T> where T: 'read;
+}
 
+impl<T> DataReadLock for std::sync::Mutex<T> {
     #[inline(always)]
     fn read(&self) -> Self::ReadGuard<'_> {
         self.lock().unwrap()
     }
 }
-
 impl<T> DataWriteLock for std::sync::Mutex<T> {
     type WriteGuard<'write> = std::sync::MutexGuard<'write, T> where T: 'write;
 
