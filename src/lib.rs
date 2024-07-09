@@ -105,76 +105,15 @@ pub struct RevisedData<T> {
     version: AtomicUsize,
 }
 
-impl<L> RevisedData<L>
-where
-    L: DataWriteLock,
-{
-    #[inline(always)]
-    pub fn new_from<LF: DataLockFactory<L::Target, Lock = L>>(init: L::Target) -> Self {
-        Self {
-            data: LF::new(init),
-            version: AtomicUsize::default(),
-        }
-    }
-
-    #[inline(always)]
-    pub fn spawn_observer(&self) -> RevisedDataObserver<&RevisedData<L>, L> {
-        RevisedDataObserver {
-            inner: self,
-            version: self.version.load(Ordering::Acquire),
-            // _share: PhantomData,
-        }
-    }
-}
-
-pub trait StateShare<'share, 'state, L>
-where
-    L: 'state + DataReadLock,
-{
-    type Shared: Deref<Target = RevisedData<L>> + 'state;
-    fn share_lock(&'share self) -> Self::Shared;
-
-    fn spawn_observer_trait(&'share self) -> RevisedDataObserver<Self::Shared, L> {
-        let inner = self.share_lock();
-        RevisedDataObserver {
-            version: inner.version(),
-            inner,
-        }
-    }
-}
-
-impl<'share, L: 'share> StateShare<'share, 'share, L> for RevisedData<L>
-where
-    L: DataReadLock,
-{
-    type Shared = &'share Self;
-
-    fn share_lock(&'share self) -> &Self {
-        self
-    }
-}
-
-impl<'share, L: 'static> StateShare<'share, 'static, L> for Arc<RevisedData<L>>
-where
-    L: 'static + DataReadLock,
-{
-    type Shared = Self;
-
-    fn share_lock(&'share self) -> Self {
-        self.clone()
-    }
-}
-#[derive(Clone)]
-pub struct RevisedDataObserver<R, L>
-where
-    R: Deref<Target = RevisedData<L>>,
-{
-    inner: R,
-    version: usize,
-    // _share: PhantomData<(&'state ())>,
-}
-
 impl<T> RevisedData<T> {
+    #[inline(always)]
+    pub fn new(data: T) -> Self {
+        Self {
+            data,
+            version: Default::default(),
+        }
+    }
+
     #[inline(always)]
     pub fn update_version(&self, step_size: usize) {
         self.version
@@ -184,6 +123,128 @@ impl<T> RevisedData<T> {
     #[inline(always)]
     pub fn version(&self) -> usize {
         self.version.load(core::sync::atomic::Ordering::Acquire)
+    }
+}
+
+pub struct RevisedDataWriter<'share, 'state, R, L>(R, PhantomData<(&'share Self, &'state L)>)
+where
+    R: StateShare<'share, 'state, L>,
+    L: DataReadLock;
+
+impl<'share, 'state, R, L> Drop for RevisedDataWriter<'share, 'state, R, L>
+where
+    R: StateShare<'share, 'state, L>,
+    L: DataReadLock,
+{
+    fn drop(&mut self) {
+        self.0
+            .share_elided_ref()
+            .version
+            .fetch_or(CLOSED_BIT, Ordering::Release);
+    }
+}
+
+impl<'share, 'state, R, L> RevisedDataWriter<'share, 'state, R, L>
+where
+    R: StateShare<'share, 'state, L>,
+    L: DataWriteLock,
+{
+    #[inline(always)]
+    pub fn new_from<LF: DataLockFactory<L::Target, Lock = L>>(init: L::Target) -> Self {
+        Self(R::new(LF::new(init)), PhantomData)
+    }
+
+    #[inline(always)]
+    pub fn spawn_referenced_observer(&self) -> RevisedDataObserver<&RevisedData<L>, L> {
+        RevisedDataObserver {
+            inner: self.0.share_elided_ref(),
+            version: self.0.share_elided_ref().version(),
+        }
+    }
+
+    #[inline(always)]
+    fn spawn_observer(&'share self) -> RevisedDataObserver<R::Shared, L> {
+        let inner = self.0.share_lock();
+        RevisedDataObserver {
+            version: inner.version(),
+            inner,
+        }
+    }
+}
+
+pub trait StateShare<'share, 'state, L>
+where
+    L: 'state + DataReadLock,
+{
+    type Shared: Deref<Target = RevisedData<L>> + 'state;
+
+    fn new(lock: L) -> Self;
+
+    fn share_elided_ref(&self) -> &RevisedData<L>;
+
+    fn share_lock(&'share self) -> Self::Shared;
+}
+
+impl<'share, L: 'share> StateShare<'share, 'share, L> for RevisedData<L>
+where
+    L: DataReadLock,
+{
+    type Shared = &'share Self;
+
+    #[inline(always)]
+    fn share_lock(&'share self) -> &Self {
+        self
+    }
+
+    #[inline(always)]
+    fn new(lock: L) -> Self {
+        RevisedData::new(lock)
+    }
+
+    #[inline(always)]
+    fn share_elided_ref(&self) -> &Self {
+        &self
+    }
+}
+
+impl<'share, L: 'static> StateShare<'share, 'static, L> for Arc<RevisedData<L>>
+where
+    L: 'static + DataReadLock,
+{
+    type Shared = Self;
+
+    #[inline(always)]
+    fn share_lock(&'share self) -> Self {
+        self.clone()
+    }
+
+    #[inline(always)]
+    fn new(lock: L) -> Self {
+        Arc::new(RevisedData::new(lock))
+    }
+
+    #[inline(always)]
+    fn share_elided_ref(&self) -> &RevisedData<L> {
+        self
+    }
+}
+
+#[derive(Clone)]
+pub struct RevisedDataObserver<R, L>
+where
+    R: Deref<Target = RevisedData<L>>,
+{
+    inner: R,
+    version: usize,
+}
+
+impl<R, L> RevisedDataObserver<R, L>
+where
+    R: Deref<Target = RevisedData<L>>,
+{
+    #[inline(always)]
+    fn is_closed(&self) -> bool {
+        self.inner.version() & CLOSED_BIT == CLOSED_BIT
     }
 }
 
@@ -272,25 +333,26 @@ pub trait SensorOut {
     }
 }
 
-impl<T, L> SensorIn for RevisedData<L>
+impl<'share, 'state, R, L, T> SensorIn for RevisedDataWriter<'share, 'state, R, L>
 where
     L: DataWriteLock<Target = T>,
+    R: StateShare<'share, 'state, L>,
 {
     type Lock = L;
 
     #[inline(always)]
     fn write(&self) -> L::WriteGuard<'_> {
-        self.data.write()
+        self.0.share_elided_ref().data.write()
     }
 
     #[inline(always)]
     fn read(&self) -> L::ReadGuard<'_> {
-        self.data.read()
+        self.0.share_elided_ref().data.read()
     }
 
     #[inline(always)]
     fn mark_all_unseen(&self) {
-        self.update_version(STEP_SIZE)
+        self.0.share_elided_ref().update_version(STEP_SIZE)
     }
 }
 
@@ -342,12 +404,12 @@ where
 
     #[inline(always)]
     fn mark_unseen(&mut self) {
-        self.version = self.inner.version().wrapping_sub(1);
+        self.version = self.inner.version().wrapping_sub(STEP_SIZE);
     }
 
     #[inline(always)]
     fn has_changed(&self) -> bool {
-        self.version != self.inner.version()
+        self.version >> 1 != self.inner.version() >> 1
     }
     #[inline(always)]
     fn is_cached(&self) -> bool {
@@ -373,6 +435,11 @@ where
             _false_cache: OwnedFalseLock(PhantomData {}),
             map: f,
         }
+    }
+
+    #[inline(always)]
+    pub fn inner(&self) -> &A {
+        &self.a
     }
 }
 
@@ -429,6 +496,11 @@ where
     pub fn map_with(mut a: A, mut f: F) -> Self {
         let cached = FalseReadLock(f(&mut a.pull()));
         Self { a, cached, map: f }
+    }
+
+    #[inline(always)]
+    pub fn inner(&self) -> &A {
+        &self.a
     }
 }
 
@@ -494,6 +566,16 @@ where
             _false_cache: OwnedFalseLock(PhantomData {}),
             fuse: f,
         }
+    }
+
+    #[inline(always)]
+    pub fn inner_a(&self) -> &A {
+        &self.a
+    }
+
+    #[inline(always)]
+    pub fn inner_b(&self) -> &B {
+        &self.b
     }
 }
 
@@ -567,6 +649,16 @@ where
             fuse: f,
         }
     }
+
+    #[inline(always)]
+    pub fn inner_a(&self) -> &A {
+        &self.a
+    }
+
+    #[inline(always)]
+    pub fn inner_b(&self) -> &B {
+        &self.b
+    }
 }
 
 impl<A, B, T, F> SensorOut for RevisedDataObserverFusedCached<A, B, T, F>
@@ -625,11 +717,11 @@ mod tests {
 
     #[test]
     fn test_1() {
-        let s1 = Arc::new(RwSensor::new(-3));
+        let s1 = ArcRwSensor::new(-3);
         let s2 = RwSensor::new(5);
 
         let mut x = s1
-            .spawn_observer_trait()
+            .spawn_observer()
             .fuse_cached(s2.spawn_observer(), |x, y| *x + *y);
 
         assert!(!x.has_changed());
@@ -637,6 +729,7 @@ mod tests {
         assert_eq!(*x.pull(), 2);
         s1.update(3);
         drop(s1);
+        assert!(x.inner_a().is_closed());
         assert!(x.has_changed());
         assert_eq!(*x.pull(), 2);
         assert_eq!(*x.pull_updated(), 8);

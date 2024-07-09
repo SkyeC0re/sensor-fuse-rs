@@ -2,25 +2,43 @@ use std::sync::Arc;
 
 use parking_lot;
 
-use crate::{DataLockFactory, DataReadLock, DataWriteLock, ReadGuardSpecifier, RevisedData};
+use crate::{
+    DataLockFactory, DataReadLock, DataWriteLock, ReadGuardSpecifier, RevisedData,
+    RevisedDataWriter,
+};
 
-pub type RwSensor<T> = RevisedData<parking_lot::RwLock<T>>;
-pub type MutexSensor<T> = RevisedData<parking_lot::Mutex<T>>;
-pub type ArcRwSensor<T> = Arc<RevisedData<parking_lot::RwLock<T>>>;
+pub type RwSensor<'share, T> =
+    RevisedDataWriter<'share, 'share, RevisedData<parking_lot::RwLock<T>>, parking_lot::RwLock<T>>;
+pub type MutexSensor<'share, T> =
+    RevisedDataWriter<'share, 'share, RevisedData<parking_lot::Mutex<T>>, parking_lot::Mutex<T>>;
+pub type ArcRwSensor<'share, T> = RevisedDataWriter<
+    'share,
+    'static,
+    Arc<RevisedData<parking_lot::RwLock<T>>>,
+    parking_lot::RwLock<T>,
+>;
 
-impl<T> RwSensor<T> {
+impl<T> RwSensor<'_, T> {
     #[inline(always)]
     pub fn new(init: T) -> Self {
         Self::new_from::<parking_lot::RwLock<T>>(init)
     }
 }
 
-impl<T> MutexSensor<T> {
+impl<T> MutexSensor<'_, T> {
     #[inline(always)]
     pub fn new(init: T) -> Self {
         Self::new_from::<parking_lot::Mutex<T>>(init)
     }
 }
+
+impl<T> ArcRwSensor<'_, T> {
+    #[inline(always)]
+    pub fn new(init: T) -> Self {
+        Self::new_from::<parking_lot::RwLock<T>>(init)
+    }
+}
+
 impl<T> ReadGuardSpecifier for parking_lot::RwLock<T> {
     type Target = T;
     type ReadGuard<'read> = parking_lot::RwLockReadGuard<'read, T> where T: 'read;
