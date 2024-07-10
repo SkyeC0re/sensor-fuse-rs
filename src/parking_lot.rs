@@ -4,19 +4,17 @@ use parking_lot;
 
 use crate::{
     DataLockFactory, DataReadLock, DataWriteLock, ReadGuardSpecifier, RevisedData,
-    RevisedDataWriter,
+    RevisedDataObserver, RevisedDataWriter,
 };
 
 pub type RwSensor<'share, T> =
-    RevisedDataWriter<'share, 'share, RevisedData<parking_lot::RwLock<T>>, parking_lot::RwLock<T>>;
+    RevisedDataWriter<'share, 'share, RevisedData<parking_lot::RwLock<T>>>;
+pub type RwSensorObserver<'share, T> = RevisedDataObserver<parking_lot::RwLock<T>>;
+
 pub type MutexSensor<'share, T> =
-    RevisedDataWriter<'share, 'share, RevisedData<parking_lot::Mutex<T>>, parking_lot::Mutex<T>>;
-pub type ArcRwSensor<'share, T> = RevisedDataWriter<
-    'share,
-    'static,
-    Arc<RevisedData<parking_lot::RwLock<T>>>,
-    parking_lot::RwLock<T>,
->;
+    RevisedDataWriter<'share, 'share, RevisedData<parking_lot::Mutex<T>>>;
+pub type ArcRwSensor<'share, 'state, T> =
+    RevisedDataWriter<'share, 'state, Arc<RevisedData<parking_lot::RwLock<T>>>>;
 
 impl<T> RwSensor<'_, T> {
     #[inline(always)]
@@ -32,7 +30,7 @@ impl<T> MutexSensor<'_, T> {
     }
 }
 
-impl<T> ArcRwSensor<'_, T> {
+impl<'state, T: 'state> ArcRwSensor<'_, 'state, T> {
     #[inline(always)]
     pub fn new(init: T) -> Self {
         Self::new_from::<parking_lot::RwLock<T>>(init)

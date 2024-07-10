@@ -3,10 +3,9 @@ use crate::{
     RevisedDataWriter,
 };
 
-pub type RwSensor<'share, T> =
-    RevisedDataWriter<'share, 'share, RevisedData<std::sync::RwLock<T>>, std::sync::RwLock<T>>;
+pub type RwSensor<'share, T> = RevisedDataWriter<'share, 'share, RevisedData<std::sync::RwLock<T>>>;
 pub type MutexSensor<'share, T> =
-    RevisedDataWriter<'share, 'share, RevisedData<std::sync::Mutex<T>>, std::sync::Mutex<T>>;
+    RevisedDataWriter<'share, 'share, RevisedData<std::sync::Mutex<T>>>;
 
 impl<T> RwSensor<'_, T> {
     #[inline(always)]

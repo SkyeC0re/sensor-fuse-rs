@@ -126,15 +126,13 @@ impl<T> RevisedData<T> {
     }
 }
 
-pub struct RevisedDataWriter<'share, 'state, R, L>(R, PhantomData<(&'share Self, &'state L)>)
+pub struct RevisedDataWriter<'share, 'state, R>(R, PhantomData<(&'share Self, &'state ())>)
 where
-    R: StateShare<'share, 'state, L>,
-    L: DataReadLock;
+    R: StateShare<'share, 'state>;
 
-impl<'share, 'state, R, L> Drop for RevisedDataWriter<'share, 'state, R, L>
+impl<'share, 'state, R> Drop for RevisedDataWriter<'share, 'state, R>
 where
-    R: StateShare<'share, 'state, L>,
-    L: DataReadLock,
+    R: StateShare<'share, 'state>,
 {
     fn drop(&mut self) {
         self.0
@@ -144,18 +142,21 @@ where
     }
 }
 
-impl<'share, 'state, R, L> RevisedDataWriter<'share, 'state, R, L>
+impl<'share, 'state, R> RevisedDataWriter<'share, 'state, R>
 where
-    R: StateShare<'share, 'state, L>,
-    L: DataWriteLock,
+    R: StateShare<'share, 'state>,
 {
     #[inline(always)]
-    pub fn new_from<LF: DataLockFactory<L::Target, Lock = L>>(init: L::Target) -> Self {
+    pub fn new_from<
+        LF: DataLockFactory<<R::Lock as ReadGuardSpecifier>::Target, Lock = R::Lock>,
+    >(
+        init: <R::Lock as ReadGuardSpecifier>::Target,
+    ) -> Self {
         Self(R::new(LF::new(init)), PhantomData)
     }
 
     #[inline(always)]
-    pub fn spawn_referenced_observer(&self) -> RevisedDataObserver<&RevisedData<L>, L> {
+    pub fn spawn_referenced_observer(&self) -> RevisedDataObserver<&RevisedData<R::Lock>> {
         RevisedDataObserver {
             inner: self.0.share_elided_ref(),
             version: self.0.share_elided_ref().version(),
@@ -163,7 +164,7 @@ where
     }
 
     #[inline(always)]
-    fn spawn_observer(&'share self) -> RevisedDataObserver<R::Shared, L> {
+    fn spawn_observer(&'share self) -> RevisedDataObserver<R::Shared> {
         let inner = self.0.share_lock();
         RevisedDataObserver {
             version: inner.version(),
@@ -172,23 +173,22 @@ where
     }
 }
 
-pub trait StateShare<'share, 'state, L>
-where
-    L: 'state + DataReadLock,
-{
-    type Shared: Deref<Target = RevisedData<L>> + 'state;
+pub trait StateShare<'share, 'state> {
+    type Lock: 'state + DataWriteLock;
+    type Shared: Deref<Target = RevisedData<Self::Lock>> + 'state;
 
-    fn new(lock: L) -> Self;
+    fn new(lock: Self::Lock) -> Self;
 
-    fn share_elided_ref(&self) -> &RevisedData<L>;
+    fn share_elided_ref(&self) -> &RevisedData<Self::Lock>;
 
     fn share_lock(&'share self) -> Self::Shared;
 }
 
-impl<'share, L: 'share> StateShare<'share, 'share, L> for RevisedData<L>
+impl<'share, L: 'share> StateShare<'share, 'share> for RevisedData<L>
 where
-    L: DataReadLock,
+    L: DataWriteLock,
 {
+    type Lock = L;
     type Shared = &'share Self;
 
     #[inline(always)]
@@ -207,10 +207,11 @@ where
     }
 }
 
-impl<'share, L: 'static> StateShare<'share, 'static, L> for Arc<RevisedData<L>>
+impl<'share, 'state, L: 'state> StateShare<'share, 'state> for Arc<RevisedData<L>>
 where
-    L: 'static + DataReadLock,
+    L: DataWriteLock,
 {
+    type Lock = L;
     type Shared = Self;
 
     #[inline(always)]
@@ -230,15 +231,12 @@ where
 }
 
 #[derive(Clone)]
-pub struct RevisedDataObserver<R, L>
-where
-    R: Deref<Target = RevisedData<L>>,
-{
+pub struct RevisedDataObserver<R> {
     inner: R,
     version: usize,
 }
 
-impl<R, L> RevisedDataObserver<R, L>
+impl<R, L> RevisedDataObserver<R>
 where
     R: Deref<Target = RevisedData<L>>,
 {
@@ -333,20 +331,19 @@ pub trait SensorOut {
     }
 }
 
-impl<'share, 'state, R, L, T> SensorIn for RevisedDataWriter<'share, 'state, R, L>
+impl<'share, 'state, R> SensorIn for RevisedDataWriter<'share, 'state, R>
 where
-    L: DataWriteLock<Target = T>,
-    R: StateShare<'share, 'state, L>,
+    R: StateShare<'share, 'state>,
 {
-    type Lock = L;
+    type Lock = R::Lock;
 
     #[inline(always)]
-    fn write(&self) -> L::WriteGuard<'_> {
+    fn write(&self) -> <Self::Lock as DataWriteLock>::WriteGuard<'_> {
         self.0.share_elided_ref().data.write()
     }
 
     #[inline(always)]
-    fn read(&self) -> L::ReadGuard<'_> {
+    fn read(&self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_> {
         self.0.share_elided_ref().data.read()
     }
 
@@ -379,7 +376,7 @@ where
     }
 }
 
-impl<'share, 'state, T, L, R> SensorOut for RevisedDataObserver<R, L>
+impl<'share, 'state, T, L, R> SensorOut for RevisedDataObserver<R>
 where
     L: DataReadLock<Target = T>,
     R: Deref<Target = RevisedData<L>>,
@@ -417,7 +414,11 @@ where
     }
 }
 
-pub struct RevisedDataObserverMapped<A, T, F> {
+pub struct RevisedDataObserverMapped<
+    A: SensorOut,
+    T,
+    F: FnMut(&<A::Lock as ReadGuardSpecifier>::Target) -> T,
+> {
     a: A,
     _false_cache: OwnedFalseLock<T>,
     map: F,
@@ -481,7 +482,11 @@ where
     }
 }
 
-pub struct RevisedDataObserverMappedCached<A, T, F> {
+pub struct RevisedDataObserverMappedCached<
+    A: SensorOut,
+    T,
+    F: FnMut(&<A::Lock as ReadGuardSpecifier>::Target) -> T,
+> {
     a: A,
     cached: FalseReadLock<T>,
     map: F,
@@ -542,7 +547,12 @@ where
         true
     }
 }
-pub struct RevisedDataObserverFused<A, B, T, F> {
+pub struct RevisedDataObserverFused<
+    A: SensorOut,
+    B: SensorOut,
+    T,
+    F: FnMut(&<A::Lock as ReadGuardSpecifier>::Target, &<B::Lock as ReadGuardSpecifier>::Target) -> T,
+> {
     a: A,
     b: B,
     _false_cache: OwnedFalseLock<T>,
@@ -623,7 +633,12 @@ where
     }
 }
 
-pub struct RevisedDataObserverFusedCached<A, B, T, F> {
+pub struct RevisedDataObserverFusedCached<
+    A: SensorOut,
+    B: SensorOut,
+    T,
+    F: FnMut(&<A::Lock as ReadGuardSpecifier>::Target, &<B::Lock as ReadGuardSpecifier>::Target) -> T,
+> {
     a: A,
     b: B,
     cache: FalseReadLock<T>,
@@ -710,9 +725,11 @@ where
 mod tests {
     use std::sync::Arc;
 
+    use parking_lot::lock_api::MappedRwLockReadGuard;
+
     use crate::{
         parking_lot::{ArcRwSensor, RwSensor},
-        SensorIn, SensorOut, StateShare,
+        RevisedDataObserverMapped, SensorIn, SensorOut, StateShare,
     };
 
     #[test]
