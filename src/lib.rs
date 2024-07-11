@@ -62,6 +62,7 @@ pub trait DataWriteLock: DataReadLock {
 }
 
 #[derive(Deref, DerefMut, Clone)]
+#[repr(transparent)]
 pub struct FalseReadLock<T>(T);
 
 impl<T> ReadGuardSpecifier for FalseReadLock<T> {
@@ -76,6 +77,7 @@ impl<T> DataReadLock for FalseReadLock<T> {
     }
 }
 #[derive(Deref, DerefMut, Clone)]
+#[repr(transparent)]
 pub struct OwnedData<T>(T);
 
 impl<T> OwnedData<T> {
