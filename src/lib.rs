@@ -6,13 +6,26 @@ use core::{
     ops::{Deref, DerefMut},
     sync::atomic::{AtomicUsize, Ordering},
 };
+use derived_deref::{Deref, DerefMut};
 use std::sync::Arc;
 
-use derived_deref::{Deref, DerefMut};
-
+// All credit to [Tokio's Watch Channel](https://docs.rs/tokio/latest/tokio/sync/watch/index.html). If its not broken don't fix it.
 const CLOSED_BIT: usize = 1;
 const STEP_SIZE: usize = 2;
 
+pub trait ReadGuardSpecifier {
+    type Target;
+
+    type ReadGuard<'read>: Deref<Target = Self::Target>
+    where
+        Self::Target: 'read,
+        Self: 'read;
+}
+
+pub trait DataReadLock: ReadGuardSpecifier {
+    /// Provides at least immutable access to the current value inside the lock.
+    fn read(&self) -> Self::ReadGuard<'_>;
+}
 pub trait DataWriteLock: DataReadLock {
     type WriteGuard<'write>: Deref<Target = Self::Target> + DerefMut
     where
@@ -48,20 +61,6 @@ pub trait DataWriteLock: DataReadLock {
     }
 }
 
-pub trait ReadGuardSpecifier {
-    type Target;
-
-    type ReadGuard<'read>: Deref<Target = Self::Target>
-    where
-        Self::Target: 'read,
-        Self: 'read;
-}
-
-pub trait DataReadLock: ReadGuardSpecifier {
-    /// Provides at least immutable access to the current value inside the lock.
-    fn read(&self) -> Self::ReadGuard<'_>;
-}
-
 #[derive(Deref, DerefMut, Clone)]
 pub struct FalseReadLock<T>(T);
 
@@ -94,12 +93,6 @@ impl<T> ReadGuardSpecifier for OwnedFalseLock<T> {
     type ReadGuard<'read> = OwnedData<T> where T: 'read;
 }
 
-pub trait DataLockFactory<T> {
-    type Lock: DataWriteLock<Target = T>;
-    /// Contruct a new lock from the given initial value.
-    fn new(init: T) -> Self::Lock;
-}
-
 pub struct RevisedData<T> {
     pub data: T,
     version: AtomicUsize,
@@ -126,13 +119,33 @@ impl<T> RevisedData<T> {
     }
 }
 
+pub trait Lockshare<'share, 'state> {
+    type Lock: 'state + DataReadLock;
+    type Shared: Deref<Target = RevisedData<Self::Lock>> + 'state;
+
+    /// Construct a new shareable lock from the given lock.
+    fn new(lock: Self::Lock) -> Self;
+
+    /// Share the revised data for the largest possible lifetime.
+    fn share_lock(&'share self) -> Self::Shared;
+
+    /// There is probably a better way than this to get an elided reference
+    /// to the revised data.
+    fn share_elided_ref(&self) -> &RevisedData<Self::Lock>;
+}
+pub trait DataLockFactory<T> {
+    type Lock: DataWriteLock<Target = T>;
+    /// Contruct a new lock from the given initial value.
+    fn new(init: T) -> Self::Lock;
+}
+
 pub struct SensorWriter<'share, 'state, R>(R, PhantomData<(&'share Self, &'state ())>)
 where
-    R: StateShare<'share, 'state>;
+    R: Lockshare<'share, 'state>;
 
 impl<'share, 'state, R> Drop for SensorWriter<'share, 'state, R>
 where
-    R: StateShare<'share, 'state>,
+    R: Lockshare<'share, 'state>,
 {
     fn drop(&mut self) {
         self.0
@@ -144,7 +157,7 @@ where
 
 impl<'share, 'state, R> SensorWriter<'share, 'state, R>
 where
-    R: StateShare<'share, 'state>,
+    R: Lockshare<'share, 'state>,
 {
     #[inline(always)]
     pub fn new_from<
@@ -173,20 +186,9 @@ where
     }
 }
 
-pub trait StateShare<'share, 'state> {
-    type Lock: 'state + DataWriteLock;
-    type Shared: Deref<Target = RevisedData<Self::Lock>> + 'state;
-
-    fn new(lock: Self::Lock) -> Self;
-
-    fn share_elided_ref(&self) -> &RevisedData<Self::Lock>;
-
-    fn share_lock(&'share self) -> Self::Shared;
-}
-
-impl<'share, L: 'share> StateShare<'share, 'share> for RevisedData<L>
+impl<'share, L: 'share> Lockshare<'share, 'share> for RevisedData<L>
 where
-    L: DataWriteLock,
+    L: DataReadLock,
 {
     type Lock = L;
     type Shared = &'share Self;
@@ -207,15 +209,15 @@ where
     }
 }
 
-impl<'share, 'state, L: 'state> StateShare<'share, 'state> for Arc<RevisedData<L>>
+impl<'state, L: 'state> Lockshare<'_, 'state> for Arc<RevisedData<L>>
 where
-    L: DataWriteLock,
+    L: DataReadLock,
 {
     type Lock = L;
     type Shared = Self;
 
     #[inline(always)]
-    fn share_lock(&'share self) -> Self {
+    fn share_lock(&self) -> Self {
         self.clone()
     }
 
@@ -333,7 +335,8 @@ pub trait SensorOut {
 
 impl<'share, 'state, R> SensorIn for SensorWriter<'share, 'state, R>
 where
-    R: StateShare<'share, 'state>,
+    R: Lockshare<'share, 'state>,
+    R::Lock: DataWriteLock,
 {
     type Lock = R::Lock;
 
@@ -725,7 +728,7 @@ mod tests {
 
     use crate::{
         parking_lot::{ArcRwSensor, ArcRwSensorWriter, RwSensorWriter},
-        MappedSensor, SensorIn, SensorOut, StateShare,
+        Lockshare, MappedSensor, SensorIn, SensorOut,
     };
 
     #[test]
