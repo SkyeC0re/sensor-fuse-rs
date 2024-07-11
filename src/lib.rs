@@ -126,11 +126,11 @@ impl<T> RevisedData<T> {
     }
 }
 
-pub struct RevisedDataWriter<'share, 'state, R>(R, PhantomData<(&'share Self, &'state ())>)
+pub struct SensorWriter<'share, 'state, R>(R, PhantomData<(&'share Self, &'state ())>)
 where
     R: StateShare<'share, 'state>;
 
-impl<'share, 'state, R> Drop for RevisedDataWriter<'share, 'state, R>
+impl<'share, 'state, R> Drop for SensorWriter<'share, 'state, R>
 where
     R: StateShare<'share, 'state>,
 {
@@ -142,7 +142,7 @@ where
     }
 }
 
-impl<'share, 'state, R> RevisedDataWriter<'share, 'state, R>
+impl<'share, 'state, R> SensorWriter<'share, 'state, R>
 where
     R: StateShare<'share, 'state>,
 {
@@ -156,17 +156,17 @@ where
     }
 
     #[inline(always)]
-    pub fn spawn_referenced_observer(&self) -> RevisedDataObserver<&RevisedData<R::Lock>> {
-        RevisedDataObserver {
+    pub fn spawn_referenced_observer(&self) -> Sensor<&RevisedData<R::Lock>> {
+        Sensor {
             inner: self.0.share_elided_ref(),
             version: self.0.share_elided_ref().version(),
         }
     }
 
     #[inline(always)]
-    fn spawn_observer(&'share self) -> RevisedDataObserver<R::Shared> {
+    fn spawn_observer(&'share self) -> Sensor<R::Shared> {
         let inner = self.0.share_lock();
-        RevisedDataObserver {
+        Sensor {
             version: inner.version(),
             inner,
         }
@@ -231,12 +231,12 @@ where
 }
 
 #[derive(Clone)]
-pub struct RevisedDataObserver<R> {
+pub struct Sensor<R> {
     inner: R,
     version: usize,
 }
 
-impl<R, L> RevisedDataObserver<R>
+impl<R, L> Sensor<R>
 where
     R: Deref<Target = RevisedData<L>>,
 {
@@ -290,7 +290,7 @@ pub trait SensorOut {
     /// Returns true if `pull` may produce stale results.
     fn is_cached(&self) -> bool;
 
-    fn fuse<B, T, F>(self, other: B, f: F) -> RevisedDataObserverFused<Self, B, T, F>
+    fn fuse<B, T, F>(self, other: B, f: F) -> FusedSensor<Self, B, T, F>
     where
         Self: Sized,
         B: SensorOut,
@@ -299,10 +299,10 @@ pub trait SensorOut {
             &<<B as SensorOut>::Lock as ReadGuardSpecifier>::Target,
         ) -> T,
     {
-        RevisedDataObserverFused::fuse_with(self, other, f)
+        FusedSensor::fuse_with(self, other, f)
     }
 
-    fn fuse_cached<B, T, F>(self, other: B, f: F) -> RevisedDataObserverFusedCached<Self, B, T, F>
+    fn fuse_cached<B, T, F>(self, other: B, f: F) -> FusedSensorCached<Self, B, T, F>
     where
         Self: Sized,
         B: SensorOut,
@@ -311,27 +311,27 @@ pub trait SensorOut {
             &<<B as SensorOut>::Lock as ReadGuardSpecifier>::Target,
         ) -> T,
     {
-        RevisedDataObserverFusedCached::fuse_with(self, other, f)
+        FusedSensorCached::fuse_with(self, other, f)
     }
 
-    fn map<T, F>(self, f: F) -> RevisedDataObserverMapped<Self, T, F>
+    fn map<T, F>(self, f: F) -> MappedSensor<Self, T, F>
     where
         Self: Sized,
         F: FnMut(&<<Self as SensorOut>::Lock as ReadGuardSpecifier>::Target) -> T,
     {
-        RevisedDataObserverMapped::map_with(self, f)
+        MappedSensor::map_with(self, f)
     }
 
-    fn map_cached<T, F>(self, f: F) -> RevisedDataObserverMappedCached<Self, T, F>
+    fn map_cached<T, F>(self, f: F) -> MappedSensorCached<Self, T, F>
     where
         Self: Sized,
         F: FnMut(&<<Self as SensorOut>::Lock as ReadGuardSpecifier>::Target) -> T,
     {
-        RevisedDataObserverMappedCached::map_with(self, f)
+        MappedSensorCached::map_with(self, f)
     }
 }
 
-impl<'share, 'state, R> SensorIn for RevisedDataWriter<'share, 'state, R>
+impl<'share, 'state, R> SensorIn for SensorWriter<'share, 'state, R>
 where
     R: StateShare<'share, 'state>,
 {
@@ -376,7 +376,7 @@ where
     }
 }
 
-impl<'share, 'state, T, L, R> SensorOut for RevisedDataObserver<R>
+impl<'share, 'state, T, L, R> SensorOut for Sensor<R>
 where
     L: DataReadLock<Target = T>,
     R: Deref<Target = RevisedData<L>>,
@@ -414,17 +414,13 @@ where
     }
 }
 
-pub struct RevisedDataObserverMapped<
-    A: SensorOut,
-    T,
-    F: FnMut(&<A::Lock as ReadGuardSpecifier>::Target) -> T,
-> {
+pub struct MappedSensor<A: SensorOut, T, F: FnMut(&<A::Lock as ReadGuardSpecifier>::Target) -> T> {
     a: A,
     _false_cache: OwnedFalseLock<T>,
     map: F,
 }
 
-impl<A, T, F> RevisedDataObserverMapped<A, T, F>
+impl<A, T, F> MappedSensor<A, T, F>
 where
     A: SensorOut,
     F: FnMut(&<A::Lock as ReadGuardSpecifier>::Target) -> T,
@@ -444,7 +440,7 @@ where
     }
 }
 
-impl<A, T, F> SensorOut for RevisedDataObserverMapped<A, T, F>
+impl<A, T, F> SensorOut for MappedSensor<A, T, F>
 where
     A: SensorOut,
     F: FnMut(&<A::Lock as ReadGuardSpecifier>::Target) -> T,
@@ -482,7 +478,7 @@ where
     }
 }
 
-pub struct RevisedDataObserverMappedCached<
+pub struct MappedSensorCached<
     A: SensorOut,
     T,
     F: FnMut(&<A::Lock as ReadGuardSpecifier>::Target) -> T,
@@ -492,7 +488,7 @@ pub struct RevisedDataObserverMappedCached<
     map: F,
 }
 
-impl<A, T, F> RevisedDataObserverMappedCached<A, T, F>
+impl<A, T, F> MappedSensorCached<A, T, F>
 where
     A: SensorOut,
     F: FnMut(&<A::Lock as ReadGuardSpecifier>::Target) -> T,
@@ -509,7 +505,7 @@ where
     }
 }
 
-impl<A, T, F> SensorOut for RevisedDataObserverMappedCached<A, T, F>
+impl<A, T, F> SensorOut for MappedSensorCached<A, T, F>
 where
     A: SensorOut,
     F: FnMut(&<A::Lock as ReadGuardSpecifier>::Target) -> T,
@@ -547,7 +543,7 @@ where
         true
     }
 }
-pub struct RevisedDataObserverFused<
+pub struct FusedSensor<
     A: SensorOut,
     B: SensorOut,
     T,
@@ -559,7 +555,7 @@ pub struct RevisedDataObserverFused<
     fuse: F,
 }
 
-impl<A, B, T, F> RevisedDataObserverFused<A, B, T, F>
+impl<A, B, T, F> FusedSensor<A, B, T, F>
 where
     A: SensorOut,
     B: SensorOut,
@@ -589,7 +585,7 @@ where
     }
 }
 
-impl<A, B, T, F> SensorOut for RevisedDataObserverFused<A, B, T, F>
+impl<A, B, T, F> SensorOut for FusedSensor<A, B, T, F>
 where
     A: SensorOut,
     B: SensorOut,
@@ -633,7 +629,7 @@ where
     }
 }
 
-pub struct RevisedDataObserverFusedCached<
+pub struct FusedSensorCached<
     A: SensorOut,
     B: SensorOut,
     T,
@@ -645,7 +641,7 @@ pub struct RevisedDataObserverFusedCached<
     fuse: F,
 }
 
-impl<A, B, T, F> RevisedDataObserverFusedCached<A, B, T, F>
+impl<A, B, T, F> FusedSensorCached<A, B, T, F>
 where
     A: SensorOut,
     B: SensorOut,
@@ -676,7 +672,7 @@ where
     }
 }
 
-impl<A, B, T, F> SensorOut for RevisedDataObserverFusedCached<A, B, T, F>
+impl<A, B, T, F> SensorOut for FusedSensorCached<A, B, T, F>
 where
     A: SensorOut,
     B: SensorOut,
@@ -728,14 +724,16 @@ mod tests {
     use parking_lot::lock_api::MappedRwLockReadGuard;
 
     use crate::{
-        parking_lot::{ArcRwSensor, RwSensor},
-        RevisedDataObserverMapped, SensorIn, SensorOut, StateShare,
+        parking_lot::{ArcRwSensor, ArcRwSensorWriter, RwSensorWriter},
+        MappedSensor, SensorIn, SensorOut, StateShare,
     };
 
     #[test]
     fn test_1() {
-        let s1 = ArcRwSensor::new(-3);
-        let s2 = RwSensor::new(5);
+        let s1 = ArcRwSensorWriter::new(-3);
+        let s2 = RwSensorWriter::new(5);
+
+        let bb: ArcRwSensor<i32> = s1.spawn_observer();
 
         let mut x = s1
             .spawn_observer()

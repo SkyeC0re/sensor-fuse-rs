@@ -1,20 +1,20 @@
 use crate::{
-    DataLockFactory, DataReadLock, DataWriteLock, ReadGuardSpecifier, RevisedData,
-    RevisedDataWriter,
+    DataLockFactory, DataReadLock, DataWriteLock, ReadGuardSpecifier, RevisedData, SensorWriter,
 };
 
-pub type RwSensor<'share, T> = RevisedDataWriter<'share, 'share, RevisedData<std::sync::RwLock<T>>>;
-pub type MutexSensor<'share, T> =
-    RevisedDataWriter<'share, 'share, RevisedData<std::sync::Mutex<T>>>;
+pub type RwSensorWriter<'share, T> =
+    SensorWriter<'share, 'share, RevisedData<std::sync::RwLock<T>>>;
+pub type MutexSensorWriter<'share, T> =
+    SensorWriter<'share, 'share, RevisedData<std::sync::Mutex<T>>>;
 
-impl<T> RwSensor<'_, T> {
+impl<T> RwSensorWriter<'_, T> {
     #[inline(always)]
     pub fn new(init: T) -> Self {
         Self::new_from::<std::sync::RwLock<T>>(init)
     }
 }
 
-impl<T> MutexSensor<'_, T> {
+impl<T> MutexSensorWriter<'_, T> {
     #[inline(always)]
     pub fn new(init: T) -> Self {
         Self::new_from::<std::sync::Mutex<T>>(init)
