@@ -49,6 +49,11 @@ impl<T> DataReadLock for parking_lot::RwLock<T> {
     fn read(&self) -> Self::ReadGuard<'_> {
         self.read()
     }
+
+    #[inline(always)]
+    fn try_read(&self) -> Option<Self::ReadGuard<'_>> {
+        self.try_read()
+    }
 }
 
 impl<T> DataWriteLock for parking_lot::RwLock<T> {
@@ -62,6 +67,11 @@ impl<T> DataWriteLock for parking_lot::RwLock<T> {
     #[inline(always)]
     fn downgrade<'a>(&'a self, write_guard: Self::WriteGuard<'a>) -> Self::ReadGuard<'a> {
         parking_lot::RwLockWriteGuard::downgrade(write_guard)
+    }
+
+    #[inline(always)]
+    fn try_write(&self) -> Option<Self::WriteGuard<'_>> {
+        self.try_write()
     }
 }
 
@@ -89,6 +99,11 @@ impl<T> DataWriteLock for parking_lot::Mutex<T> {
     fn upgrade<'a>(&'a self, read_guard: Self::WriteGuard<'a>) -> Self::WriteGuard<'a> {
         read_guard
     }
+
+    #[inline(always)]
+    fn try_write(&self) -> Option<Self::WriteGuard<'_>> {
+        self.try_lock()
+    }
 }
 
 impl<T> ReadGuardSpecifier for parking_lot::Mutex<T> {
@@ -100,6 +115,11 @@ impl<T> DataReadLock for parking_lot::Mutex<T> {
     #[inline(always)]
     fn read(&self) -> Self::ReadGuard<'_> {
         self.lock()
+    }
+
+    #[inline(always)]
+    fn try_read(&self) -> Option<Self::ReadGuard<'_>> {
+        self.try_lock()
     }
 }
 

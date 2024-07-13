@@ -25,6 +25,8 @@ pub trait ReadGuardSpecifier {
 pub trait DataReadLock: ReadGuardSpecifier {
     /// Provides at least immutable access to the current value inside the lock.
     fn read(&self) -> Self::ReadGuard<'_>;
+
+    fn try_read(&self) -> Option<Self::ReadGuard<'_>>;
 }
 pub trait DataWriteLock: DataReadLock {
     type WriteGuard<'write>: Deref<Target = Self::Target> + DerefMut
@@ -34,6 +36,8 @@ pub trait DataWriteLock: DataReadLock {
 
     /// Provides mutable access to the current value inside the lock.
     fn write(&self) -> Self::WriteGuard<'_>;
+
+    fn try_write(&self) -> Option<Self::WriteGuard<'_>>;
 
     /// Downgrade mutable access to immutable access for a write guard originating from this lock instance.
     ///
@@ -74,6 +78,10 @@ impl<T> ReadGuardSpecifier for FalseReadLock<T> {
 impl<T> DataReadLock for FalseReadLock<T> {
     fn read(&self) -> Self::ReadGuard<'_> {
         self
+    }
+
+    fn try_read(&self) -> Option<Self::ReadGuard<'_>> {
+        Some(self)
     }
 }
 #[derive(Deref, DerefMut, Clone)]
@@ -188,6 +196,8 @@ where
     }
 }
 
+// There must be a way to do this sharing without having to have a second lifetime in the trait,
+// but the author is not experienced enough.
 impl<'share, L: 'share> Lockshare<'share, 'share> for RevisedData<L>
 where
     L: DataReadLock,

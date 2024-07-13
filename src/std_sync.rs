@@ -1,11 +1,15 @@
 use crate::{
-    DataLockFactory, DataReadLock, DataWriteLock, ReadGuardSpecifier, RevisedData, SensorWriter,
+    DataLockFactory, DataReadLock, DataWriteLock, ReadGuardSpecifier, RevisedData, Sensor,
+    SensorWriter,
 };
 
 pub type RwSensorWriter<'share, T> =
     SensorWriter<'share, 'share, RevisedData<std::sync::RwLock<T>>>;
+
+pub type RwSensor<T> = Sensor<RevisedData<std::sync::RwLock<T>>>;
 pub type MutexSensorWriter<'share, T> =
     SensorWriter<'share, 'share, RevisedData<std::sync::Mutex<T>>>;
+pub type MutexSensor<T> = Sensor<RevisedData<std::sync::Mutex<T>>>;
 
 impl<T> RwSensorWriter<'_, T> {
     #[inline(always)]
@@ -31,6 +35,10 @@ impl<T> DataReadLock for std::sync::RwLock<T> {
     fn read(&self) -> Self::ReadGuard<'_> {
         self.read().unwrap()
     }
+
+    fn try_read(&self) -> Option<Self::ReadGuard<'_>> {
+        self.try_read().ok()
+    }
 }
 
 impl<T> DataWriteLock for std::sync::RwLock<T> {
@@ -39,6 +47,10 @@ impl<T> DataWriteLock for std::sync::RwLock<T> {
     #[inline(always)]
     fn write(&self) -> Self::WriteGuard<'_> {
         self.write().unwrap()
+    }
+
+    fn try_write(&self) -> Option<Self::WriteGuard<'_>> {
+        self.try_write().ok()
     }
 }
 
@@ -61,6 +73,11 @@ impl<T> DataReadLock for std::sync::Mutex<T> {
     fn read(&self) -> Self::ReadGuard<'_> {
         self.lock().unwrap()
     }
+
+    #[inline(always)]
+    fn try_read(&self) -> Option<Self::ReadGuard<'_>> {
+        self.try_lock().ok()
+    }
 }
 impl<T> DataWriteLock for std::sync::Mutex<T> {
     type WriteGuard<'write> = std::sync::MutexGuard<'write, T> where T: 'write;
@@ -78,6 +95,11 @@ impl<T> DataWriteLock for std::sync::Mutex<T> {
     #[inline(always)]
     fn upgrade<'a>(&'a self, read_guard: Self::ReadGuard<'a>) -> Self::WriteGuard<'a> {
         read_guard
+    }
+
+    #[inline(always)]
+    fn try_write(&self) -> Option<Self::WriteGuard<'_>> {
+        self.try_lock().ok()
     }
 }
 
