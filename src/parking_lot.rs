@@ -19,27 +19,6 @@ pub type ArcRwSensorWriter<'share, 'state, T> =
     SensorWriter<'share, 'state, Arc<RevisedData<parking_lot::RwLock<T>>>>;
 pub type ArcRwSensor<T> = Sensor<Arc<RevisedData<parking_lot::RwLock<T>>>>;
 
-impl<T> RwSensorWriter<'_, T> {
-    #[inline(always)]
-    pub fn new(init: T) -> Self {
-        Self::new_from::<parking_lot::RwLock<T>>(init)
-    }
-}
-
-impl<T> MutexSensorWriter<'_, T> {
-    #[inline(always)]
-    pub fn new(init: T) -> Self {
-        Self::new_from::<parking_lot::Mutex<T>>(init)
-    }
-}
-
-impl<'state, T: 'state> ArcRwSensorWriter<'_, 'state, T> {
-    #[inline(always)]
-    pub fn new(init: T) -> Self {
-        Self::new_from::<parking_lot::RwLock<T>>(init)
-    }
-}
-
 impl<T> ReadGuardSpecifier for parking_lot::RwLock<T> {
     type Target = T;
     type ReadGuard<'read> = parking_lot::RwLockReadGuard<'read, T> where T: 'read;
@@ -75,7 +54,7 @@ impl<T> DataWriteLock for parking_lot::RwLock<T> {
     }
 }
 
-impl<T> DataLockFactory<T> for parking_lot::RwLock<T> {
+impl<T> DataLockFactory for parking_lot::RwLock<T> {
     type Lock = Self;
 
     #[inline(always)]
@@ -123,7 +102,7 @@ impl<T> DataReadLock for parking_lot::Mutex<T> {
     }
 }
 
-impl<T> DataLockFactory<T> for parking_lot::Mutex<T> {
+impl<T> DataLockFactory for parking_lot::Mutex<T> {
     type Lock = Self;
 
     #[inline(always)]

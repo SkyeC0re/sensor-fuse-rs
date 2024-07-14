@@ -143,10 +143,10 @@ pub trait Lockshare<'share, 'state> {
     /// to the revised data.
     fn share_elided_ref(&self) -> &RevisedData<Self::Lock>;
 }
-pub trait DataLockFactory<T> {
-    type Lock: DataWriteLock<Target = T>;
+pub trait DataLockFactory {
+    type Lock: DataWriteLock;
     /// Contruct a new lock from the given initial value.
-    fn new(init: T) -> Self::Lock;
+    fn new(init: <Self::Lock as ReadGuardSpecifier>::Target) -> Self::Lock;
 }
 
 pub struct SensorWriter<'share, 'state, R>(R, PhantomData<(&'share Self, &'state ())>)
@@ -170,9 +170,7 @@ where
     R: Lockshare<'share, 'state>,
 {
     #[inline(always)]
-    pub fn new_from<
-        LF: DataLockFactory<<R::Lock as ReadGuardSpecifier>::Target, Lock = R::Lock>,
-    >(
+    pub fn new_from<LF: DataLockFactory<Lock = R::Lock>>(
         init: <R::Lock as ReadGuardSpecifier>::Target,
     ) -> Self {
         Self(R::new(LF::new(init)), PhantomData)
@@ -194,6 +192,34 @@ where
             inner,
         }
     }
+}
+
+impl<'share, 'state, R, L> SensorWriter<'share, 'state, R>
+where
+    L: DataWriteLock + DataLockFactory<Lock = L>,
+    R: Lockshare<'share, 'state, Lock = L>,
+{
+    #[inline(always)]
+    pub fn new(init: <R::Lock as ReadGuardSpecifier>::Target) -> Self {
+        Self::new_from::<R::Lock>(init)
+    }
+
+    // #[inline(always)]
+    // pub fn spawn_referenced_observer(&self) -> Sensor<&RevisedData<R::Lock>> {
+    //     Sensor {
+    //         inner: self.0.share_elided_ref(),
+    //         version: self.0.share_elided_ref().version(),
+    //     }
+    // }
+
+    // #[inline(always)]
+    // fn spawn_observer(&'share self) -> Sensor<R::Shared> {
+    //     let inner = self.0.share_lock();
+    //     Sensor {
+    //         version: inner.version(),
+    //         inner,
+    //     }
+    // }
 }
 
 // There must be a way to do this sharing without having to have a second lifetime in the trait,

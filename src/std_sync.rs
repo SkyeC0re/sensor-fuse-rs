@@ -11,20 +11,6 @@ pub type MutexSensorWriter<'share, T> =
     SensorWriter<'share, 'share, RevisedData<std::sync::Mutex<T>>>;
 pub type MutexSensor<T> = Sensor<RevisedData<std::sync::Mutex<T>>>;
 
-impl<T> RwSensorWriter<'_, T> {
-    #[inline(always)]
-    pub fn new(init: T) -> Self {
-        Self::new_from::<std::sync::RwLock<T>>(init)
-    }
-}
-
-impl<T> MutexSensorWriter<'_, T> {
-    #[inline(always)]
-    pub fn new(init: T) -> Self {
-        Self::new_from::<std::sync::Mutex<T>>(init)
-    }
-}
-
 impl<T> ReadGuardSpecifier for std::sync::RwLock<T> {
     type Target = T;
     type ReadGuard<'read> = std::sync::RwLockReadGuard<'read, T> where T: 'read;
@@ -54,7 +40,7 @@ impl<T> DataWriteLock for std::sync::RwLock<T> {
     }
 }
 
-impl<T> DataLockFactory<T> for std::sync::RwLock<T> {
+impl<T> DataLockFactory for std::sync::RwLock<T> {
     type Lock = Self;
 
     #[inline(always)]
@@ -103,7 +89,7 @@ impl<T> DataWriteLock for std::sync::Mutex<T> {
     }
 }
 
-impl<T> DataLockFactory<T> for std::sync::Mutex<T> {
+impl<T> DataLockFactory for std::sync::Mutex<T> {
     type Lock = Self;
 
     #[inline(always)]
