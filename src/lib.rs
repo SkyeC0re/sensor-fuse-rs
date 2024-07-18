@@ -1,107 +1,19 @@
-pub mod parking_lot;
-pub mod std_sync;
+pub mod lock;
 
 use core::marker::PhantomData;
 use core::{
-    ops::{Deref, DerefMut},
+    ops::Deref,
     sync::atomic::{AtomicUsize, Ordering},
 };
-use derived_deref::{Deref, DerefMut};
+use lock::{
+    DataLockFactory, DataReadLock, DataWriteLock, FalseReadLock, OwnedData, OwnedFalseLock,
+    ReadGuardSpecifier,
+};
 use std::sync::Arc;
 
 // All credit to [Tokio's Watch Channel](https://docs.rs/tokio/latest/tokio/sync/watch/index.html). If its not broken don't fix it.
 const CLOSED_BIT: usize = 1;
 const STEP_SIZE: usize = 2;
-
-pub trait ReadGuardSpecifier {
-    type Target;
-
-    type ReadGuard<'read>: Deref<Target = Self::Target>
-    where
-        Self::Target: 'read,
-        Self: 'read;
-}
-
-pub trait DataReadLock: ReadGuardSpecifier {
-    /// Provides at least immutable access to the current value inside the lock.
-    fn read(&self) -> Self::ReadGuard<'_>;
-
-    fn try_read(&self) -> Option<Self::ReadGuard<'_>>;
-}
-pub trait DataWriteLock: DataReadLock {
-    type WriteGuard<'write>: Deref<Target = Self::Target> + DerefMut
-    where
-        Self::Target: 'write,
-        Self: 'write;
-
-    /// Provides mutable access to the current value inside the lock.
-    fn write(&self) -> Self::WriteGuard<'_>;
-
-    fn try_write(&self) -> Option<Self::WriteGuard<'_>>;
-
-    /// Downgrade mutable access to immutable access for a write guard originating from this lock instance.
-    ///
-    /// # Panics
-    ///
-    /// Behaviour is only well defined if and only if `write_guard` originates from `self`.
-    /// May panic if `wirte_guard` does not originate from `self`. Implementations may also downgrade the guard
-    /// regardless or return a new read guard originating from `self`.
-    #[inline(always)]
-    fn downgrade<'a>(&'a self, write_guard: Self::WriteGuard<'a>) -> Self::ReadGuard<'a> {
-        drop(write_guard);
-        self.read()
-    }
-    /// Upgrade immutable access to mutable access for a read guard from this specific lock instance.
-    ///
-    /// # Panics
-    ///
-    /// Behaviour is only well defined if and only if `read_guard` originates from `self`.
-    /// May panic if `read_guard` does not originate from `self`. Implementations may also upgrade the guard
-    /// regardless or return a new write guard originating from `self`.
-    #[inline(always)]
-    fn upgrade<'a>(&'a self, read_guard: Self::ReadGuard<'a>) -> Self::WriteGuard<'a> {
-        drop(read_guard);
-        self.write()
-    }
-}
-
-#[derive(Deref, DerefMut, Clone)]
-#[repr(transparent)]
-pub struct FalseReadLock<T>(T);
-
-impl<T> ReadGuardSpecifier for FalseReadLock<T> {
-    type Target = T;
-
-    type ReadGuard<'read> = &'read T where T: 'read;
-}
-
-impl<T> DataReadLock for FalseReadLock<T> {
-    fn read(&self) -> Self::ReadGuard<'_> {
-        self
-    }
-
-    fn try_read(&self) -> Option<Self::ReadGuard<'_>> {
-        Some(self)
-    }
-}
-#[derive(Deref, DerefMut, Clone)]
-#[repr(transparent)]
-pub struct OwnedData<T>(T);
-
-impl<T> OwnedData<T> {
-    #[inline(always)]
-    pub fn into_inner(self) -> T {
-        self.0
-    }
-}
-
-#[derive(Default, Clone, Copy)]
-pub struct OwnedFalseLock<T>(PhantomData<T>);
-impl<T> ReadGuardSpecifier for OwnedFalseLock<T> {
-    type Target = T;
-
-    type ReadGuard<'read> = OwnedData<T> where T: 'read;
-}
 
 pub struct RevisedData<T> {
     pub data: T,
@@ -142,11 +54,6 @@ pub trait Lockshare<'share, 'state> {
     /// There is probably a better way than this to get an elided reference
     /// to the revised data.
     fn share_elided_ref(&self) -> &RevisedData<Self::Lock>;
-}
-pub trait DataLockFactory {
-    type Lock: DataWriteLock;
-    /// Contruct a new lock from the given initial value.
-    fn new(init: <Self::Lock as ReadGuardSpecifier>::Target) -> Self::Lock;
 }
 
 pub struct SensorWriter<'share, 'state, R>(R, PhantomData<(&'share Self, &'state ())>)
@@ -203,23 +110,6 @@ where
     pub fn new(init: <R::Lock as ReadGuardSpecifier>::Target) -> Self {
         Self::new_from::<R::Lock>(init)
     }
-
-    // #[inline(always)]
-    // pub fn spawn_referenced_observer(&self) -> Sensor<&RevisedData<R::Lock>> {
-    //     Sensor {
-    //         inner: self.0.share_elided_ref(),
-    //         version: self.0.share_elided_ref().version(),
-    //     }
-    // }
-
-    // #[inline(always)]
-    // fn spawn_observer(&'share self) -> Sensor<R::Shared> {
-    //     let inner = self.0.share_lock();
-    //     Sensor {
-    //         version: inner.version(),
-    //         inner,
-    //     }
-    // }
 }
 
 // There must be a way to do this sharing without having to have a second lifetime in the trait,
@@ -470,7 +360,7 @@ where
     pub fn map_with(a: A, f: F) -> Self {
         Self {
             a,
-            _false_cache: OwnedFalseLock(PhantomData {}),
+            _false_cache: OwnedFalseLock::new(),
             map: f,
         }
     }
@@ -610,7 +500,7 @@ where
         Self {
             a,
             b,
-            _false_cache: OwnedFalseLock(PhantomData {}),
+            _false_cache: OwnedFalseLock::new(),
             fuse: f,
         }
     }
@@ -760,12 +650,9 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
-    use parking_lot::lock_api::MappedRwLockReadGuard;
 
     use crate::{
-        parking_lot::{ArcRwSensor, ArcRwSensorWriter, RwSensorWriter},
+        lock::parking_lot::{ArcRwSensor, ArcRwSensorWriter, RwSensorWriter},
         Lockshare, MappedSensor, SensorIn, SensorOut,
     };
 
