@@ -3,21 +3,23 @@ use std::sync::Arc;
 use parking_lot;
 
 use crate::{
-    DataLockFactory, DataReadLock, DataWriteLock, ReadGuardSpecifier, RevisedData, Sensor,
+    DataLockFactory, DataReadLock, DataWriteLock, ReadGuardSpecifier, RevisedData, SensorObserver,
     SensorWriter,
 };
 
 pub type RwSensorWriter<'share, T> =
     SensorWriter<'share, 'share, RevisedData<parking_lot::RwLock<T>>>;
-pub type RwSensor<T> = Sensor<parking_lot::RwLock<T>>;
+// pub type RwSensorWriterExec<'share, T> =
+//     SensorWriterExec<'share, 'share, RevisedData<parking_lot::RwLock<T>>>;
+pub type RwSensor<T> = SensorObserver<parking_lot::RwLock<T>>;
 
 pub type MutexSensorWriter<'share, T> =
     SensorWriter<'share, 'share, RevisedData<parking_lot::Mutex<T>>>;
-pub type MutexSensor<T> = Sensor<parking_lot::Mutex<T>>;
+pub type MutexSensor<T> = SensorObserver<parking_lot::Mutex<T>>;
 
 pub type ArcRwSensorWriter<'share, 'state, T> =
     SensorWriter<'share, 'state, Arc<RevisedData<parking_lot::RwLock<T>>>>;
-pub type ArcRwSensor<T> = Sensor<Arc<RevisedData<parking_lot::RwLock<T>>>>;
+pub type ArcRwSensor<T> = SensorObserver<Arc<RevisedData<parking_lot::RwLock<T>>>>;
 
 impl<T> ReadGuardSpecifier for parking_lot::RwLock<T> {
     type Target = T;
@@ -44,11 +46,6 @@ impl<T> DataWriteLock for parking_lot::RwLock<T> {
     }
 
     #[inline(always)]
-    fn downgrade<'a>(&'a self, write_guard: Self::WriteGuard<'a>) -> Self::ReadGuard<'a> {
-        parking_lot::RwLockWriteGuard::downgrade(write_guard)
-    }
-
-    #[inline(always)]
     fn try_write(&self) -> Option<Self::WriteGuard<'_>> {
         self.try_write()
     }
@@ -68,15 +65,6 @@ impl<T> DataWriteLock for parking_lot::Mutex<T> {
     #[inline(always)]
     fn write(&self) -> Self::WriteGuard<'_> {
         self.lock()
-    }
-
-    #[inline(always)]
-    fn downgrade<'a>(&'a self, write_guard: Self::WriteGuard<'a>) -> Self::ReadGuard<'a> {
-        write_guard
-    }
-    #[inline(always)]
-    fn upgrade<'a>(&'a self, read_guard: Self::WriteGuard<'a>) -> Self::WriteGuard<'a> {
-        read_guard
     }
 
     #[inline(always)]

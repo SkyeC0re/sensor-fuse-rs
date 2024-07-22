@@ -6,9 +6,11 @@ use core::{
     sync::atomic::{AtomicUsize, Ordering},
 };
 use lock::{
-    DataLockFactory, DataReadLock, DataWriteLock, FalseReadLock, OwnedData, OwnedFalseLock,
-    ReadGuardSpecifier,
+    AtomicConvert, DataLockFactory, DataReadLock, DataWriteLock, FalseReadLock, OwnedData,
+    OwnedFalseLock, ReadGuardSpecifier,
 };
+use std::ops::DerefMut;
+
 use std::sync::Arc;
 
 // All credit to [Tokio's Watch Channel](https://docs.rs/tokio/latest/tokio/sync/watch/index.html). If its not broken don't fix it.
@@ -41,8 +43,165 @@ impl<T> RevisedData<T> {
     }
 }
 
+pub trait CallbackManager {
+    type Target;
+
+    fn register<F: 'static + FnMut(&Self::Target) -> bool>(&self, f: F);
+    fn callback(&mut self, value: &Self::Target);
+}
+
+pub struct ExecData<T, E: CallbackManager> {
+    exec_manager: E,
+    data: T,
+}
+
+impl<T, E: CallbackManager> Deref for ExecData<T, E> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.data
+    }
+}
+
+impl<T, E: CallbackManager> DerefMut for ExecData<T, E> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.data
+    }
+}
+
+pub struct ExecLock<L, T, E>
+where
+    L: DataWriteLock<Target = ExecData<T, E>>,
+    E: CallbackManager,
+{
+    inner: L,
+    _types: PhantomData<(T, E)>,
+}
+
+impl<L, T, E> ReadGuardSpecifier for ExecLock<L, T, E>
+where
+    L: DataWriteLock<Target = ExecData<T, E>>,
+    E: CallbackManager,
+{
+    type Target = T;
+
+    type ReadGuard<'read> = ExecGuard<L::ReadGuard<'read>, T, E>   where
+        Self::Target: 'read,
+        Self: 'read;
+}
+
+impl<L, T, E> DataReadLock for ExecLock<L, T, E>
+where
+    L: DataWriteLock<Target = ExecData<T, E>>,
+    E: CallbackManager,
+{
+    fn read(&self) -> Self::ReadGuard<'_> {
+        ExecGuard {
+            inner: self.inner.read(),
+            _types: PhantomData,
+        }
+    }
+
+    fn try_read(&self) -> Option<Self::ReadGuard<'_>> {
+        self.inner.try_read().map(|guard| ExecGuard {
+            inner: guard,
+            _types: PhantomData,
+        })
+    }
+}
+
+impl<L, T, E> DataWriteLock for ExecLock<L, T, E>
+where
+    L: DataWriteLock<Target = ExecData<T, E>>,
+    E: CallbackManager,
+{
+    type WriteGuard<'write> = ExecGuardMut<L::WriteGuard<'write>, T, E>
+    where
+        Self::Target: 'write,
+        Self: 'write;
+
+    fn write(&self) -> Self::WriteGuard<'_> {
+        ExecGuardMut {
+            inner: self.inner.write(),
+            _types: PhantomData,
+        }
+    }
+
+    fn try_write(&self) -> Option<Self::WriteGuard<'_>> {
+        self.inner.try_write().map(|guard| ExecGuardMut {
+            inner: guard,
+            _types: PhantomData,
+        })
+    }
+}
+
+pub struct ExecGuard<G, T, E>
+where
+    G: Deref<Target = ExecData<T, E>>,
+    E: CallbackManager,
+{
+    inner: G,
+    _types: PhantomData<(T, E)>,
+}
+
+impl<G, T, E> Deref for ExecGuard<G, T, E>
+where
+    G: Deref<Target = ExecData<T, E>>,
+    E: CallbackManager,
+{
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner.data
+    }
+}
+
+pub struct ExecGuardMut<G, T, E>
+where
+    G: Deref<Target = ExecData<T, E>>,
+    E: CallbackManager,
+{
+    inner: G,
+    _types: PhantomData<(T, E)>,
+}
+
+impl<G, T, E> Deref for ExecGuardMut<G, T, E>
+where
+    G: DerefMut<Target = ExecData<T, E>>,
+    E: CallbackManager,
+{
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner.data
+    }
+}
+
+impl<G, T, E> DerefMut for ExecGuardMut<G, T, E>
+where
+    G: DerefMut<Target = ExecData<T, E>>,
+    E: CallbackManager,
+{
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner.data
+    }
+}
+
+impl<G, T, E> AtomicConvert for ExecGuardMut<G, T, E>
+where
+    G: DerefMut<Target = ExecData<T, E>>,
+    E: CallbackManager,
+    G: AtomicConvert,
+{
+    type Target = ExecGuard<<G as AtomicConvert>::Target, T, E>;
+
+    fn convert(self) -> Self::Target {
+        todo!()
+    }
+}
+
 pub trait Lockshare<'share, 'state> {
-    type Lock: 'state + DataReadLock;
+    type Lock: DataWriteLock + 'state;
     type Shared: Deref<Target = RevisedData<Self::Lock>> + 'state;
 
     /// Construct a new shareable lock from the given lock.
@@ -72,51 +231,124 @@ where
     }
 }
 
+impl<'share, 'state, R> Deref for SensorWriter<'share, 'state, R>
+where
+    R: Lockshare<'share, 'state>,
+{
+    type Target = R;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<'share, 'state, R> DerefMut for SensorWriter<'share, 'state, R>
+where
+    R: Lockshare<'share, 'state>,
+{
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
 impl<'share, 'state, R> SensorWriter<'share, 'state, R>
 where
     R: Lockshare<'share, 'state>,
 {
-    #[inline(always)]
-    pub fn new_from<LF: DataLockFactory<Lock = R::Lock>>(
-        init: <R::Lock as ReadGuardSpecifier>::Target,
-    ) -> Self {
-        Self(R::new(LF::new(init)), PhantomData)
-    }
+    // #[inline(always)]
+    // pub fn new_from<LF: DataLockFactory<Lock = R::Lock>>(
+    //     init: <<R::Lock as LockRef>::Lock as ReadGuardSpecifier>::Target,
+    // ) -> Self {
+    //     Self(R::new(LF::new(init)), PhantomData)
+    // }
 
     #[inline(always)]
-    pub fn spawn_referenced_observer(&self) -> Sensor<&RevisedData<R::Lock>> {
-        Sensor {
+    pub fn spawn_referenced_observer(&self) -> SensorObserver<&RevisedData<R::Lock>> {
+        SensorObserver {
             inner: self.0.share_elided_ref(),
             version: self.0.share_elided_ref().version(),
         }
     }
 
     #[inline(always)]
-    fn spawn_observer(&'share self) -> Sensor<R::Shared> {
+    fn spawn_observer(&'share self) -> SensorObserver<R::Shared> {
         let inner = self.0.share_lock();
-        Sensor {
+        SensorObserver {
             version: inner.version(),
             inner,
         }
     }
 }
 
-impl<'share, 'state, R, L> SensorWriter<'share, 'state, R>
-where
-    L: DataWriteLock + DataLockFactory<Lock = L>,
-    R: Lockshare<'share, 'state, Lock = L>,
-{
-    #[inline(always)]
-    pub fn new(init: <R::Lock as ReadGuardSpecifier>::Target) -> Self {
-        Self::new_from::<R::Lock>(init)
-    }
-}
+// impl<'share, 'state, R, L: 'state> SensorWriter<'share, 'state, R>
+// where
+//     L: DataWriteLock + DataLockFactory<Lock = L>,
+//     R: RevisedDataLockshare<'share, 'state, Lock = L>,
+// {
+//     #[inline(always)]
+//     pub fn new(init: <R::Lock as ReadGuardSpecifier>::Target) -> Self {
+//         Self::new_from::<R::Lock>(init)
+//     }
+// }
+
+// pub struct SensorWriterExec<'share, 'state, R>
+// where
+//     R: RevisedDataLockshare<'share, 'state>,
+// {
+//     inner: SensorWriter<'share, 'state, R>,
+//     exec: Vec<Box<dyn FnMut(&<R::Lock as ReadGuardSpecifier>::Target) -> bool>>,
+// }
+
+// impl<'share, 'state, R> SensorWriterExec<'share, 'state, R>
+// where
+//     R: RevisedDataLockshare<'share, 'state>,
+// {
+//     #[inline(always)]
+//     pub fn register<F: 'static + FnMut(&<R::Lock as ReadGuardSpecifier>::Target) -> bool>(
+//         &mut self,
+//         f: F,
+//     ) {
+//         self.exec.push(Box::new(f));
+//     }
+
+//     /// Execute all functions with the given value and remove those that returned false.
+//     /// Although this function uses an immutable borrow, IT SHOULD ONLY EVER BE CALLED WHEN IT IS SAFE TO
+//     /// TO BORROW `exec` MUTABLY.
+//     #[inline(always)]
+//     unsafe fn execute_inner(&self, val: &<R::Lock as ReadGuardSpecifier>::Target) {
+//         let mut i = 0;
+//         let mut len = self.exec.len();
+//         let ptr_slice = self.exec.as_ptr().cast_mut();
+//         while i < len {
+//             let func = ptr_slice.add(i);
+//             if (*func)(val) {
+//                 i += 1;
+//             } else {
+//                 len -= 1;
+//                 std::ptr::swap(func, ptr_slice.add(len));
+//             }
+//         }
+//         (*std::ptr::from_ref(&self.exec).cast_mut()).truncate(len);
+//     }
+// }
+
+// impl<'share, 'state, R> Deref for SensorWriterExec<'share, 'state, R>
+// where
+//     R: Lockshare<'share, 'state>,
+// {
+//     type Target = SensorWriter<'share, 'state, R>;
+
+//     #[inline(always)]
+//     fn deref(&self) -> &Self::Target {
+//         &self.inner
+//     }
+// }
 
 // There must be a way to do this sharing without having to have a second lifetime in the trait,
 // but the author is not experienced enough.
 impl<'share, L: 'share> Lockshare<'share, 'share> for RevisedData<L>
 where
-    L: DataReadLock,
+    L: DataWriteLock,
 {
     type Lock = L;
     type Shared = &'share Self;
@@ -139,7 +371,7 @@ where
 
 impl<'state, L: 'state> Lockshare<'_, 'state> for Arc<RevisedData<L>>
 where
-    L: DataReadLock,
+    L: DataWriteLock,
 {
     type Lock = L;
     type Shared = Self;
@@ -161,12 +393,12 @@ where
 }
 
 #[derive(Clone)]
-pub struct Sensor<R> {
+pub struct SensorObserver<R> {
     inner: R,
     version: usize,
 }
 
-impl<R, L> Sensor<R>
+impl<R, L> SensorObserver<R>
 where
     R: Deref<Target = RevisedData<L>>,
 {
@@ -176,34 +408,31 @@ where
     }
 }
 
-trait SensorIn {
-    type Lock: DataWriteLock;
-    /// Provide write access to the underlying sensor data.
-    fn write(&self) -> <Self::Lock as DataWriteLock>::WriteGuard<'_>;
-    /// Provide at least read access to the underlying sensor data.
-    fn read(&self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_>;
-    /// Update the value of the sensor and notify observers.
-    #[inline]
-    fn update(&self, sample: <Self::Lock as ReadGuardSpecifier>::Target) {
-        let mut guard = self.write();
-        *guard = sample;
-        self.mark_all_unseen();
-        drop(guard);
-    }
-    /// Modify the sensor value in place and notify observers.
-    #[inline]
-    fn modify_with(&self, f: impl FnOnce(&mut <Self::Lock as ReadGuardSpecifier>::Target)) {
-        let mut guard = self.write();
-        f(&mut guard);
-        self.mark_all_unseen();
-        drop(guard);
-    }
+trait SensorWrite {
+    type Target;
 
+    fn update(&self, sample: Self::Target);
+    /// Modify the sensor value in place and notify observers.
+    fn modify_with(&self, f: impl FnOnce(&mut Self::Target));
     /// Mark the current sensor value as unseen to all observers.
     fn mark_all_unseen(&self);
 }
 
-pub trait SensorOut {
+trait CallbackSignal {}
+
+trait SensorCallbackWrite {
+    type Target;
+    /// Update the sensor's current value, notify observers and execute all registered functions.
+    fn update_exec(&self, sample: Self::Target);
+    /// Modify the sensor value in place, notify observers and execute all registered functions.
+    fn modify_with_exec(&self, f: impl FnOnce(&mut Self::Target));
+
+    fn exec(&self);
+    // TODO
+    fn register(&self);
+}
+
+pub trait SensorObserve {
     type Lock: ReadGuardSpecifier + ?Sized;
 
     /// Returns the latest value obtainable by the sensor. The sesnor's internal cache is guaranteed to
@@ -220,94 +449,130 @@ pub trait SensorOut {
     /// Returns true if `pull` may produce stale results.
     fn is_cached(&self) -> bool;
 
-    fn fuse<B, T, F>(self, other: B, f: F) -> FusedSensor<Self, B, T, F>
+    fn fuse<B, T, F>(self, other: B, f: F) -> FusedSensorObserver<Self, B, T, F>
     where
         Self: Sized,
-        B: SensorOut,
+        B: SensorObserve,
         F: FnMut(
-            &<<Self as SensorOut>::Lock as ReadGuardSpecifier>::Target,
-            &<<B as SensorOut>::Lock as ReadGuardSpecifier>::Target,
+            &<<Self as SensorObserve>::Lock as ReadGuardSpecifier>::Target,
+            &<<B as SensorObserve>::Lock as ReadGuardSpecifier>::Target,
         ) -> T,
     {
-        FusedSensor::fuse_with(self, other, f)
+        FusedSensorObserver::fuse_with(self, other, f)
     }
 
-    fn fuse_cached<B, T, F>(self, other: B, f: F) -> FusedSensorCached<Self, B, T, F>
+    fn fuse_cached<B, T, F>(self, other: B, f: F) -> FusedSensorObserverCached<Self, B, T, F>
     where
         Self: Sized,
-        B: SensorOut,
+        B: SensorObserve,
         F: FnMut(
-            &<<Self as SensorOut>::Lock as ReadGuardSpecifier>::Target,
-            &<<B as SensorOut>::Lock as ReadGuardSpecifier>::Target,
+            &<<Self as SensorObserve>::Lock as ReadGuardSpecifier>::Target,
+            &<<B as SensorObserve>::Lock as ReadGuardSpecifier>::Target,
         ) -> T,
     {
-        FusedSensorCached::fuse_with(self, other, f)
+        FusedSensorObserverCached::fuse_with(self, other, f)
     }
 
-    fn map<T, F>(self, f: F) -> MappedSensor<Self, T, F>
+    fn map<T, F>(self, f: F) -> MappedSensorObserver<Self, T, F>
     where
         Self: Sized,
-        F: FnMut(&<<Self as SensorOut>::Lock as ReadGuardSpecifier>::Target) -> T,
+        F: FnMut(&<<Self as SensorObserve>::Lock as ReadGuardSpecifier>::Target) -> T,
     {
-        MappedSensor::map_with(self, f)
+        MappedSensorObserver::map_with(self, f)
     }
 
-    fn map_cached<T, F>(self, f: F) -> MappedSensorCached<Self, T, F>
+    fn map_cached<T, F>(self, f: F) -> MappedSensorObserverCached<Self, T, F>
     where
         Self: Sized,
-        F: FnMut(&<<Self as SensorOut>::Lock as ReadGuardSpecifier>::Target) -> T,
+        F: FnMut(&<<Self as SensorObserve>::Lock as ReadGuardSpecifier>::Target) -> T,
     {
-        MappedSensorCached::map_with(self, f)
+        MappedSensorObserverCached::map_with(self, f)
     }
 }
 
-impl<'share, 'state, R> SensorIn for SensorWriter<'share, 'state, R>
+impl<'share, 'state, R> SensorWrite for SensorWriter<'share, 'state, R>
 where
     R: Lockshare<'share, 'state>,
     R::Lock: DataWriteLock,
 {
-    type Lock = R::Lock;
-
-    #[inline(always)]
-    fn write(&self) -> <Self::Lock as DataWriteLock>::WriteGuard<'_> {
-        self.0.share_elided_ref().data.write()
-    }
-
-    #[inline(always)]
-    fn read(&self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_> {
-        self.0.share_elided_ref().data.read()
-    }
+    type Target = <R::Lock as ReadGuardSpecifier>::Target;
 
     #[inline(always)]
     fn mark_all_unseen(&self) {
-        self.0.share_elided_ref().update_version(STEP_SIZE)
+        self.share_elided_ref().update_version(STEP_SIZE)
+    }
+
+    #[inline]
+    fn update(&self, sample: Self::Target) {
+        let mut guard = self.share_elided_ref().data.write();
+        self.mark_all_unseen();
+        *guard = sample;
+    }
+
+    #[inline]
+    fn modify_with(&self, f: impl FnOnce(&mut Self::Target)) {
+        let mut guard = self.share_elided_ref().data.write();
+        self.mark_all_unseen();
+        f(guard);
     }
 }
 
-impl<T, L, S> SensorIn for S
+impl<'share, 'state, R, L, T, E> SensorCallbackWrite for SensorWriter<'share, 'state, R>
 where
-    L: DataWriteLock<Target = T>,
-    S: Deref<Target = RevisedData<L>> + ?Sized,
+    R: Lockshare<'share, 'state, Lock = ExecLock<L, T, E>>,
+    L: DataWriteLock<Target = ExecData<T, E>>,
+    L::WriteGuard: AtomicConvert<'write, Target = L::ReadGuard<'write>>,
+    E: CallbackManager,
 {
-    type Lock = L;
+    type Target = T;
+    fn update_exec(&self, sample: Self::Target) {
+        let mut guard = self.share_elided_ref().data.write();
+        *guard = sample;
+        self.mark_all_unseen();
+        let guard = guard.convert();
 
-    #[inline(always)]
-    fn write(&self) -> L::WriteGuard<'_> {
-        self.data.write()
+        // We have a mutable reference to the sensor
+        unsafe { (*core::ptr::from_ref(&guard.inner.exec_manager).cast_mut()).execute() };
+        // guard.inner.exec_manager.execute();
     }
 
-    #[inline(always)]
-    fn read(&self) -> L::ReadGuard<'_> {
-        self.data.read()
+    fn modify_with_exec(&self, f: impl FnOnce(&mut <Self::Lock as ReadGuardSpecifier>::Target)) {
+        todo!()
     }
 
-    #[inline(always)]
-    fn mark_all_unseen(&self) {
-        self.update_version(STEP_SIZE)
+    fn exec(&self) {
+        todo!()
+    }
+
+    fn register(&self) {
+        todo!()
     }
 }
 
-impl<'share, 'state, T, L, R> SensorOut for Sensor<R>
+// impl<T, L, S> SensorIn for S
+// where
+//     L: DataWriteLock<Target = T>,
+//     S: Deref<Target = RevisedData<L>> + ?Sized,
+// {
+//     type Lock = L;
+
+//     #[inline(always)]
+//     fn write(&self) -> L::WriteGuard<'_> {
+//         self.data.write()
+//     }
+
+//     #[inline(always)]
+//     fn read(&self) -> L::ReadGuard<'_> {
+//         self.data.read()
+//     }
+
+//     #[inline(always)]
+//     fn mark_all_unseen(&self) {
+//         self.update_version(STEP_SIZE)
+//     }
+// }
+
+impl<'share, 'state, T, L, R> SensorObserve for SensorObserver<R>
 where
     L: DataReadLock<Target = T>,
     R: Deref<Target = RevisedData<L>>,
@@ -345,15 +610,19 @@ where
     }
 }
 
-pub struct MappedSensor<A: SensorOut, T, F: FnMut(&<A::Lock as ReadGuardSpecifier>::Target) -> T> {
+pub struct MappedSensorObserver<
+    A: SensorObserve,
+    T,
+    F: FnMut(&<A::Lock as ReadGuardSpecifier>::Target) -> T,
+> {
     a: A,
     _false_cache: OwnedFalseLock<T>,
     map: F,
 }
 
-impl<A, T, F> MappedSensor<A, T, F>
+impl<A, T, F> MappedSensorObserver<A, T, F>
 where
-    A: SensorOut,
+    A: SensorObserve,
     F: FnMut(&<A::Lock as ReadGuardSpecifier>::Target) -> T,
 {
     #[inline(always)]
@@ -371,9 +640,9 @@ where
     }
 }
 
-impl<A, T, F> SensorOut for MappedSensor<A, T, F>
+impl<A, T, F> SensorObserve for MappedSensorObserver<A, T, F>
 where
-    A: SensorOut,
+    A: SensorObserve,
     F: FnMut(&<A::Lock as ReadGuardSpecifier>::Target) -> T,
 {
     type Lock = OwnedFalseLock<T>;
@@ -409,8 +678,8 @@ where
     }
 }
 
-pub struct MappedSensorCached<
-    A: SensorOut,
+pub struct MappedSensorObserverCached<
+    A: SensorObserve,
     T,
     F: FnMut(&<A::Lock as ReadGuardSpecifier>::Target) -> T,
 > {
@@ -419,9 +688,9 @@ pub struct MappedSensorCached<
     map: F,
 }
 
-impl<A, T, F> MappedSensorCached<A, T, F>
+impl<A, T, F> MappedSensorObserverCached<A, T, F>
 where
-    A: SensorOut,
+    A: SensorObserve,
     F: FnMut(&<A::Lock as ReadGuardSpecifier>::Target) -> T,
 {
     #[inline(always)]
@@ -436,9 +705,9 @@ where
     }
 }
 
-impl<A, T, F> SensorOut for MappedSensorCached<A, T, F>
+impl<A, T, F> SensorObserve for MappedSensorObserverCached<A, T, F>
 where
-    A: SensorOut,
+    A: SensorObserve,
     F: FnMut(&<A::Lock as ReadGuardSpecifier>::Target) -> T,
 {
     type Lock = FalseReadLock<T>;
@@ -474,9 +743,9 @@ where
         true
     }
 }
-pub struct FusedSensor<
-    A: SensorOut,
-    B: SensorOut,
+pub struct FusedSensorObserver<
+    A: SensorObserve,
+    B: SensorObserve,
     T,
     F: FnMut(&<A::Lock as ReadGuardSpecifier>::Target, &<B::Lock as ReadGuardSpecifier>::Target) -> T,
 > {
@@ -486,10 +755,10 @@ pub struct FusedSensor<
     fuse: F,
 }
 
-impl<A, B, T, F> FusedSensor<A, B, T, F>
+impl<A, B, T, F> FusedSensorObserver<A, B, T, F>
 where
-    A: SensorOut,
-    B: SensorOut,
+    A: SensorObserve,
+    B: SensorObserve,
     F: FnMut(
         &<A::Lock as ReadGuardSpecifier>::Target,
         &<B::Lock as ReadGuardSpecifier>::Target,
@@ -516,10 +785,10 @@ where
     }
 }
 
-impl<A, B, T, F> SensorOut for FusedSensor<A, B, T, F>
+impl<A, B, T, F> SensorObserve for FusedSensorObserver<A, B, T, F>
 where
-    A: SensorOut,
-    B: SensorOut,
+    A: SensorObserve,
+    B: SensorObserve,
     F: FnMut(
         &<A::Lock as ReadGuardSpecifier>::Target,
         &<B::Lock as ReadGuardSpecifier>::Target,
@@ -560,9 +829,9 @@ where
     }
 }
 
-pub struct FusedSensorCached<
-    A: SensorOut,
-    B: SensorOut,
+pub struct FusedSensorObserverCached<
+    A: SensorObserve,
+    B: SensorObserve,
     T,
     F: FnMut(&<A::Lock as ReadGuardSpecifier>::Target, &<B::Lock as ReadGuardSpecifier>::Target) -> T,
 > {
@@ -572,10 +841,10 @@ pub struct FusedSensorCached<
     fuse: F,
 }
 
-impl<A, B, T, F> FusedSensorCached<A, B, T, F>
+impl<A, B, T, F> FusedSensorObserverCached<A, B, T, F>
 where
-    A: SensorOut,
-    B: SensorOut,
+    A: SensorObserve,
+    B: SensorObserve,
     F: FnMut(
         &<A::Lock as ReadGuardSpecifier>::Target,
         &<B::Lock as ReadGuardSpecifier>::Target,
@@ -603,10 +872,10 @@ where
     }
 }
 
-impl<A, B, T, F> SensorOut for FusedSensorCached<A, B, T, F>
+impl<A, B, T, F> SensorObserve for FusedSensorObserverCached<A, B, T, F>
 where
-    A: SensorOut,
-    B: SensorOut,
+    A: SensorObserve,
+    B: SensorObserve,
     F: FnMut(
         &<A::Lock as ReadGuardSpecifier>::Target,
         &<B::Lock as ReadGuardSpecifier>::Target,
@@ -653,32 +922,32 @@ mod tests {
 
     use crate::{
         lock::parking_lot::{ArcRwSensor, ArcRwSensorWriter, RwSensorWriter},
-        Lockshare, MappedSensor, SensorIn, SensorOut,
+        Lockshare, MappedSensorObserver, SensorObserve, SensorWrite,
     };
 
-    #[test]
-    fn test_1() {
-        let s1 = ArcRwSensorWriter::new(-3);
-        let s2 = RwSensorWriter::new(5);
+    // #[test]
+    // fn test_1() {
+    //     let s1 = ArcRwSensorWriter::new(-3);
+    //     let s2 = RwSensorWriterExec::new(5);
 
-        let bb: ArcRwSensor<i32> = s1.spawn_observer();
+    //     let bb: ArcRwSensor<i32> = s1.spawn_observer();
 
-        let mut x = s1
-            .spawn_observer()
-            .fuse_cached(s2.spawn_observer(), |x, y| *x + *y);
+    //     let mut x = s1
+    //         .spawn_observer()
+    //         .fuse_cached(s2.spawn_observer(), |x, y| *x + *y);
 
-        assert!(!x.has_changed());
+    //     assert!(!x.has_changed());
 
-        assert_eq!(*x.pull(), 2);
-        s1.update(3);
-        drop(s1);
-        assert!(x.inner_a().is_closed());
-        assert!(x.has_changed());
-        assert_eq!(*x.pull(), 2);
-        assert_eq!(*x.pull_updated(), 8);
-        assert!(!x.has_changed());
-        let mut x = x.map_cached(|x| x + 2);
+    //     assert_eq!(*x.pull(), 2);
+    //     s1.update(3);
+    //     drop(s1);
+    //     assert!(x.inner_a().is_closed());
+    //     assert!(x.has_changed());
+    //     assert_eq!(*x.pull(), 2);
+    //     assert_eq!(*x.pull_updated(), 8);
+    //     assert!(!x.has_changed());
+    //     let mut x = x.map_cached(|x| x + 2);
 
-        assert_eq!(*x.pull(), 10);
-    }
+    //     assert_eq!(*x.pull(), 10);
+    // }
 }

@@ -33,31 +33,13 @@ pub trait DataWriteLock: DataReadLock {
     fn write(&self) -> Self::WriteGuard<'_>;
 
     fn try_write(&self) -> Option<Self::WriteGuard<'_>>;
+}
 
-    /// Downgrade mutable access to immutable access for a write guard originating from this lock instance.
-    ///
-    /// # Panics
-    ///
-    /// Behaviour is only well defined if and only if `write_guard` originates from `self`.
-    /// May panic if `wirte_guard` does not originate from `self`. Implementations may also downgrade the guard
-    /// regardless or return a new read guard originating from `self`.
-    #[inline(always)]
-    fn downgrade<'a>(&'a self, write_guard: Self::WriteGuard<'a>) -> Self::ReadGuard<'a> {
-        drop(write_guard);
-        self.read()
-    }
-    /// Upgrade immutable access to mutable access for a read guard from this specific lock instance.
-    ///
-    /// # Panics
-    ///
-    /// Behaviour is only well defined if and only if `read_guard` originates from `self`.
-    /// May panic if `read_guard` does not originate from `self`. Implementations may also upgrade the guard
-    /// regardless or return a new write guard originating from `self`.
-    #[inline(always)]
-    fn upgrade<'a>(&'a self, read_guard: Self::ReadGuard<'a>) -> Self::WriteGuard<'a> {
-        drop(read_guard);
-        self.write()
-    }
+/// Specifies whether a read or write guard can respectively be atomically upgraded or downgraded.
+pub trait AtomicConvert {
+    type Target;
+
+    fn convert(self) -> Self::Target;
 }
 
 pub trait DataLockFactory {

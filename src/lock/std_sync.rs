@@ -1,15 +1,15 @@
 use crate::{
-    DataLockFactory, DataReadLock, DataWriteLock, ReadGuardSpecifier, RevisedData, Sensor,
+    DataLockFactory, DataReadLock, DataWriteLock, ReadGuardSpecifier, RevisedData, SensorObserver,
     SensorWriter,
 };
 
 pub type RwSensorWriter<'share, T> =
     SensorWriter<'share, 'share, RevisedData<std::sync::RwLock<T>>>;
 
-pub type RwSensor<T> = Sensor<RevisedData<std::sync::RwLock<T>>>;
+pub type RwSensor<T> = SensorObserver<RevisedData<std::sync::RwLock<T>>>;
 pub type MutexSensorWriter<'share, T> =
     SensorWriter<'share, 'share, RevisedData<std::sync::Mutex<T>>>;
-pub type MutexSensor<T> = Sensor<RevisedData<std::sync::Mutex<T>>>;
+pub type MutexSensor<T> = SensorObserver<RevisedData<std::sync::Mutex<T>>>;
 
 impl<T> ReadGuardSpecifier for std::sync::RwLock<T> {
     type Target = T;
@@ -71,16 +71,6 @@ impl<T> DataWriteLock for std::sync::Mutex<T> {
     #[inline(always)]
     fn write(&self) -> Self::WriteGuard<'_> {
         self.lock().unwrap()
-    }
-
-    #[inline(always)]
-    fn downgrade<'a>(&'a self, write_guard: Self::WriteGuard<'a>) -> Self::ReadGuard<'a> {
-        write_guard
-    }
-
-    #[inline(always)]
-    fn upgrade<'a>(&'a self, read_guard: Self::ReadGuard<'a>) -> Self::WriteGuard<'a> {
-        read_guard
     }
 
     #[inline(always)]
