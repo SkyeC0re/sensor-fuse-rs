@@ -41,10 +41,10 @@ impl<T> DerefMut for RevisedData<T> {
 
 impl<T> RevisedData<T> {
     #[inline(always)]
-    pub fn new(data: T) -> Self {
+    pub const fn new(data: T) -> Self {
         Self {
             data,
-            version: Default::default(),
+            version: AtomicUsize::new(0),
         }
     }
 
@@ -79,13 +79,24 @@ impl<T, E: CallbackManager> DerefMut for ExecData<T, E> {
     }
 }
 
+#[repr(transparent)]
 pub struct ExecLock<L, T, E>
 where
     L: DataWriteLock<Target = ExecData<T, E>>,
     E: CallbackManager,
 {
     inner: L,
-    // _types: PhantomData<(T, E)>,
+}
+
+impl<L, T, E> ExecLock<L, T, E>
+where
+    L: DataWriteLock<Target = ExecData<T, E>>,
+    E: CallbackManager,
+{
+    #[inline(always)]
+    pub const fn new(lock: L) -> Self {
+        Self { inner: lock }
+    }
 }
 
 // impl<L, T, E> Deref for ExecLock<L, T, E>
@@ -219,28 +230,32 @@ where
     }
 }
 
-pub trait Lockshare<'share, 'state> {
-    type Lock: DataWriteLock + 'state;
-    type Shared: Deref<Target = RevisedData<Self::Lock>> + 'state;
+pub trait Lockshare<'share, 'state, L: DataWriteLock + 'state> {
+    // type Lock: DataWriteLock + 'state;
+    type Shared: Deref<Target = RevisedData<L>> + 'state;
 
     /// Construct a new shareable lock from the given lock.
-    fn new(lock: Self::Lock) -> Self;
+    fn new(lock: L) -> Self;
 
     /// Share the revised data for the largest possible lifetime.
     fn share_lock(&'share self) -> Self::Shared;
 
     /// There is probably a better way than this to get an elided reference
     /// to the revised data.
-    fn share_elided_ref(&self) -> &RevisedData<Self::Lock>;
+    fn share_elided_ref(&self) -> &RevisedData<L>;
 }
 
-pub struct SensorWriter<'share, 'state, R>(R, PhantomData<(&'share Self, &'state ())>)
+#[repr(transparent)]
+pub struct SensorWriter<'share, 'state, R, L: DataWriteLock + 'state>(
+    R,
+    PhantomData<(&'share Self, &'state L)>,
+)
 where
-    R: Lockshare<'share, 'state>;
+    R: Lockshare<'share, 'state, L>;
 
-impl<'share, 'state, R> Drop for SensorWriter<'share, 'state, R>
+impl<'share, 'state, R, L: DataWriteLock + 'state> Drop for SensorWriter<'share, 'state, R, L>
 where
-    R: Lockshare<'share, 'state>,
+    R: Lockshare<'share, 'state, L>,
 {
     fn drop(&mut self) {
         self.0
@@ -250,9 +265,9 @@ where
     }
 }
 
-impl<'share, 'state, R> Deref for SensorWriter<'share, 'state, R>
+impl<'share, 'state, R, L: DataWriteLock + 'state> Deref for SensorWriter<'share, 'state, R, L>
 where
-    R: Lockshare<'share, 'state>,
+    R: Lockshare<'share, 'state, L>,
 {
     type Target = R;
 
@@ -261,18 +276,18 @@ where
     }
 }
 
-impl<'share, 'state, R> DerefMut for SensorWriter<'share, 'state, R>
+impl<'share, 'state, R, L: DataWriteLock + 'state> DerefMut for SensorWriter<'share, 'state, R, L>
 where
-    R: Lockshare<'share, 'state>,
+    R: Lockshare<'share, 'state, L>,
 {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.0
     }
 }
 
-impl<'share, 'state, R> SensorWriter<'share, 'state, R>
+impl<'share, 'state, R, L: DataWriteLock + 'state> SensorWriter<'share, 'state, R, L>
 where
-    R: Lockshare<'share, 'state>,
+    R: Lockshare<'share, 'state, L>,
 {
     // #[inline(always)]
     // pub fn new_from<LF: DataLockFactory<Lock = R::Lock>>(
@@ -282,7 +297,7 @@ where
     // }
 
     #[inline(always)]
-    pub fn spawn_referenced_observer(&self) -> SensorObserver<&RevisedData<R::Lock>> {
+    pub fn spawn_referenced_observer(&self) -> SensorObserver<&RevisedData<L>> {
         SensorObserver {
             inner: self.0.share_elided_ref(),
             version: self.0.share_elided_ref().version(),
@@ -301,11 +316,10 @@ where
 
 // There must be a way to do this sharing without having to have a second lifetime in the trait,
 // but the author is not experienced enough.
-impl<'share, L: 'share> Lockshare<'share, 'share> for RevisedData<L>
+impl<'share, L> Lockshare<'share, 'share, L> for RevisedData<L>
 where
-    L: DataWriteLock,
+    L: DataWriteLock + 'share,
 {
-    type Lock = L;
     type Shared = &'share Self;
 
     #[inline(always)]
@@ -324,11 +338,10 @@ where
     }
 }
 
-impl<'state, L: 'state> Lockshare<'_, 'state> for Arc<RevisedData<L>>
+impl<'state, L> Lockshare<'_, 'state, L> for Arc<RevisedData<L>>
 where
-    L: DataWriteLock,
+    L: DataWriteLock + 'state,
 {
-    type Lock = L;
     type Shared = Self;
 
     #[inline(always)]
@@ -447,12 +460,12 @@ pub trait SensorObserve {
     }
 }
 
-impl<'share, 'state, R> SensorWrite for SensorWriter<'share, 'state, R>
+impl<'share, 'state, R, L: DataWriteLock + 'state> SensorWrite
+    for SensorWriter<'share, 'state, R, L>
 where
-    R: Lockshare<'share, 'state>,
-    R::Lock: DataWriteLock,
+    R: Lockshare<'share, 'state, L>,
 {
-    type Lock = R::Lock;
+    type Lock = L;
 
     #[inline(always)]
     fn mark_all_unseen(&self) {
@@ -831,33 +844,42 @@ where
 mod tests {
 
     use crate::{
-        lock::parking_lot::{ArcRwSensor, ArcRwSensorWriter, RwSensorWriter},
-        Lockshare, MappedSensorObserver, SensorObserve, SensorWrite,
+        lock::parking_lot::{ArcRwSensor, ArcRwSensorWriter, RwSensorWriter, RwSensorWriterExec},
+        Lockshare, MappedSensorObserver, SensorCallbackWrite, SensorObserve, SensorWrite,
     };
 
-    // #[test]
-    // fn test_1() {
-    //     let s1 = ArcRwSensorWriter::new(-3);
-    //     let s2 = RwSensorWriterExec::new(5);
+    #[test]
+    fn test_1() {
+        let s1 = ArcRwSensorWriter::new(-3);
+        let s2 = RwSensorWriterExec::new(5);
 
-    //     let bb: ArcRwSensor<i32> = s1.spawn_observer();
+        let bb = s1.spawn_observer();
 
-    //     let mut x = s1
-    //         .spawn_observer()
-    //         .fuse_cached(s2.spawn_observer(), |x, y| *x + *y);
+        let mut x = s1
+            .spawn_observer()
+            .fuse_cached(s2.spawn_observer(), |x, y| *x + *y);
 
-    //     assert!(!x.has_changed());
+        s2.register(|new_val| {
+            println!("New sample {}", new_val);
+            false
+        });
 
-    //     assert_eq!(*x.pull(), 2);
-    //     s1.update(3);
-    //     drop(s1);
-    //     assert!(x.inner_a().is_closed());
-    //     assert!(x.has_changed());
-    //     assert_eq!(*x.pull(), 2);
-    //     assert_eq!(*x.pull_updated(), 8);
-    //     assert!(!x.has_changed());
-    //     let mut x = x.map_cached(|x| x + 2);
+        assert!(!x.has_changed());
 
-    //     assert_eq!(*x.pull(), 10);
-    // }
+        assert_eq!(*x.pull(), 2);
+        s1.update(3);
+        drop(s1);
+        assert!(x.inner_a().is_closed());
+        assert!(x.has_changed());
+        assert_eq!(*x.pull(), 2);
+        assert_eq!(*x.pull_updated(), 8);
+        assert!(!x.has_changed());
+        let mut x = x.map_cached(|x| x + 2);
+
+        s2.update_exec(7);
+        s2.update_exec(10);
+
+        assert_eq!(*x.pull(), 10);
+        assert!(false);
+    }
 }

@@ -5,6 +5,12 @@ use super::CallbackManager;
 #[derive(Deref, DerefMut, Default)]
 pub struct VecBoxManager<T>(Vec<Box<dyn FnMut(&T) -> bool>>);
 
+impl<T> VecBoxManager<T> {
+    pub const fn new() -> Self {
+        Self(Vec::new())
+    }
+}
+
 impl<T> CallbackManager for VecBoxManager<T> {
     type Target = T;
 
