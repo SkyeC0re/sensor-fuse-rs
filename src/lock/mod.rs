@@ -35,13 +35,6 @@ pub trait DataWriteLock: DataReadLock {
     fn try_write(&self) -> Option<Self::WriteGuard<'_>>;
 }
 
-/// Specifies whether a read or write guard can respectively be atomically upgraded or downgraded.
-pub trait AtomicConvert {
-    type Target;
-
-    fn convert(self) -> Self::Target;
-}
-
 pub trait DataLockFactory {
     type Lock: DataWriteLock;
     /// Contruct a new lock from the given initial value.

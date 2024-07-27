@@ -3,15 +3,18 @@ use std::sync::Arc;
 use parking_lot::{self, RwLockWriteGuard};
 
 use crate::{
-    CallbackManager, DataLockFactory, DataReadLock, DataWriteLock, ExecData, ExecGuard, ExecLock,
-    Lockshare, ReadGuardSpecifier, RevisedData, SensorCallbackWrite, SensorObserver, SensorWrite,
-    SensorWriter,
+    callback_manager::standard::VecBoxManager, CallbackManager, DataLockFactory, DataReadLock,
+    DataWriteLock, ExecData, ExecGuard, ExecLock, Lockshare, ReadGuardSpecifier, RevisedData,
+    SensorCallbackWrite, SensorObserver, SensorWrite, SensorWriter,
 };
 
 pub type RwSensorWriter<'share, T> =
     SensorWriter<'share, 'share, RevisedData<parking_lot::RwLock<T>>>;
-// pub type RwSensorWriterExec<'share, T> =
-//     SensorWriterExec<'share, 'share, RevisedData<parking_lot::RwLock<T>>>;
+pub type RwSensorWriterExec<'share, T> = SensorWriter<
+    'share,
+    'share,
+    RevisedData<ExecLock<parking_lot::RwLock<ExecData<T, VecBoxManager<T>>>, T, VecBoxManager<T>>>,
+>;
 pub type RwSensor<T> = SensorObserver<parking_lot::RwLock<T>>;
 
 pub type MutexSensorWriter<'share, T> =
@@ -58,7 +61,7 @@ where
     E: CallbackManager<Target = T>,
 {
     fn update_exec(&self, sample: T) {
-        let mut guard = self.share_elided_ref().data.write();
+        let mut guard = self.share_elided_ref().write();
         *guard = sample;
         self.mark_all_unseen();
         let guard = ExecGuard {
@@ -66,12 +69,12 @@ where
             _types: std::marker::PhantomData,
         };
 
-        // Atomic downgrade just occured. No other modication call could be at this point.
-        unsafe { (*guard.inner.exec_manager.get()).callback(&guard.inner.data) };
+        // Atomic downgrade just occured. No other modication can happen.
+        unsafe { (*guard.inner.exec_manager.get()).callback(&guard.inner) };
     }
 
     fn modify_with_exec(&self, f: impl FnOnce(&mut <Self::Lock as ReadGuardSpecifier>::Target)) {
-        let mut guard = self.share_elided_ref().data.write();
+        let mut guard = self.share_elided_ref().write();
         f(&mut guard);
         self.mark_all_unseen();
         let guard = ExecGuard {
@@ -79,20 +82,20 @@ where
             _types: std::marker::PhantomData,
         };
 
-        // Atomic downgrade just occured. No other modification will happen.
+        // Atomic downgrade just occured. No other modification can happen.
         unsafe {
-            (*guard.inner.exec_manager.get()).callback(&guard.inner.data);
+            (*guard.inner.exec_manager.get()).callback(&guard.inner);
         };
     }
 
     fn exec(&self) {
         let guard = ExecGuard {
-            inner: RwLockWriteGuard::downgrade(self.share_elided_ref().data.write().inner),
+            inner: RwLockWriteGuard::downgrade(self.share_elided_ref().write().inner),
             _types: std::marker::PhantomData,
         };
 
-        // Atomic downgrade just occured. No other modification will happen.
-        unsafe { (*guard.inner.exec_manager.get()).callback(&guard.inner.data) };
+        // Atomic downgrade just occured. No other modification can happen.
+        unsafe { (*guard.inner.exec_manager.get()).callback(&guard.inner) };
     }
 
     fn register<F: 'static + FnMut(&<Self::Lock as ReadGuardSpecifier>::Target) -> bool>(
@@ -100,7 +103,6 @@ where
         f: F,
     ) {
         self.share_elided_ref()
-            .data
             .write()
             .inner
             .exec_manager

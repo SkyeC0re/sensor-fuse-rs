@@ -1,15 +1,17 @@
+pub mod callback_manager;
 pub mod lock;
 
+use callback_manager::CallbackManager;
 use core::marker::PhantomData;
 use core::{
     ops::Deref,
     sync::atomic::{AtomicUsize, Ordering},
 };
 use lock::{
-    AtomicConvert, DataLockFactory, DataReadLock, DataWriteLock, FalseReadLock, OwnedData,
-    OwnedFalseLock, ReadGuardSpecifier,
+    DataLockFactory, DataReadLock, DataWriteLock, FalseReadLock, OwnedData, OwnedFalseLock,
+    ReadGuardSpecifier,
 };
-use std::cell::{Cell, UnsafeCell};
+use std::cell::UnsafeCell;
 use std::ops::DerefMut;
 
 use std::sync::Arc;
@@ -21,6 +23,20 @@ const STEP_SIZE: usize = 2;
 pub struct RevisedData<T> {
     pub data: T,
     version: AtomicUsize,
+}
+
+impl<T> Deref for RevisedData<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.data
+    }
+}
+
+impl<T> DerefMut for RevisedData<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.data
+    }
 }
 
 impl<T> RevisedData<T> {
@@ -42,13 +58,6 @@ impl<T> RevisedData<T> {
     pub fn version(&self) -> usize {
         self.version.load(core::sync::atomic::Ordering::Acquire)
     }
-}
-
-pub trait CallbackManager {
-    type Target;
-
-    fn register<F: 'static + FnMut(&Self::Target) -> bool>(&self, f: F);
-    fn callback(&mut self, value: &Self::Target);
 }
 
 pub struct ExecData<T, E: CallbackManager> {
@@ -76,8 +85,30 @@ where
     E: CallbackManager,
 {
     inner: L,
-    _types: PhantomData<(T, E)>,
+    // _types: PhantomData<(T, E)>,
 }
+
+// impl<L, T, E> Deref for ExecLock<L, T, E>
+// where
+//     L: DataWriteLock<Target = ExecData<T, E>>,
+//     E: CallbackManager,
+// {
+//     type Target = L;
+
+//     fn deref(&self) -> &Self::Target {
+//         &self.inner
+//     }
+// }
+
+// impl<L, T, E> DerefMut for ExecLock<L, T, E>
+// where
+//     L: DataWriteLock<Target = ExecData<T, E>>,
+//     E: CallbackManager,
+// {
+//     fn deref_mut(&mut self) -> &mut Self::Target {
+//         &mut self.inner
+//     }
+// }
 
 impl<L, T, E> ReadGuardSpecifier for ExecLock<L, T, E>
 where
@@ -268,70 +299,6 @@ where
     }
 }
 
-// impl<'share, 'state, R, L: 'state> SensorWriter<'share, 'state, R>
-// where
-//     L: DataWriteLock + DataLockFactory<Lock = L>,
-//     R: RevisedDataLockshare<'share, 'state, Lock = L>,
-// {
-//     #[inline(always)]
-//     pub fn new(init: <R::Lock as ReadGuardSpecifier>::Target) -> Self {
-//         Self::new_from::<R::Lock>(init)
-//     }
-// }
-
-// pub struct SensorWriterExec<'share, 'state, R>
-// where
-//     R: RevisedDataLockshare<'share, 'state>,
-// {
-//     inner: SensorWriter<'share, 'state, R>,
-//     exec: Vec<Box<dyn FnMut(&<R::Lock as ReadGuardSpecifier>::Target) -> bool>>,
-// }
-
-// impl<'share, 'state, R> SensorWriterExec<'share, 'state, R>
-// where
-//     R: RevisedDataLockshare<'share, 'state>,
-// {
-//     #[inline(always)]
-//     pub fn register<F: 'static + FnMut(&<R::Lock as ReadGuardSpecifier>::Target) -> bool>(
-//         &mut self,
-//         f: F,
-//     ) {
-//         self.exec.push(Box::new(f));
-//     }
-
-//     /// Execute all functions with the given value and remove those that returned false.
-//     /// Although this function uses an immutable borrow, IT SHOULD ONLY EVER BE CALLED WHEN IT IS SAFE TO
-//     /// TO BORROW `exec` MUTABLY.
-//     #[inline(always)]
-//     unsafe fn execute_inner(&self, val: &<R::Lock as ReadGuardSpecifier>::Target) {
-//         let mut i = 0;
-//         let mut len = self.exec.len();
-//         let ptr_slice = self.exec.as_ptr().cast_mut();
-//         while i < len {
-//             let func = ptr_slice.add(i);
-//             if (*func)(val) {
-//                 i += 1;
-//             } else {
-//                 len -= 1;
-//                 std::ptr::swap(func, ptr_slice.add(len));
-//             }
-//         }
-//         (*std::ptr::from_ref(&self.exec).cast_mut()).truncate(len);
-//     }
-// }
-
-// impl<'share, 'state, R> Deref for SensorWriterExec<'share, 'state, R>
-// where
-//     R: Lockshare<'share, 'state>,
-// {
-//     type Target = SensorWriter<'share, 'state, R>;
-
-//     #[inline(always)]
-//     fn deref(&self) -> &Self::Target {
-//         &self.inner
-//     }
-// }
-
 // There must be a way to do this sharing without having to have a second lifetime in the trait,
 // but the author is not experienced enough.
 impl<'share, L: 'share> Lockshare<'share, 'share> for RevisedData<L>
@@ -514,61 +481,6 @@ where
         self.share_elided_ref().data.write()
     }
 }
-
-// impl<'share, 'state, R, L, T, E> SensorCallbackWrite for SensorWriter<'share, 'state, R>
-// where
-//     R: Lockshare<'share, 'state, Lock = ExecLock<L, T, E>>,
-//     L: DataWriteLock<Target = ExecData<T, E>>,
-//     L::WriteGuard: AtomicConvert<'write, Target = L::ReadGuard<'write>>,
-//     E: CallbackManager,
-// {
-//     type Target = T;
-//     fn update_exec(&self, sample: Self::Target) {
-//         let mut guard = self.share_elided_ref().data.write();
-//         *guard = sample;
-//         self.mark_all_unseen();
-//         let guard = guard.convert();
-
-//         // We have a mutable reference to the sensor
-//         unsafe { (*core::ptr::from_ref(&guard.inner.exec_manager).cast_mut()).execute() };
-//         // guard.inner.exec_manager.execute();
-//     }
-
-//     fn modify_with_exec(&self, f: impl FnOnce(&mut <Self::Lock as ReadGuardSpecifier>::Target)) {
-//         todo!()
-//     }
-
-//     fn exec(&self) {
-//         todo!()
-//     }
-
-//     fn register(&self) {
-//         todo!()
-//     }
-// }
-
-// impl<T, L, S> SensorIn for S
-// where
-//     L: DataWriteLock<Target = T>,
-//     S: Deref<Target = RevisedData<L>> + ?Sized,
-// {
-//     type Lock = L;
-
-//     #[inline(always)]
-//     fn write(&self) -> L::WriteGuard<'_> {
-//         self.data.write()
-//     }
-
-//     #[inline(always)]
-//     fn read(&self) -> L::ReadGuard<'_> {
-//         self.data.read()
-//     }
-
-//     #[inline(always)]
-//     fn mark_all_unseen(&self) {
-//         self.update_version(STEP_SIZE)
-//     }
-// }
 
 impl<'share, 'state, T, L, R> SensorObserve for SensorObserver<R>
 where
