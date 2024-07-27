@@ -1,6 +1,5 @@
 use crate::{
-    DataLockFactory, DataReadLock, DataWriteLock, ReadGuardSpecifier, RevisedData, SensorObserver,
-    SensorWriter,
+    DataReadLock, DataWriteLock, ReadGuardSpecifier, RevisedData, SensorObserver, SensorWriter,
 };
 
 pub type RwSensorWriter<'share, T> =
@@ -40,15 +39,6 @@ impl<T> DataWriteLock for std::sync::RwLock<T> {
     }
 }
 
-impl<T> DataLockFactory for std::sync::RwLock<T> {
-    type Lock = Self;
-
-    #[inline(always)]
-    fn new(init: T) -> Self::Lock {
-        Self::new(init)
-    }
-}
-
 impl<T> ReadGuardSpecifier for std::sync::Mutex<T> {
     type Target = T;
     type ReadGuard<'read> = std::sync::MutexGuard<'read, T> where T: 'read;
@@ -76,14 +66,5 @@ impl<T> DataWriteLock for std::sync::Mutex<T> {
     #[inline(always)]
     fn try_write(&self) -> Option<Self::WriteGuard<'_>> {
         self.try_lock().ok()
-    }
-}
-
-impl<T> DataLockFactory for std::sync::Mutex<T> {
-    type Lock = Self;
-
-    #[inline(always)]
-    fn new(init: T) -> Self::Lock {
-        Self::new(init)
     }
 }

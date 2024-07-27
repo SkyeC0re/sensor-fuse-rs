@@ -1,11 +1,11 @@
-use std::{cell::UnsafeCell, marker::PhantomData, ops::DerefMut, sync::Arc};
+use std::{cell::UnsafeCell, marker::PhantomData, sync::Arc};
 
 use parking_lot::{self, RwLockWriteGuard};
 
 use crate::{
-    callback_manager::standard::VecBoxManager, CallbackManager, DataLockFactory, DataReadLock,
-    DataWriteLock, ExecData, ExecGuard, ExecLock, Lockshare, ReadGuardSpecifier, RevisedData,
-    SensorCallbackWrite, SensorObserver, SensorWrite, SensorWriter,
+    callback_manager::standard::VecBoxManager, CallbackManager, DataReadLock, DataWriteLock,
+    ExecData, ExecGuard, ExecLock, Lockshare, ReadGuardSpecifier, RevisedData, SensorCallbackWrite,
+    SensorObserver, SensorWrite, SensorWriter,
 };
 
 pub type RwSensorWriter<'share, T> =
@@ -189,15 +189,6 @@ where
     }
 }
 
-impl<T> DataLockFactory for parking_lot::RwLock<T> {
-    type Lock = Self;
-
-    #[inline(always)]
-    fn new(init: T) -> Self::Lock {
-        Self::new(init)
-    }
-}
-
 impl<T> DataWriteLock for parking_lot::Mutex<T> {
     type WriteGuard<'write> = parking_lot::MutexGuard<'write, T> where T: 'write;
     #[inline(always)]
@@ -225,14 +216,5 @@ impl<T> DataReadLock for parking_lot::Mutex<T> {
     #[inline(always)]
     fn try_read(&self) -> Option<Self::ReadGuard<'_>> {
         self.try_lock()
-    }
-}
-
-impl<T> DataLockFactory for parking_lot::Mutex<T> {
-    type Lock = Self;
-
-    #[inline(always)]
-    fn new(init: T) -> Self::Lock {
-        Self::new(init)
     }
 }

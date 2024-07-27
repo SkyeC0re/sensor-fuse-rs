@@ -35,12 +35,6 @@ pub trait DataWriteLock: DataReadLock {
     fn try_write(&self) -> Option<Self::WriteGuard<'_>>;
 }
 
-pub trait DataLockFactory {
-    type Lock: DataWriteLock;
-    /// Contruct a new lock from the given initial value.
-    fn new(init: <Self::Lock as ReadGuardSpecifier>::Target) -> Self::Lock;
-}
-
 #[derive(Deref, DerefMut, Clone)]
 #[repr(transparent)]
 pub struct FalseReadLock<T>(pub T);

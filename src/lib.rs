@@ -8,8 +8,7 @@ use core::{
     sync::atomic::{AtomicUsize, Ordering},
 };
 use lock::{
-    DataLockFactory, DataReadLock, DataWriteLock, FalseReadLock, OwnedData, OwnedFalseLock,
-    ReadGuardSpecifier,
+    DataReadLock, DataWriteLock, FalseReadLock, OwnedData, OwnedFalseLock, ReadGuardSpecifier,
 };
 use std::cell::UnsafeCell;
 use std::ops::DerefMut;
@@ -289,13 +288,6 @@ impl<'share, 'state, R, L: DataWriteLock + 'state> SensorWriter<'share, 'state, 
 where
     R: Lockshare<'share, 'state, L>,
 {
-    // #[inline(always)]
-    // pub fn new_from<LF: DataLockFactory<Lock = R::Lock>>(
-    //     init: <<R::Lock as LockRef>::Lock as ReadGuardSpecifier>::Target,
-    // ) -> Self {
-    //     Self(R::new(LF::new(init)), PhantomData)
-    // }
-
     #[inline(always)]
     pub fn spawn_referenced_observer(&self) -> SensorObserver<&RevisedData<L>> {
         SensorObserver {
@@ -395,7 +387,7 @@ trait SensorCallbackWrite: SensorWrite {
     fn modify_with_exec(&self, f: impl FnOnce(&mut <Self::Lock as ReadGuardSpecifier>::Target));
 
     fn exec(&self);
-    // TODO
+    /// Register a new function to the execution queue.
     fn register<F: 'static + FnMut(&<Self::Lock as ReadGuardSpecifier>::Target) -> bool>(
         &self,
         f: F,
@@ -853,7 +845,7 @@ mod tests {
         let s1 = ArcRwSensorWriter::new(-3);
         let s2 = RwSensorWriterExec::new(5);
 
-        let bb = s1.spawn_observer();
+        let bb: ArcRwSensor<_> = s1.spawn_observer();
 
         let mut x = s1
             .spawn_observer()
@@ -861,7 +853,7 @@ mod tests {
 
         s2.register(|new_val| {
             println!("New sample {}", new_val);
-            false
+            true
         });
 
         assert!(!x.has_changed());
