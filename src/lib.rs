@@ -289,7 +289,7 @@ where
     R: Lockshare<'share, 'state, L>,
 {
     #[inline(always)]
-    pub fn spawn_referenced_observer(&self) -> SensorObserver<&RevisedData<L>> {
+    pub fn spawn_referenced_observer(&self) -> SensorObserver<&RevisedData<L>, RevisedData<L>> {
         SensorObserver {
             inner: self.0.share_elided_ref(),
             version: self.0.share_elided_ref().version(),
@@ -297,7 +297,7 @@ where
     }
 
     #[inline(always)]
-    fn spawn_observer(&'share self) -> SensorObserver<R::Shared> {
+    fn spawn_observer(&'share self) -> SensorObserver<R::Shared, RevisedData<L>> {
         let inner = self.0.share_lock();
         SensorObserver {
             version: inner.version(),
@@ -353,12 +353,15 @@ where
 }
 
 #[derive(Clone)]
-pub struct SensorObserver<R> {
+pub struct SensorObserver<R, L>
+where
+    R: Deref<Target = L>,
+{
     inner: R,
     version: usize,
 }
 
-impl<R, L> SensorObserver<R>
+impl<R, L> SensorObserver<R, RevisedData<L>>
 where
     R: Deref<Target = RevisedData<L>>,
 {
@@ -380,18 +383,53 @@ trait SensorWrite {
     fn mark_all_unseen(&self);
 }
 
-trait SensorCallbackWrite: SensorWrite {
+trait SensorCallbackExec: SensorCallbackRegister {
     /// Update the sensor's current value, notify observers and execute all registered functions.
-    fn update_exec(&self, sample: <Self::Lock as ReadGuardSpecifier>::Target);
+    fn update_exec(&self, sample: Self::Target);
     /// Modify the sensor value in place, notify observers and execute all registered functions.
-    fn modify_with_exec(&self, f: impl FnOnce(&mut <Self::Lock as ReadGuardSpecifier>::Target));
-
+    fn modify_with_exec(&self, f: impl FnOnce(&mut Self::Target));
+    /// Execute all registered functions.
     fn exec(&self);
+}
+
+trait SensorCallbackRegister {
+    type Target;
+
     /// Register a new function to the execution queue.
-    fn register<F: 'static + FnMut(&<Self::Lock as ReadGuardSpecifier>::Target) -> bool>(
-        &self,
-        f: F,
-    );
+    fn register<F: 'static + FnMut(&Self::Target) -> bool>(&self, f: F);
+}
+
+impl<'share, 'state, R, L, T, E> SensorCallbackRegister
+    for SensorWriter<'share, 'state, R, ExecLock<L, T, E>>
+where
+    L: DataWriteLock<Target = ExecData<T, E>>,
+    R: Lockshare<'share, 'state, ExecLock<L, T, E>>,
+    E: CallbackManager<Target = T>,
+{
+    type Target = T;
+
+    fn register<F: 'static + FnMut(&T) -> bool>(&self, f: F) {
+        self.share_elided_ref()
+            .write()
+            .inner
+            .exec_manager
+            .get_mut()
+            .register(f);
+    }
+}
+
+impl<'share, 'state, R, L, T, E> SensorCallbackRegister
+    for SensorObserver<R, RevisedData<ExecLock<L, T, E>>>
+where
+    L: DataWriteLock<Target = ExecData<T, E>>,
+    R: Deref<Target = RevisedData<ExecLock<L, T, E>>>,
+    E: CallbackManager<Target = T>,
+{
+    type Target = T;
+
+    fn register<F: 'static + FnMut(&T) -> bool>(&self, f: F) {
+        self.inner.write().inner.exec_manager.get_mut().register(f);
+    }
 }
 
 pub trait SensorObserve {
@@ -487,7 +525,7 @@ where
     }
 }
 
-impl<'share, 'state, T, L, R> SensorObserve for SensorObserver<R>
+impl<'share, 'state, T, L, R> SensorObserve for SensorObserver<R, RevisedData<L>>
 where
     L: DataReadLock<Target = T>,
     R: Deref<Target = RevisedData<L>>,
@@ -837,7 +875,8 @@ mod tests {
 
     use crate::{
         lock::parking_lot::{ArcRwSensor, ArcRwSensorWriter, RwSensorWriter, RwSensorWriterExec},
-        Lockshare, MappedSensorObserver, SensorCallbackWrite, SensorObserve, SensorWrite,
+        Lockshare, MappedSensorObserver, SensorCallbackExec, SensorCallbackRegister, SensorObserve,
+        SensorWrite,
     };
 
     #[test]
@@ -853,6 +892,13 @@ mod tests {
 
         s2.register(|new_val| {
             println!("New sample {}", new_val);
+            true
+        });
+
+        let d = s2.spawn_observer();
+
+        d.register(|new_val| {
+            println!("New sample OBS {}", new_val);
             true
         });
 

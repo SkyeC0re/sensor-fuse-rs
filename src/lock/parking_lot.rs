@@ -4,8 +4,8 @@ use parking_lot::{self, RwLockWriteGuard};
 
 use crate::{
     callback_manager::standard::VecBoxManager, CallbackManager, DataReadLock, DataWriteLock,
-    ExecData, ExecGuard, ExecLock, Lockshare, ReadGuardSpecifier, RevisedData, SensorCallbackWrite,
-    SensorObserver, SensorWrite, SensorWriter,
+    ExecData, ExecGuard, ExecLock, Lockshare, ReadGuardSpecifier, RevisedData, SensorCallbackExec,
+    SensorCallbackRegister, SensorObserver, SensorWrite, SensorWriter,
 };
 
 pub type RwSensorWriter<'share, T> =
@@ -35,14 +35,21 @@ impl<'share, T> RwSensorWriterExec<'share, T> {
         )
     }
 }
-pub type RwSensor<T> = SensorObserver<RevisedData<parking_lot::RwLock<T>>>;
-pub type RwSensorExec<T> = SensorObserver<
+pub type RwSensor<'state, T> = SensorObserver<
+    &'state RevisedData<parking_lot::RwLock<T>>,
+    RevisedData<parking_lot::RwLock<T>>,
+>;
+pub type RwSensorExec<'state, T> = SensorObserver<
+    &'state RevisedData<
+        ExecLock<parking_lot::RwLock<ExecData<T, VecBoxManager<T>>>, T, VecBoxManager<T>>,
+    >,
     RevisedData<ExecLock<parking_lot::RwLock<ExecData<T, VecBoxManager<T>>>, T, VecBoxManager<T>>>,
 >;
 
 pub type MutexSensorWriter<'share, T> =
     SensorWriter<'share, 'share, RevisedData<parking_lot::Mutex<T>>, parking_lot::Mutex<T>>;
-pub type MutexSensor<T> = SensorObserver<parking_lot::Mutex<T>>;
+pub type MutexSensor<'state, T> =
+    SensorObserver<&'state RevisedData<parking_lot::Mutex<T>>, RevisedData<parking_lot::Mutex<T>>>;
 
 pub type ArcRwSensorWriter<'share, 'state, T> =
     SensorWriter<'share, 'state, Arc<RevisedData<parking_lot::RwLock<T>>>, parking_lot::RwLock<T>>;
@@ -56,7 +63,8 @@ impl<'share, 'state, T: 'state> ArcRwSensorWriter<'share, 'state, T> {
     }
 }
 
-pub type ArcRwSensor<T> = SensorObserver<Arc<RevisedData<parking_lot::RwLock<T>>>>;
+pub type ArcRwSensor<T> =
+    SensorObserver<Arc<RevisedData<parking_lot::RwLock<T>>>, RevisedData<parking_lot::RwLock<T>>>;
 
 impl<T> ReadGuardSpecifier for parking_lot::RwLock<T> {
     type Target = T;
@@ -88,7 +96,25 @@ impl<T> DataWriteLock for parking_lot::RwLock<T> {
     }
 }
 
-impl<'share, 'state, R, T, E> SensorCallbackWrite
+// impl<'share, 'state, R, T, E> SensorCallbackRegister
+//     for SensorWriter<'share, 'state, R, ExecLock<parking_lot::RwLock<ExecData<T, E>>, T, E>>
+// where
+//     R: Lockshare<'share, 'state, ExecLock<parking_lot::RwLock<ExecData<T, E>>, T, E>>,
+//     E: CallbackManager<Target = T>,
+// {
+//     type Target = T;
+
+//     fn register<F: 'static + FnMut(&Self::Target) -> bool>(&self, f: F) {
+//         self.share_elided_ref()
+//             .write()
+//             .inner
+//             .exec_manager
+//             .get_mut()
+//             .register(f);
+//     }
+// }
+
+impl<'share, 'state, R, T, E> SensorCallbackExec
     for SensorWriter<'share, 'state, R, ExecLock<parking_lot::RwLock<ExecData<T, E>>, T, E>>
 where
     R: Lockshare<'share, 'state, ExecLock<parking_lot::RwLock<ExecData<T, E>>, T, E>>,
@@ -107,7 +133,7 @@ where
         unsafe { (*guard.inner.exec_manager.get()).callback(&guard.inner) };
     }
 
-    fn modify_with_exec(&self, f: impl FnOnce(&mut <Self::Lock as ReadGuardSpecifier>::Target)) {
+    fn modify_with_exec(&self, f: impl FnOnce(&mut T)) {
         let mut guard = self.share_elided_ref().write();
         f(&mut guard);
         self.mark_all_unseen();
@@ -131,21 +157,9 @@ where
         // Atomic downgrade just occured. No other modification can happen.
         unsafe { (*guard.inner.exec_manager.get()).callback(&guard.inner) };
     }
-
-    fn register<F: 'static + FnMut(&<Self::Lock as ReadGuardSpecifier>::Target) -> bool>(
-        &self,
-        f: F,
-    ) {
-        self.share_elided_ref()
-            .write()
-            .inner
-            .exec_manager
-            .get_mut()
-            .register(f);
-    }
 }
 
-impl<'share, 'state, R, T, E> SensorCallbackWrite
+impl<'share, 'state, R, T, E> SensorCallbackExec
     for SensorWriter<'share, 'state, R, ExecLock<parking_lot::Mutex<ExecData<T, E>>, T, E>>
 where
     R: Lockshare<'share, 'state, ExecLock<parking_lot::Mutex<ExecData<T, E>>, T, E>>,
@@ -160,7 +174,7 @@ where
         exec_manager.get_mut().callback(data);
     }
 
-    fn modify_with_exec(&self, f: impl FnOnce(&mut <Self::Lock as ReadGuardSpecifier>::Target)) {
+    fn modify_with_exec(&self, f: impl FnOnce(&mut T)) {
         let mut guard = self.share_elided_ref().write();
         f(&mut guard);
         self.mark_all_unseen();
@@ -174,18 +188,6 @@ where
 
         let ExecData { exec_manager, data } = &mut *guard.inner;
         exec_manager.get_mut().callback(data);
-    }
-
-    fn register<F: 'static + FnMut(&<Self::Lock as ReadGuardSpecifier>::Target) -> bool>(
-        &self,
-        f: F,
-    ) {
-        self.share_elided_ref()
-            .write()
-            .inner
-            .exec_manager
-            .get_mut()
-            .register(f);
     }
 }
 

@@ -5,10 +5,10 @@ use crate::{
 pub type RwSensorWriter<'share, T> =
     SensorWriter<'share, 'share, RevisedData<std::sync::RwLock<T>>, std::sync::RwLock<T>>;
 
-pub type RwSensor<T> = SensorObserver<RevisedData<std::sync::RwLock<T>>>;
+// pub type RwSensor<T> = SensorObserver<RevisedData<std::sync::RwLock<T>>, >;
 pub type MutexSensorWriter<'share, T> =
     SensorWriter<'share, 'share, RevisedData<std::sync::Mutex<T>>, std::sync::Mutex<T>>;
-pub type MutexSensor<T> = SensorObserver<RevisedData<std::sync::Mutex<T>>>;
+// pub type MutexSensor<T> = SensorObserver<RevisedData<std::sync::Mutex<T>>>;
 
 impl<T> ReadGuardSpecifier for std::sync::RwLock<T> {
     type Target = T;
