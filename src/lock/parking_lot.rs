@@ -37,21 +37,19 @@ impl<'share, T> RwSensorWriterExec<'share, T> {
         )
     }
 }
-pub type RwSensor<'state, T> = SensorObserver<
-    &'state RevisedData<parking_lot::RwLock<T>>,
-    RevisedData<parking_lot::RwLock<T>>,
->;
+pub type RwSensor<'state, T> =
+    SensorObserver<&'state RevisedData<parking_lot::RwLock<T>>, parking_lot::RwLock<T>>;
 pub type RwSensorExec<'state, T> = SensorObserver<
     &'state RevisedData<
         ExecLock<parking_lot::RwLock<ExecData<T, VecBoxManager<T>>>, T, VecBoxManager<T>>,
     >,
-    RevisedData<ExecLock<parking_lot::RwLock<ExecData<T, VecBoxManager<T>>>, T, VecBoxManager<T>>>,
+    ExecLock<parking_lot::RwLock<ExecData<T, VecBoxManager<T>>>, T, VecBoxManager<T>>,
 >;
 
 pub type MutexSensorWriter<'share, T> =
     SensorWriter<'share, 'share, RevisedData<parking_lot::Mutex<T>>, parking_lot::Mutex<T>>;
 pub type MutexSensor<'state, T> =
-    SensorObserver<&'state RevisedData<parking_lot::Mutex<T>>, RevisedData<parking_lot::Mutex<T>>>;
+    SensorObserver<&'state RevisedData<parking_lot::Mutex<T>>, parking_lot::Mutex<T>>;
 
 pub type ArcRwSensorWriter<'share, 'state, T> =
     SensorWriter<'share, 'state, Arc<RevisedData<parking_lot::RwLock<T>>>, parking_lot::RwLock<T>>;
@@ -66,7 +64,7 @@ impl<'share, 'state, T: 'state> ArcRwSensorWriter<'share, 'state, T> {
 }
 
 pub type ArcRwSensor<T> =
-    SensorObserver<Arc<RevisedData<parking_lot::RwLock<T>>>, RevisedData<parking_lot::RwLock<T>>>;
+    SensorObserver<Arc<RevisedData<parking_lot::RwLock<T>>>, parking_lot::RwLock<T>>;
 
 impl<T> ReadGuardSpecifier for parking_lot::RwLock<T> {
     type Target = T;

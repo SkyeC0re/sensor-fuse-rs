@@ -10,7 +10,6 @@ use core::{
 use lock::{
     DataReadLock, DataWriteLock, FalseReadLock, OwnedData, OwnedFalseLock, ReadGuardSpecifier,
 };
-use std::cell::UnsafeCell;
 use std::ops::DerefMut;
 
 use std::sync::Arc;
@@ -121,7 +120,7 @@ where
     R: Lockshare<'share, 'state, L>,
 {
     #[inline(always)]
-    pub fn spawn_referenced_observer(&self) -> SensorObserver<&RevisedData<L>, RevisedData<L>> {
+    pub fn spawn_referenced_observer(&self) -> SensorObserver<&RevisedData<L>, L> {
         SensorObserver {
             inner: self.0.share_elided_ref(),
             version: self.0.share_elided_ref().version(),
@@ -129,7 +128,7 @@ where
     }
 
     #[inline(always)]
-    pub fn spawn_observer(&'share self) -> SensorObserver<R::Shared, RevisedData<L>> {
+    pub fn spawn_observer(&'share self) -> SensorObserver<R::Shared, L> {
         let inner = self.0.share_lock();
         SensorObserver {
             version: inner.version(),
@@ -187,16 +186,17 @@ where
 #[derive(Clone)]
 pub struct SensorObserver<R, L>
 where
-    R: Deref<Target = L>,
+    R: Deref<Target = RevisedData<L>>,
 {
     inner: R,
     version: usize,
 }
 
-impl<R, L> SensorObserver<R, RevisedData<L>>
+impl<R, L> SensorObserver<R, L>
 where
     R: Deref<Target = RevisedData<L>>,
 {
+    /// Returns true once all upstream writers have disconnected.
     #[inline(always)]
     fn is_closed(&self) -> bool {
         self.inner.version() & CLOSED_BIT == CLOSED_BIT
@@ -250,8 +250,7 @@ where
     }
 }
 
-impl<'share, 'state, R, L, T, E> SensorCallbackRegister
-    for SensorObserver<R, RevisedData<ExecLock<L, T, E>>>
+impl<'share, 'state, R, L, T, E> SensorCallbackRegister for SensorObserver<R, ExecLock<L, T, E>>
 where
     L: DataWriteLock<Target = ExecData<T, E>>,
     R: Deref<Target = RevisedData<ExecLock<L, T, E>>>,
@@ -363,7 +362,7 @@ where
     }
 }
 
-impl<'share, 'state, T, L, R> SensorObserve for SensorObserver<R, RevisedData<L>>
+impl<'share, 'state, T, L, R> SensorObserve for SensorObserver<R, L>
 where
     L: DataReadLock<Target = T>,
     R: Deref<Target = RevisedData<L>>,
@@ -712,7 +711,10 @@ where
 mod tests {
 
     use crate::{
-        lock::parking_lot::{ArcRwSensor, ArcRwSensorWriter, RwSensorWriter, RwSensorWriterExec},
+        lock::parking_lot::{
+            ArcRwSensor, ArcRwSensorWriter, RwSensor, RwSensorExec, RwSensorWriter,
+            RwSensorWriterExec,
+        },
         Lockshare, MappedSensorObserver, SensorCallbackExec, SensorCallbackRegister, SensorObserve,
         SensorWrite,
     };
@@ -721,6 +723,10 @@ mod tests {
     fn test_1() {
         let s1 = ArcRwSensorWriter::new(-3);
         let s2 = RwSensorWriterExec::new(5);
+        let s3 = RwSensorWriter::new(8);
+
+        let b: RwSensorExec<_> = s2.spawn_observer();
+        let z: RwSensor<_> = s3.spawn_observer();
 
         let bb: ArcRwSensor<_> = s1.spawn_observer();
 
@@ -756,6 +762,5 @@ mod tests {
         s2.update_exec(10);
 
         assert_eq!(*x.pull(), 10);
-        assert!(false);
     }
 }
