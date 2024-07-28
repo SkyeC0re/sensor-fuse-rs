@@ -96,7 +96,7 @@ impl<T> DataWriteLock for parking_lot::RwLock<T> {
     }
 }
 
-impl<'share, 'state, R, T, E> SensorCallbackExec
+impl<'share, 'state, R, T, E> SensorCallbackExec<T>
     for SensorWriter<'share, 'state, R, ExecLock<parking_lot::RwLock<ExecData<T, E>>, T, E>>
 where
     R: Lockshare<'share, 'state, ExecLock<parking_lot::RwLock<ExecData<T, E>>, T, E>>,
@@ -134,7 +134,7 @@ where
     }
 }
 
-impl<'share, 'state, R, T, E> SensorCallbackExec
+impl<'share, 'state, R, T, E> SensorCallbackExec<T>
     for SensorWriter<'share, 'state, R, ExecLock<parking_lot::Mutex<ExecData<T, E>>, T, E>>
 where
     R: Lockshare<'share, 'state, ExecLock<parking_lot::Mutex<ExecData<T, E>>, T, E>>,

@@ -203,43 +203,37 @@ where
     }
 }
 
-pub trait SensorWrite {
-    type Lock: DataWriteLock;
-
-    fn read(&self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_>;
-    fn write(&self) -> <Self::Lock as DataWriteLock>::WriteGuard<'_>;
-    fn update(&self, sample: <Self::Lock as ReadGuardSpecifier>::Target);
+pub trait SensorWrite<L: DataWriteLock> {
+    fn read(&self) -> L::ReadGuard<'_>;
+    fn write(&self) -> L::WriteGuard<'_>;
+    fn update(&self, sample: L::Target);
     /// Modify the sensor value in place and notify observers.
-    fn modify_with(&self, f: impl FnOnce(&mut <Self::Lock as ReadGuardSpecifier>::Target));
+    fn modify_with(&self, f: impl FnOnce(&mut L::Target));
     /// Mark the current sensor value as unseen to all observers.
     fn mark_all_unseen(&self);
 }
 
-pub trait SensorCallbackExec: SensorCallbackRegister {
+pub trait SensorCallbackExec<T> {
     /// Update the sensor's current value, notify observers and execute all registered functions.
-    fn update_exec(&self, sample: Self::Target);
+    fn update_exec(&self, sample: T);
     /// Modify the sensor value in place, notify observers and execute all registered functions.
-    fn modify_with_exec(&self, f: impl FnOnce(&mut Self::Target));
+    fn modify_with_exec(&self, f: impl FnOnce(&mut T));
     /// Execute all registered functions.
     fn exec(&self);
 }
 
-pub trait SensorCallbackRegister {
-    type Target;
-
+pub trait SensorCallbackRegister<T> {
     /// Register a new function to the execution queue.
-    fn register<F: 'static + FnMut(&Self::Target) -> bool>(&self, f: F);
+    fn register<F: 'static + FnMut(&T) -> bool>(&self, f: F);
 }
 
-impl<'share, 'state, R, L, T, E> SensorCallbackRegister
+impl<'share, 'state, R, L, T, E> SensorCallbackRegister<T>
     for SensorWriter<'share, 'state, R, ExecLock<L, T, E>>
 where
     L: DataWriteLock<Target = ExecData<T, E>>,
     R: Lockshare<'share, 'state, ExecLock<L, T, E>>,
     E: CallbackManager<T>,
 {
-    type Target = T;
-
     fn register<F: 'static + FnMut(&T) -> bool>(&self, f: F) {
         self.share_elided_ref()
             .write()
@@ -250,14 +244,12 @@ where
     }
 }
 
-impl<'share, 'state, R, L, T, E> SensorCallbackRegister for SensorObserver<R, ExecLock<L, T, E>>
+impl<'share, 'state, R, L, T, E> SensorCallbackRegister<T> for SensorObserver<R, ExecLock<L, T, E>>
 where
     L: DataWriteLock<Target = ExecData<T, E>>,
     R: Deref<Target = RevisedData<ExecLock<L, T, E>>>,
     E: CallbackManager<T>,
 {
-    type Target = T;
-
     fn register<F: 'static + FnMut(&T) -> bool>(&self, f: F) {
         self.inner.write().inner.exec_manager.get_mut().register(f);
     }
@@ -325,39 +317,37 @@ pub trait SensorObserve {
     }
 }
 
-impl<'share, 'state, R, L: DataWriteLock + 'state> SensorWrite
+impl<'share, 'state, R, L: DataWriteLock + 'state> SensorWrite<L>
     for SensorWriter<'share, 'state, R, L>
 where
     R: Lockshare<'share, 'state, L>,
 {
-    type Lock = L;
-
     #[inline(always)]
     fn mark_all_unseen(&self) {
         self.share_elided_ref().update_version(STEP_SIZE)
     }
 
     #[inline]
-    fn update(&self, sample: <Self::Lock as ReadGuardSpecifier>::Target) {
+    fn update(&self, sample: L::Target) {
         let mut guard = self.share_elided_ref().data.write();
         self.mark_all_unseen();
         *guard = sample;
     }
 
     #[inline]
-    fn modify_with(&self, f: impl FnOnce(&mut <Self::Lock as ReadGuardSpecifier>::Target)) {
+    fn modify_with(&self, f: impl FnOnce(&mut L::Target)) {
         let mut guard = self.share_elided_ref().data.write();
         self.mark_all_unseen();
         f(&mut guard);
     }
 
     #[inline]
-    fn read(&self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_> {
+    fn read(&self) -> L::ReadGuard<'_> {
         self.share_elided_ref().data.read()
     }
 
     #[inline]
-    fn write(&self) -> <Self::Lock as DataWriteLock>::WriteGuard<'_> {
+    fn write(&self) -> L::WriteGuard<'_> {
         self.share_elided_ref().data.write()
     }
 }
