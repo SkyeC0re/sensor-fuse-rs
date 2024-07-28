@@ -9,7 +9,9 @@ use crate::lock::{DataReadLock, DataWriteLock, ReadGuardSpecifier};
 pub mod standard;
 
 pub trait CallbackManager<T> {
+    /// Register a function on the callback manager's execution queue.
     fn register<F: 'static + FnMut(&T) -> bool>(&mut self, f: F);
+    /// Execute all callbacks registered on the manager and drop all callbacks that returns `false`.
     fn callback(&mut self, value: &T);
 }
 
@@ -61,6 +63,7 @@ where
 {
     type Target = L;
 
+    #[inline(always)]
     fn deref(&self) -> &Self::Target {
         &self.inner
     }
@@ -71,6 +74,7 @@ where
     L: DataWriteLock<Target = ExecData<T, E>>,
     E: CallbackManager<T>,
 {
+    #[inline(always)]
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.inner
     }
@@ -93,6 +97,7 @@ where
     L: DataWriteLock<Target = ExecData<T, E>>,
     E: CallbackManager<T>,
 {
+    #[inline]
     fn read(&self) -> Self::ReadGuard<'_> {
         ExecGuard {
             inner: self.inner.read(),
@@ -100,6 +105,7 @@ where
         }
     }
 
+    #[inline]
     fn try_read(&self) -> Option<Self::ReadGuard<'_>> {
         self.inner.try_read().map(|guard| ExecGuard {
             inner: guard,
@@ -118,6 +124,7 @@ where
         Self::Target: 'write,
         Self: 'write;
 
+    #[inline]
     fn write(&self) -> Self::WriteGuard<'_> {
         ExecGuardMut {
             inner: self.inner.write(),
@@ -125,6 +132,7 @@ where
         }
     }
 
+    #[inline]
     fn try_write(&self) -> Option<Self::WriteGuard<'_>> {
         self.inner.try_write().map(|guard| ExecGuardMut {
             inner: guard,
@@ -163,6 +171,7 @@ where
 {
     type Target = T;
 
+    #[inline(always)]
     fn deref(&self) -> &Self::Target {
         &self.inner.data
     }
@@ -198,6 +207,7 @@ where
 {
     type Target = T;
 
+    #[inline(always)]
     fn deref(&self) -> &Self::Target {
         &self.inner.data
     }
@@ -208,6 +218,7 @@ where
     G: DerefMut<Target = ExecData<T, E>>,
     E: CallbackManager<T>,
 {
+    #[inline(always)]
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.inner.data
     }

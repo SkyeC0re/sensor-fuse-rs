@@ -1,5 +1,6 @@
 pub mod callback_manager;
 pub mod lock;
+pub mod prelude;
 
 use callback_manager::{CallbackManager, ExecData, ExecLock};
 use core::marker::PhantomData;
@@ -61,7 +62,6 @@ impl<T> RevisedData<T> {
 }
 
 pub trait Lockshare<'share, 'state, L: DataWriteLock + 'state> {
-    // type Lock: DataWriteLock + 'state;
     type Shared: Deref<Target = RevisedData<L>> + 'state;
 
     /// Construct a new shareable lock from the given lock.

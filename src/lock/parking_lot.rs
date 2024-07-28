@@ -5,10 +5,11 @@ use parking_lot::{self, RwLockWriteGuard};
 use crate::{
     callback_manager::{standard::VecBoxManager, ExecGuard},
     CallbackManager, DataReadLock, DataWriteLock, ExecData, ExecLock, Lockshare,
-    ReadGuardSpecifier, RevisedData, SensorCallbackExec, SensorObserver, SensorWrite, SensorWriter,
+    ReadGuardSpecifier, RevisedData, SensorCallbackExec, SensorCallbackRegister, SensorObserver,
+    SensorWrite, SensorWriter,
 };
 
-pub use crate::SensorCallbackRegister;
+// pub use crate::SensorCallbackRegister;
 
 pub type RwSensorWriter<'share, T> =
     SensorWriter<'share, 'share, RevisedData<parking_lot::RwLock<T>>, parking_lot::RwLock<T>>;
