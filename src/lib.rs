@@ -1,7 +1,7 @@
 pub mod callback_manager;
 pub mod lock;
 
-use callback_manager::CallbackManager;
+use callback_manager::{CallbackManager, ExecData, ExecLock};
 use core::marker::PhantomData;
 use core::{
     ops::Deref,
@@ -27,12 +27,14 @@ pub struct RevisedData<T> {
 impl<T> Deref for RevisedData<T> {
     type Target = T;
 
+    #[inline(always)]
     fn deref(&self) -> &Self::Target {
         &self.data
     }
 }
 
 impl<T> DerefMut for RevisedData<T> {
+    #[inline(always)]
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.data
     }
@@ -56,176 +58,6 @@ impl<T> RevisedData<T> {
     #[inline(always)]
     pub fn version(&self) -> usize {
         self.version.load(core::sync::atomic::Ordering::Acquire)
-    }
-}
-
-pub struct ExecData<T, E: CallbackManager> {
-    exec_manager: UnsafeCell<E>,
-    data: T,
-}
-
-impl<T, E: CallbackManager> Deref for ExecData<T, E> {
-    type Target = T;
-
-    fn deref(&self) -> &Self::Target {
-        &self.data
-    }
-}
-
-impl<T, E: CallbackManager> DerefMut for ExecData<T, E> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.data
-    }
-}
-
-#[repr(transparent)]
-pub struct ExecLock<L, T, E>
-where
-    L: DataWriteLock<Target = ExecData<T, E>>,
-    E: CallbackManager,
-{
-    inner: L,
-}
-
-impl<L, T, E> ExecLock<L, T, E>
-where
-    L: DataWriteLock<Target = ExecData<T, E>>,
-    E: CallbackManager,
-{
-    #[inline(always)]
-    pub const fn new(lock: L) -> Self {
-        Self { inner: lock }
-    }
-}
-
-// impl<L, T, E> Deref for ExecLock<L, T, E>
-// where
-//     L: DataWriteLock<Target = ExecData<T, E>>,
-//     E: CallbackManager,
-// {
-//     type Target = L;
-
-//     fn deref(&self) -> &Self::Target {
-//         &self.inner
-//     }
-// }
-
-// impl<L, T, E> DerefMut for ExecLock<L, T, E>
-// where
-//     L: DataWriteLock<Target = ExecData<T, E>>,
-//     E: CallbackManager,
-// {
-//     fn deref_mut(&mut self) -> &mut Self::Target {
-//         &mut self.inner
-//     }
-// }
-
-impl<L, T, E> ReadGuardSpecifier for ExecLock<L, T, E>
-where
-    L: DataWriteLock<Target = ExecData<T, E>>,
-    E: CallbackManager,
-{
-    type Target = T;
-
-    type ReadGuard<'read> = ExecGuard<L::ReadGuard<'read>, T, E>   where
-        Self::Target: 'read,
-        Self: 'read;
-}
-
-impl<L, T, E> DataReadLock for ExecLock<L, T, E>
-where
-    L: DataWriteLock<Target = ExecData<T, E>>,
-    E: CallbackManager,
-{
-    fn read(&self) -> Self::ReadGuard<'_> {
-        ExecGuard {
-            inner: self.inner.read(),
-            _types: PhantomData,
-        }
-    }
-
-    fn try_read(&self) -> Option<Self::ReadGuard<'_>> {
-        self.inner.try_read().map(|guard| ExecGuard {
-            inner: guard,
-            _types: PhantomData,
-        })
-    }
-}
-
-impl<L, T, E> DataWriteLock for ExecLock<L, T, E>
-where
-    L: DataWriteLock<Target = ExecData<T, E>>,
-    E: CallbackManager,
-{
-    type WriteGuard<'write> = ExecGuardMut<L::WriteGuard<'write>, T, E>
-    where
-        Self::Target: 'write,
-        Self: 'write;
-
-    fn write(&self) -> Self::WriteGuard<'_> {
-        ExecGuardMut {
-            inner: self.inner.write(),
-            _types: PhantomData,
-        }
-    }
-
-    fn try_write(&self) -> Option<Self::WriteGuard<'_>> {
-        self.inner.try_write().map(|guard| ExecGuardMut {
-            inner: guard,
-            _types: PhantomData,
-        })
-    }
-}
-
-pub struct ExecGuard<G, T, E>
-where
-    G: Deref<Target = ExecData<T, E>>,
-    E: CallbackManager,
-{
-    inner: G,
-    _types: PhantomData<(T, E)>,
-}
-
-impl<G, T, E> Deref for ExecGuard<G, T, E>
-where
-    G: Deref<Target = ExecData<T, E>>,
-    E: CallbackManager,
-{
-    type Target = T;
-
-    fn deref(&self) -> &Self::Target {
-        &self.inner.data
-    }
-}
-
-pub struct ExecGuardMut<G, T, E>
-where
-    G: Deref<Target = ExecData<T, E>>,
-    E: CallbackManager,
-{
-    inner: G,
-    _types: PhantomData<(T, E)>,
-}
-
-impl<G, T, E> Deref for ExecGuardMut<G, T, E>
-where
-    G: DerefMut<Target = ExecData<T, E>>,
-    E: CallbackManager,
-{
-    type Target = T;
-
-    fn deref(&self) -> &Self::Target {
-        &self.inner.data
-    }
-}
-
-impl<G, T, E> DerefMut for ExecGuardMut<G, T, E>
-where
-    G: DerefMut<Target = ExecData<T, E>>,
-    E: CallbackManager,
-{
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.inner.data
     }
 }
 
@@ -297,7 +129,7 @@ where
     }
 
     #[inline(always)]
-    fn spawn_observer(&'share self) -> SensorObserver<R::Shared, RevisedData<L>> {
+    pub fn spawn_observer(&'share self) -> SensorObserver<R::Shared, RevisedData<L>> {
         let inner = self.0.share_lock();
         SensorObserver {
             version: inner.version(),
@@ -371,7 +203,7 @@ where
     }
 }
 
-trait SensorWrite {
+pub trait SensorWrite {
     type Lock: DataWriteLock;
 
     fn read(&self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_>;
@@ -383,7 +215,7 @@ trait SensorWrite {
     fn mark_all_unseen(&self);
 }
 
-trait SensorCallbackExec: SensorCallbackRegister {
+pub trait SensorCallbackExec: SensorCallbackRegister {
     /// Update the sensor's current value, notify observers and execute all registered functions.
     fn update_exec(&self, sample: Self::Target);
     /// Modify the sensor value in place, notify observers and execute all registered functions.
@@ -392,7 +224,7 @@ trait SensorCallbackExec: SensorCallbackRegister {
     fn exec(&self);
 }
 
-trait SensorCallbackRegister {
+pub trait SensorCallbackRegister {
     type Target;
 
     /// Register a new function to the execution queue.
@@ -449,6 +281,7 @@ pub trait SensorObserve {
     /// Returns true if `pull` may produce stale results.
     fn is_cached(&self) -> bool;
 
+    #[inline(always)]
     fn fuse<B, T, F>(self, other: B, f: F) -> FusedSensorObserver<Self, B, T, F>
     where
         Self: Sized,
@@ -461,6 +294,7 @@ pub trait SensorObserve {
         FusedSensorObserver::fuse_with(self, other, f)
     }
 
+    #[inline(always)]
     fn fuse_cached<B, T, F>(self, other: B, f: F) -> FusedSensorObserverCached<Self, B, T, F>
     where
         Self: Sized,
@@ -473,6 +307,7 @@ pub trait SensorObserve {
         FusedSensorObserverCached::fuse_with(self, other, f)
     }
 
+    #[inline(always)]
     fn map<T, F>(self, f: F) -> MappedSensorObserver<Self, T, F>
     where
         Self: Sized,
@@ -481,6 +316,7 @@ pub trait SensorObserve {
         MappedSensorObserver::map_with(self, f)
     }
 
+    #[inline(always)]
     fn map_cached<T, F>(self, f: F) -> MappedSensorObserverCached<Self, T, F>
     where
         Self: Sized,
@@ -516,10 +352,12 @@ where
         f(&mut guard);
     }
 
+    #[inline]
     fn read(&self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_> {
         self.share_elided_ref().data.read()
     }
 
+    #[inline]
     fn write(&self) -> <Self::Lock as DataWriteLock>::WriteGuard<'_> {
         self.share_elided_ref().data.write()
     }

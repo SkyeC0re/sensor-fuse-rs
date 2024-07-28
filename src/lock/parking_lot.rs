@@ -3,10 +3,12 @@ use std::{cell::UnsafeCell, marker::PhantomData, sync::Arc};
 use parking_lot::{self, RwLockWriteGuard};
 
 use crate::{
-    callback_manager::standard::VecBoxManager, CallbackManager, DataReadLock, DataWriteLock,
-    ExecData, ExecGuard, ExecLock, Lockshare, ReadGuardSpecifier, RevisedData, SensorCallbackExec,
-    SensorCallbackRegister, SensorObserver, SensorWrite, SensorWriter,
+    callback_manager::{standard::VecBoxManager, ExecGuard},
+    CallbackManager, DataReadLock, DataWriteLock, ExecData, ExecLock, Lockshare,
+    ReadGuardSpecifier, RevisedData, SensorCallbackExec, SensorObserver, SensorWrite, SensorWriter,
 };
+
+pub use crate::SensorCallbackRegister;
 
 pub type RwSensorWriter<'share, T> =
     SensorWriter<'share, 'share, RevisedData<parking_lot::RwLock<T>>, parking_lot::RwLock<T>>;
@@ -124,10 +126,7 @@ where
         let mut guard = self.share_elided_ref().write();
         *guard = sample;
         self.mark_all_unseen();
-        let guard = ExecGuard {
-            inner: RwLockWriteGuard::downgrade(guard.inner),
-            _types: std::marker::PhantomData,
-        };
+        let guard = ExecGuard::new(RwLockWriteGuard::downgrade(guard.inner));
 
         // Atomic downgrade just occured. No other modication can happen.
         unsafe { (*guard.inner.exec_manager.get()).callback(&guard.inner) };
@@ -137,10 +136,7 @@ where
         let mut guard = self.share_elided_ref().write();
         f(&mut guard);
         self.mark_all_unseen();
-        let guard = ExecGuard {
-            inner: RwLockWriteGuard::downgrade(guard.inner),
-            _types: std::marker::PhantomData,
-        };
+        let guard = ExecGuard::new(RwLockWriteGuard::downgrade(guard.inner));
 
         // Atomic downgrade just occured. No other modification can happen.
         unsafe {
@@ -149,10 +145,9 @@ where
     }
 
     fn exec(&self) {
-        let guard = ExecGuard {
-            inner: RwLockWriteGuard::downgrade(self.share_elided_ref().write().inner),
-            _types: std::marker::PhantomData,
-        };
+        let guard = ExecGuard::new(RwLockWriteGuard::downgrade(
+            self.share_elided_ref().write().inner,
+        ));
 
         // Atomic downgrade just occured. No other modification can happen.
         unsafe { (*guard.inner.exec_manager.get()).callback(&guard.inner) };
