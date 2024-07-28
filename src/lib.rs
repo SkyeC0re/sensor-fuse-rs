@@ -236,7 +236,7 @@ impl<'share, 'state, R, L, T, E> SensorCallbackRegister
 where
     L: DataWriteLock<Target = ExecData<T, E>>,
     R: Lockshare<'share, 'state, ExecLock<L, T, E>>,
-    E: CallbackManager<Target = T>,
+    E: CallbackManager<T>,
 {
     type Target = T;
 
@@ -254,7 +254,7 @@ impl<'share, 'state, R, L, T, E> SensorCallbackRegister for SensorObserver<R, Ex
 where
     L: DataWriteLock<Target = ExecData<T, E>>,
     R: Deref<Target = RevisedData<ExecLock<L, T, E>>>,
-    E: CallbackManager<Target = T>,
+    E: CallbackManager<T>,
 {
     type Target = T;
 

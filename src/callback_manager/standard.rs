@@ -11,14 +11,12 @@ impl<T> VecBoxManager<T> {
     }
 }
 
-impl<T> CallbackManager for VecBoxManager<T> {
-    type Target = T;
-
-    fn register<F: 'static + FnMut(&Self::Target) -> bool>(&mut self, f: F) {
+impl<T> CallbackManager<T> for VecBoxManager<T> {
+    fn register<F: 'static + FnMut(&T) -> bool>(&mut self, f: F) {
         self.push(Box::new(f));
     }
 
-    fn callback(&mut self, value: &Self::Target) {
+    fn callback(&mut self, value: &T) {
         let mut i = 0;
         let mut len = self.len();
         let ptr_slice = self.as_ptr().cast_mut();

@@ -96,29 +96,11 @@ impl<T> DataWriteLock for parking_lot::RwLock<T> {
     }
 }
 
-// impl<'share, 'state, R, T, E> SensorCallbackRegister
-//     for SensorWriter<'share, 'state, R, ExecLock<parking_lot::RwLock<ExecData<T, E>>, T, E>>
-// where
-//     R: Lockshare<'share, 'state, ExecLock<parking_lot::RwLock<ExecData<T, E>>, T, E>>,
-//     E: CallbackManager<Target = T>,
-// {
-//     type Target = T;
-
-//     fn register<F: 'static + FnMut(&Self::Target) -> bool>(&self, f: F) {
-//         self.share_elided_ref()
-//             .write()
-//             .inner
-//             .exec_manager
-//             .get_mut()
-//             .register(f);
-//     }
-// }
-
 impl<'share, 'state, R, T, E> SensorCallbackExec
     for SensorWriter<'share, 'state, R, ExecLock<parking_lot::RwLock<ExecData<T, E>>, T, E>>
 where
     R: Lockshare<'share, 'state, ExecLock<parking_lot::RwLock<ExecData<T, E>>, T, E>>,
-    E: CallbackManager<Target = T>,
+    E: CallbackManager<T>,
 {
     fn update_exec(&self, sample: T) {
         let mut guard = self.share_elided_ref().write();
@@ -156,7 +138,7 @@ impl<'share, 'state, R, T, E> SensorCallbackExec
     for SensorWriter<'share, 'state, R, ExecLock<parking_lot::Mutex<ExecData<T, E>>, T, E>>
 where
     R: Lockshare<'share, 'state, ExecLock<parking_lot::Mutex<ExecData<T, E>>, T, E>>,
-    E: CallbackManager<Target = T>,
+    E: CallbackManager<T>,
 {
     fn update_exec(&self, sample: T) {
         let mut guard = self.share_elided_ref().write();
