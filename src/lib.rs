@@ -183,7 +183,6 @@ where
     }
 }
 
-#[derive(Clone)]
 pub struct SensorObserver<R, L>
 where
     R: Deref<Target = RevisedData<L>>,
@@ -200,6 +199,18 @@ where
     #[inline(always)]
     fn is_closed(&self) -> bool {
         self.inner.version() & CLOSED_BIT == CLOSED_BIT
+    }
+}
+
+impl<R, L> Clone for SensorObserver<R, L>
+where
+    R: Deref<Target = RevisedData<L>> + Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            version: self.version,
+        }
     }
 }
 
@@ -705,8 +716,7 @@ mod tests {
             ArcRwSensor, ArcRwSensorWriter, RwSensor, RwSensorExec, RwSensorWriter,
             RwSensorWriterExec,
         },
-        Lockshare, MappedSensorObserver, SensorCallbackExec, SensorCallbackRegister, SensorObserve,
-        SensorWrite,
+        SensorCallbackExec, SensorCallbackRegister, SensorObserve, SensorWrite,
     };
 
     #[test]
@@ -719,6 +729,7 @@ mod tests {
         let z: RwSensor<_> = s3.spawn_observer();
 
         let bb: ArcRwSensor<_> = s1.spawn_observer();
+        let bbc = bb.clone();
 
         let mut x = s1
             .spawn_observer()
