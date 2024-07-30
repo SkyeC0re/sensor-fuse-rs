@@ -5,15 +5,13 @@ use parking_lot::{self, RwLockWriteGuard};
 use crate::{
     callback_manager::{standard::VecBoxManager, ExecGuard},
     CallbackManager, DataReadLock, DataWriteLock, ExecData, ExecLock, Lockshare,
-    ReadGuardSpecifier, RevisedData, SensorCallbackExec, SensorCallbackRegister, SensorObserver,
-    SensorWrite, SensorWriter,
+    ReadGuardSpecifier, RevisedData, SensorCallbackExec, SensorObserver, SensorWrite, SensorWriter,
 };
 
-// pub use crate::SensorCallbackRegister;
-
-pub type RwSensorWriter<'share, T> =
-    SensorWriter<'share, 'share, RevisedData<parking_lot::RwLock<T>>, parking_lot::RwLock<T>>;
-impl<'share, T> RwSensorWriter<'share, T> {
+pub type RwSensorWriter<'state, T> =
+    SensorWriter<'state, RevisedData<parking_lot::RwLock<T>>, parking_lot::RwLock<T>>;
+impl<'state, T> RwSensorWriter<'state, T> {
+    #[inline(always)]
     pub const fn new(init: T) -> Self {
         SensorWriter(
             RevisedData::new(parking_lot::RwLock::new(init)),
@@ -21,13 +19,19 @@ impl<'share, T> RwSensorWriter<'share, T> {
         )
     }
 }
-pub type RwSensorWriterExec<'share, T> = SensorWriter<
-    'share,
-    'share,
+
+impl<'state, T> From<T> for RwSensorWriter<'state, T> {
+    #[inline(always)]
+    fn from(value: T) -> Self {
+        Self::new(value)
+    }
+}
+pub type RwSensorWriterExec<'state, T> = SensorWriter<
+    'state,
     RevisedData<ExecLock<parking_lot::RwLock<ExecData<T, VecBoxManager<T>>>, T, VecBoxManager<T>>>,
     ExecLock<parking_lot::RwLock<ExecData<T, VecBoxManager<T>>>, T, VecBoxManager<T>>,
 >;
-impl<'share, T> RwSensorWriterExec<'share, T> {
+impl<'state, T> RwSensorWriterExec<'state, T> {
     pub const fn new(init: T) -> Self {
         SensorWriter(
             RevisedData::new(ExecLock::new(parking_lot::RwLock::new(ExecData {
@@ -48,14 +52,21 @@ pub type RwSensorExec<'state, T> = SensorObserver<
 >;
 
 pub type MutexSensorWriter<'share, T> =
-    SensorWriter<'share, 'share, RevisedData<parking_lot::Mutex<T>>, parking_lot::Mutex<T>>;
+    SensorWriter<'share, RevisedData<parking_lot::Mutex<T>>, parking_lot::Mutex<T>>;
+
+impl<'state, T> MutexSensorWriter<'state, T> {
+    pub fn new(init: T) -> Self {
+        SensorWriter(RevisedData::new(parking_lot::Mutex::new(init)), PhantomData)
+    }
+}
+
 pub type MutexSensor<'state, T> =
     SensorObserver<&'state RevisedData<parking_lot::Mutex<T>>, parking_lot::Mutex<T>>;
 
-pub type ArcRwSensorWriter<'share, 'state, T> =
-    SensorWriter<'share, 'state, Arc<RevisedData<parking_lot::RwLock<T>>>, parking_lot::RwLock<T>>;
+pub type ArcRwSensorWriter<'state, T> =
+    SensorWriter<'state, Arc<RevisedData<parking_lot::RwLock<T>>>, parking_lot::RwLock<T>>;
 
-impl<'share, 'state, T: 'state> ArcRwSensorWriter<'share, 'state, T> {
+impl<'state, T: 'state> ArcRwSensorWriter<'state, T> {
     pub fn new(init: T) -> Self {
         SensorWriter(
             Arc::new(RevisedData::new(parking_lot::RwLock::new(init))),
@@ -97,10 +108,10 @@ impl<T> DataWriteLock for parking_lot::RwLock<T> {
     }
 }
 
-impl<'share, 'state, R, T, E> SensorCallbackExec<T>
-    for SensorWriter<'share, 'state, R, ExecLock<parking_lot::RwLock<ExecData<T, E>>, T, E>>
+impl<'state, R, T, E> SensorCallbackExec<T>
+    for SensorWriter<'state, R, ExecLock<parking_lot::RwLock<ExecData<T, E>>, T, E>>
 where
-    R: Lockshare<'share, 'state, ExecLock<parking_lot::RwLock<ExecData<T, E>>, T, E>>,
+    R: Lockshare<'state, ExecLock<parking_lot::RwLock<ExecData<T, E>>, T, E>>,
     E: CallbackManager<T>,
 {
     fn update_exec(&self, sample: T) {
@@ -135,10 +146,10 @@ where
     }
 }
 
-impl<'share, 'state, R, T, E> SensorCallbackExec<T>
-    for SensorWriter<'share, 'state, R, ExecLock<parking_lot::Mutex<ExecData<T, E>>, T, E>>
+impl<'state, R, T, E> SensorCallbackExec<T>
+    for SensorWriter<'state, R, ExecLock<parking_lot::Mutex<ExecData<T, E>>, T, E>>
 where
-    R: Lockshare<'share, 'state, ExecLock<parking_lot::Mutex<ExecData<T, E>>, T, E>>,
+    R: Lockshare<'state, ExecLock<parking_lot::Mutex<ExecData<T, E>>, T, E>>,
     E: CallbackManager<T>,
 {
     fn update_exec(&self, sample: T) {

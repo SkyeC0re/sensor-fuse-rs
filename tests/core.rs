@@ -1,26 +1,49 @@
-use sensor_fuse::lock::parking_lot::ArcRwSensorWriter;
+use paste::paste;
+use sensor_fuse::lock::DataWriteLock;
 use sensor_fuse::prelude::*;
-use std::{sync::Arc, thread};
+use sensor_fuse::{lock, Lockshare, SensorWriter};
+use std::{
+    cell::OnceCell,
+    sync::{Arc, OnceLock},
+    thread,
+};
 
-#[test]
-fn basic_sensor_observation_synced_10_10() {
-    test_basic_sensor_observation_synced(10, 10);
-}
-
-#[track_caller]
-fn test_basic_sensor_observation_synced(num_threads: usize, num_updates: usize) {
+// macro_rules! test_all_with_sensor_writer {
+//     ($prefix:ident, $sensor_writer:ty) => {
+//         paste! {
+//             #[test]
+//             fn [<$prefix _basic_sensor_observation_synced_10_10>]() {
+//                 test_basic_sensor_observation_synced!($sensor_writer, 10, 10);
+//             }
+//         }
+//     };
+// }
+fn test_basic_sensor_observation_synced<
+    'share,
+    R: Lockshare<'static, L> + Send + Sync,
+    L: DataWriteLock<Target = usize> + 'static,
+>(
+    init: L::Target,
+    num_threads: usize,
+    num_updates: usize,
+) where
+    SensorWriter<'static, R, L>: 'static + Send + Sync + From<usize>,
+{
     let sync = Arc::new((
         parking_lot::Mutex::new(0),
         parking_lot::Condvar::new(),
         parking_lot::Condvar::new(),
     ));
-    let sensor_writer = ArcRwSensorWriter::new(0);
+
+    let sensor_writer = Arc::new(SensorWriter::from(0));
 
     let handles = Vec::from_iter((0..num_threads).map(|_| {
-        let mut sensor_observer = sensor_writer.spawn_observer();
-        sensor_observer.mark_unseen();
+        let sensor_writer_clone = sensor_writer.clone();
+
         let sync_clone = sync.clone();
         thread::spawn(move || {
+            let mut sensor_observer = sensor_writer_clone.spawn_observer();
+            sensor_observer.mark_unseen();
             let (mutex, observer_start, writer_start) = &*sync_clone;
             for i in 0..num_updates {
                 let mut guard = mutex.lock();
@@ -44,6 +67,7 @@ fn test_basic_sensor_observation_synced(num_threads: usize, num_updates: usize) 
                 }
                 observer_start.wait(&mut guard);
             }
+            drop(sensor_observer);
         })
     }));
 
@@ -62,3 +86,6 @@ fn test_basic_sensor_observation_synced(num_threads: usize, num_updates: usize) 
         h.join().unwrap();
     });
 }
+
+// test_all_with_sensor_writer!(pl_rwl, lock::parking_lot::ArcRwSensorWriter<usize>);
+// test_all_with_sensor_writer!(pl_mtx, lock::parking_lot::MutexSensorWriter<usize>);

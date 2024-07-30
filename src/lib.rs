@@ -11,6 +11,7 @@ use core::{
 use lock::{
     DataReadLock, DataWriteLock, FalseReadLock, OwnedData, OwnedFalseLock, ReadGuardSpecifier,
 };
+use std::cell::Ref;
 use std::ops::DerefMut;
 
 use std::sync::Arc;
@@ -61,31 +62,31 @@ impl<T> RevisedData<T> {
     }
 }
 
-pub trait Lockshare<'share, 'state, L: DataWriteLock + 'state> {
-    type Shared: Deref<Target = RevisedData<L>> + 'state;
+// pub trait Lockshare<'share, 'state, L: DataWriteLock + 'state> {
+//     type Shared: Deref<Target = RevisedData<L>> + 'state;
 
-    /// Construct a new shareable lock from the given lock.
-    fn new(lock: L) -> Self;
+//     /// Construct a new shareable lock from the given lock.
+//     fn new(lock: L) -> Self;
 
-    /// Share the revised data for the largest possible lifetime.
-    fn share_lock(&'share self) -> Self::Shared;
+//     /// Share the revised data for the largest possible lifetime.
+//     fn share_lock(&'share self) -> Self::Shared;
 
-    /// There is probably a better way than this to get an elided reference
-    /// to the revised data.
-    fn share_elided_ref(&self) -> &RevisedData<L>;
-}
+//     /// There is probably a better way than this to get an elided reference
+//     /// to the revised data.
+//     fn share_elided_ref(&self) -> &RevisedData<L>;
+// }
 
 #[repr(transparent)]
-pub struct SensorWriter<'share, 'state, R, L: DataWriteLock + 'state>(
+pub struct SensorWriter<'state, R, L: DataWriteLock + 'state>(
     R,
-    PhantomData<(&'share Self, &'state L)>,
+    PhantomData<(&'state L)>,
 )
 where
-    R: Lockshare<'share, 'state, L>;
+    R: Lockshare<'state, L>;
 
-impl<'share, 'state, R, L: DataWriteLock + 'state> Drop for SensorWriter<'share, 'state, R, L>
+impl<'state, R, L: DataWriteLock + 'state> Drop for SensorWriter<'state, R, L>
 where
-    R: Lockshare<'share, 'state, L>,
+    R: Lockshare<'state, L>,
 {
     fn drop(&mut self) {
         self.0
@@ -95,9 +96,9 @@ where
     }
 }
 
-impl<'share, 'state, R, L: DataWriteLock + 'state> Deref for SensorWriter<'share, 'state, R, L>
+impl<'state, R, L: DataWriteLock + 'state> Deref for SensorWriter<'state, R, L>
 where
-    R: Lockshare<'share, 'state, L>,
+    R: Lockshare<'state, L>,
 {
     type Target = R;
 
@@ -106,18 +107,18 @@ where
     }
 }
 
-impl<'share, 'state, R, L: DataWriteLock + 'state> DerefMut for SensorWriter<'share, 'state, R, L>
+impl<'state, R, L: DataWriteLock + 'state> DerefMut for SensorWriter<'state, R, L>
 where
-    R: Lockshare<'share, 'state, L>,
+    R: Lockshare<'state, L>,
 {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.0
     }
 }
 
-impl<'share, 'state, R, L: DataWriteLock + 'state> SensorWriter<'share, 'state, R, L>
+impl<'state, R, L: DataWriteLock + 'state> SensorWriter<'state, R, L>
 where
-    R: Lockshare<'share, 'state, L>,
+    R: Lockshare<'state, L>,
 {
     #[inline(always)]
     pub fn spawn_referenced_observer(&self) -> SensorObserver<&RevisedData<L>, L> {
@@ -128,7 +129,7 @@ where
     }
 
     #[inline(always)]
-    pub fn spawn_observer(&'share self) -> SensorObserver<R::Shared, L> {
+    pub fn spawn_observer(&self) -> SensorObserver<R::Shared<'_>, L> {
         let inner = self.0.share_lock();
         SensorObserver {
             version: inner.version(),
@@ -137,16 +138,34 @@ where
     }
 }
 
+pub trait Lockshare<'state, L: DataWriteLock + 'state> {
+    type Shared<'share>: Deref<Target = RevisedData<L>>
+    where
+        'state: 'share,
+        Self: 'share;
+
+    /// Construct a new shareable lock from the given lock.
+    fn new(lock: L) -> Self;
+
+    /// Share the revised data for the largest possible lifetime.
+    fn share_lock(&self) -> Self::Shared<'_>;
+
+    /// There is probably a better way than this to get an elided reference
+    /// to the revised data.
+    fn share_elided_ref(&self) -> &RevisedData<L>;
+}
 // There must be a way to do this sharing without having to have a second lifetime in the trait,
 // but the author is not experienced enough.
-impl<'share, L> Lockshare<'share, 'share, L> for RevisedData<L>
+impl<'state, L> Lockshare<'state, L> for RevisedData<L>
 where
-    L: DataWriteLock + 'share,
+    L: DataWriteLock + 'state,
 {
-    type Shared = &'share Self;
-
+    type Shared<'share> = &'share Self
+    where 
+        'state: 'share,
+        Self: 'share;
     #[inline(always)]
-    fn share_lock(&'share self) -> &Self {
+    fn share_lock(&self) -> &Self {
         self
     }
 
@@ -161,11 +180,14 @@ where
     }
 }
 
-impl<'state, L> Lockshare<'_, 'state, L> for Arc<RevisedData<L>>
+impl<'state, L> Lockshare<'state, L> for Arc<RevisedData<L>>
 where
     L: DataWriteLock + 'state,
 {
-    type Shared = Self;
+    type Shared<'share> = Self
+    where
+        'state: 'share,
+        Self: 'share;
 
     #[inline(always)]
     fn share_lock(&self) -> Self {
@@ -238,11 +260,11 @@ pub trait SensorCallbackRegister<T> {
     fn register<F: 'static + FnMut(&T) -> bool>(&self, f: F);
 }
 
-impl<'share, 'state, R, L, T, E> SensorCallbackRegister<T>
-    for SensorWriter<'share, 'state, R, ExecLock<L, T, E>>
+impl<'state, R, L, T, E> SensorCallbackRegister<T>
+    for SensorWriter<'state, R, ExecLock<L, T, E>>
 where
     L: DataWriteLock<Target = ExecData<T, E>>,
-    R: Lockshare<'share, 'state, ExecLock<L, T, E>>,
+    R: Lockshare<'state, ExecLock<L, T, E>>,
     E: CallbackManager<T>,
 {
     fn register<F: 'static + FnMut(&T) -> bool>(&self, f: F) {
@@ -255,7 +277,7 @@ where
     }
 }
 
-impl<'share, 'state, R, L, T, E> SensorCallbackRegister<T> for SensorObserver<R, ExecLock<L, T, E>>
+impl<R, L, T, E> SensorCallbackRegister<T> for SensorObserver<R, ExecLock<L, T, E>>
 where
     L: DataWriteLock<Target = ExecData<T, E>>,
     R: Deref<Target = RevisedData<ExecLock<L, T, E>>>,
@@ -328,10 +350,10 @@ pub trait SensorObserve {
     }
 }
 
-impl<'share, 'state, R, L: DataWriteLock + 'state> SensorWrite<L>
-    for SensorWriter<'share, 'state, R, L>
+impl<'state, R, L: DataWriteLock + 'state> SensorWrite<L>
+    for SensorWriter<'state, R, L>
 where
-    R: Lockshare<'share, 'state, L>,
+    R: Lockshare<'state, L>,
 {
     #[inline(always)]
     fn mark_all_unseen(&self) {
@@ -363,7 +385,7 @@ where
     }
 }
 
-impl<'share, 'state, T, L, R> SensorObserve for SensorObserver<R, L>
+impl<'state, T, L, R> SensorObserve for SensorObserver<R, L>
 where
     L: DataReadLock<Target = T>,
     R: Deref<Target = RevisedData<L>>,

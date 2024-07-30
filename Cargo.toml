@@ -8,3 +8,6 @@ edition = "2021"
 [dependencies]
 derived-deref = "2.1.0"
 parking_lot = "0.12.3"
+
+[dev-dependencies]
+paste = "1.0.15"
