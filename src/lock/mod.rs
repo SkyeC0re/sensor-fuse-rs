@@ -4,9 +4,15 @@ pub mod parking_lot;
 use std::{
     marker::PhantomData,
     ops::{Deref, DerefMut},
+    sync::Arc,
 };
 
 use derived_deref::{Deref, DerefMut};
+
+use crate::{RevisedData, SensorWriter};
+
+pub type AbstractSensorWriter<L> = SensorWriter<RevisedData<L>, L>;
+pub type AbstractArcSensorWriter<L> = SensorWriter<Arc<RevisedData<L>>, L>;
 
 pub trait ReadGuardSpecifier {
     type Target;

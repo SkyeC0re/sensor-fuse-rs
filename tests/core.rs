@@ -18,16 +18,21 @@ use std::{
 //         }
 //     };
 // }
+
+// #[test]
+// fn pl_basic_sensor_observation_synced() {
+//     test_basic_sensor_observation_synced<>(10, 10);
+// }
+
 fn test_basic_sensor_observation_synced<
     'share,
-    R: Lockshare<'static, L> + Send + Sync,
+    R: Lockshare<Lock = L> + Send + Sync,
     L: DataWriteLock<Target = usize> + 'static,
 >(
-    init: L::Target,
     num_threads: usize,
     num_updates: usize,
 ) where
-    SensorWriter<'static, R, L>: 'static + Send + Sync + From<usize>,
+    SensorWriter<R, L>: 'static + Send + Sync + From<usize>,
 {
     let sync = Arc::new((
         parking_lot::Mutex::new(0),
