@@ -79,7 +79,6 @@ impl<T> RevisedData<T> {
 #[repr(transparent)]
 pub struct SensorWriter<R, L>(
     R,
-    PhantomData<L>
 )
 where
     R: Lockshare<Lock = L>;
@@ -262,7 +261,7 @@ pub trait SensorCallbackRegister<T> {
     fn register<F: 'static + FnMut(&T) -> bool>(&self, f: F);
 }
 
-impl<'state, R, L, T, E> SensorCallbackRegister<T>
+impl<R, L, T, E> SensorCallbackRegister<T>
     for SensorWriter<R, R::Lock>
 where
     L: DataWriteLock<Target = ExecData<T, E>>,
@@ -352,7 +351,7 @@ pub trait SensorObserve {
     }
 }
 
-impl<'state, R, L: DataWriteLock + 'state> SensorWrite
+impl<R, L: DataWriteLock> SensorWrite
     for SensorWriter<R, L>
 where
     R: Lockshare<Lock=L>,
@@ -390,7 +389,7 @@ where
     }
 }
 
-impl<'state, T, L, R> SensorObserve for SensorObserver<R, L>
+impl<T, L, R> SensorObserve for SensorObserver<R, L>
 where
     L: DataReadLock<Target = T>,
     R: Deref<Target = RevisedData<L>>,

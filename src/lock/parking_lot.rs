@@ -10,40 +10,36 @@ use crate::{
 
 use super::{AbstractArcSensorWriter, AbstractSensorWriter};
 
-pub type RwSensorWriter<'state, T> = AbstractSensorWriter<parking_lot::RwLock<T>>;
-impl<'state, T> RwSensorWriter<'state, T> {
+pub type RwSensorWriter<T> = AbstractSensorWriter<parking_lot::RwLock<T>>;
+impl<T> RwSensorWriter<T> {
     #[inline(always)]
     pub const fn new(init: T) -> Self {
-        SensorWriter(
-            RevisedData::new(parking_lot::RwLock::new(init)),
-            PhantomData,
-        )
+        SensorWriter(RevisedData::new(parking_lot::RwLock::new(init)))
     }
 }
 
-impl<'state, T> From<T> for RwSensorWriter<'state, T> {
+impl<T> From<T> for RwSensorWriter<T> {
     #[inline(always)]
     fn from(value: T) -> Self {
         Self::new(value)
     }
 }
-pub type RwSensorWriterExec<'state, T> = AbstractSensorWriter<
+pub type RwSensorWriterExec<T> = AbstractSensorWriter<
     ExecLock<parking_lot::RwLock<ExecData<T, VecBoxManager<T>>>, T, VecBoxManager<T>>,
 >;
 
-impl<'state, T> RwSensorWriterExec<'state, T> {
+impl<T> RwSensorWriterExec<T> {
     pub const fn new(init: T) -> Self {
-        SensorWriter(
-            RevisedData::new(ExecLock::new(parking_lot::RwLock::new(ExecData {
+        SensorWriter(RevisedData::new(ExecLock::new(parking_lot::RwLock::new(
+            ExecData {
                 exec_manager: UnsafeCell::new(VecBoxManager::new()),
                 data: init,
-            }))),
-            PhantomData,
-        )
+            },
+        ))))
     }
 }
-pub type RwSensor<'state, T> =
-    SensorObserver<&'state RevisedData<parking_lot::RwLock<T>>, parking_lot::RwLock<T>>;
+pub type RwSensor<'a, T> =
+    SensorObserver<&'a RevisedData<parking_lot::RwLock<T>>, parking_lot::RwLock<T>>;
 pub type RwSensorExec<'state, T> = SensorObserver<
     &'state RevisedData<
         ExecLock<parking_lot::RwLock<ExecData<T, VecBoxManager<T>>>, T, VecBoxManager<T>>,
@@ -51,28 +47,25 @@ pub type RwSensorExec<'state, T> = SensorObserver<
     ExecLock<parking_lot::RwLock<ExecData<T, VecBoxManager<T>>>, T, VecBoxManager<T>>,
 >;
 
-pub type MutexSensorWriter<'share, T> = AbstractSensorWriter<parking_lot::Mutex<T>>;
+pub type MutexSensorWriter<T> = AbstractSensorWriter<parking_lot::Mutex<T>>;
 
-impl<'state, T> MutexSensorWriter<'state, T> {
+impl<T> MutexSensorWriter<T> {
     pub fn new(init: T) -> Self {
-        SensorWriter(RevisedData::new(parking_lot::Mutex::new(init)), PhantomData)
+        SensorWriter(RevisedData::new(parking_lot::Mutex::new(init)))
     }
 }
 
-pub type MutexSensor<'state, T> =
-    SensorObserver<&'state RevisedData<parking_lot::Mutex<T>>, parking_lot::Mutex<T>>;
+pub type MutexSensor<'a, T> =
+    SensorObserver<&'a RevisedData<parking_lot::Mutex<T>>, parking_lot::Mutex<T>>;
 
-pub type ArcRwSensorWriter<'state, T> = AbstractArcSensorWriter<parking_lot::RwLock<T>>;
+pub type ArcRwSensorWriter<T> = AbstractArcSensorWriter<parking_lot::RwLock<T>>;
 
-impl<'state, T: 'state> ArcRwSensorWriter<'state, T> {
+impl<T> ArcRwSensorWriter<T> {
     pub fn new(init: T) -> Self {
-        SensorWriter(
-            Arc::new(RevisedData::new(parking_lot::RwLock::new(init))),
-            PhantomData,
-        )
+        SensorWriter(Arc::new(RevisedData::new(parking_lot::RwLock::new(init))))
     }
 }
-impl<'state, T> From<T> for ArcRwSensorWriter<'state, T> {
+impl<T> From<T> for ArcRwSensorWriter<T> {
     #[inline(always)]
     fn from(value: T) -> Self {
         Self::new(value)
@@ -111,7 +104,7 @@ impl<T> DataWriteLock for parking_lot::RwLock<T> {
     }
 }
 
-impl<'state, R, T, E> SensorCallbackExec<T>
+impl<R, T, E> SensorCallbackExec<T>
     for SensorWriter<R, ExecLock<parking_lot::RwLock<ExecData<T, E>>, T, E>>
 where
     R: Lockshare<Lock = ExecLock<parking_lot::RwLock<ExecData<T, E>>, T, E>>,
@@ -149,7 +142,7 @@ where
     }
 }
 
-impl<'state, R, T, E> SensorCallbackExec<T>
+impl<R, T, E> SensorCallbackExec<T>
     for SensorWriter<R, ExecLock<parking_lot::Mutex<ExecData<T, E>>, T, E>>
 where
     R: Lockshare<Lock = ExecLock<parking_lot::Mutex<ExecData<T, E>>, T, E>>,
