@@ -202,7 +202,7 @@ where
 {
     /// Returns true once all upstream writers have disconnected.
     #[inline(always)]
-    fn is_closed(&self) -> bool {
+    pub fn is_closed(&self) -> bool {
         self.inner.version() & CLOSED_BIT == CLOSED_BIT
     }
 }

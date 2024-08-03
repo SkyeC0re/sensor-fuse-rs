@@ -1,10 +1,10 @@
 use paste::paste;
 use sensor_fuse::lock::{self, DataWriteLock};
-use sensor_fuse::prelude::*;
+use sensor_fuse::{prelude::*, SensorObserver};
 use sensor_fuse::{Lockshare, SensorWriter};
 use std::{sync::Arc, thread};
 
-macro_rules! test_all_with_sensor_writer {
+macro_rules! test_core {
     ($prefix:ident, $sensor_writer:ty) => {
         paste! {
 
@@ -31,6 +31,22 @@ macro_rules! test_all_with_sensor_writer {
             #[test]
             fn [<$prefix _fused_sensor_sensor>]() {
                 test_fused_sensor::<$sensor_writer>();
+            }
+
+            #[test]
+            fn [<$prefix _fused_sensor_sensor_cached>]() {
+                test_fused_sensor_cached::<$sensor_writer>();
+            }
+        }
+    };
+}
+
+macro_rules! test_core_with_owned_observer {
+    ($prefix:ident, $sensor_writer:ty) => {
+        paste! {
+            #[test]
+            fn [<$prefix _closed>]() {
+                test_closed::<$sensor_writer>();
             }
         }
     };
@@ -225,7 +241,58 @@ where
     assert!(!observer.has_changed());
 }
 
-test_all_with_sensor_writer!(pl_rwl, lock::parking_lot::RwSensorData<_>);
-test_all_with_sensor_writer!(pl_arc_rwl, Arc<lock::parking_lot::RwSensorData<_>>);
-test_all_with_sensor_writer!(pl_mtx, lock::parking_lot::MutexSensorData<_>);
-test_all_with_sensor_writer!(pl_arc_mtx, Arc<lock::parking_lot::MutexSensorData<_>>);
+fn test_fused_sensor_cached<R: Lockshare + Send + Sync>()
+where
+    R::Lock: DataWriteLock<Target = usize> + 'static,
+    SensorWriter<R, R::Lock>: 'static + Send + Sync + From<usize>,
+{
+    let sensor_writer_1 = Arc::new(SensorWriter::from(1));
+    let sensor_writer_2 = Arc::new(SensorWriter::from(2));
+
+    let mut observer = sensor_writer_1
+        .spawn_observer()
+        .fuse_cached(sensor_writer_2.spawn_observer(), |x, y| x * y);
+
+    assert!(observer.is_cached());
+    assert_eq!(*observer.pull(), 2);
+
+    sensor_writer_1.update(2);
+    assert!(observer.has_changed());
+
+    let cached = *observer.pull();
+    assert_eq!(cached, 2);
+    let new = *observer.pull_updated();
+    assert_eq!(new, 4);
+
+    assert!(!observer.has_changed());
+
+    sensor_writer_2.update(3);
+    assert!(observer.has_changed());
+
+    let cached = *observer.pull();
+    assert_eq!(cached, 4);
+    let new = *observer.pull_updated();
+    assert_eq!(new, 6);
+
+    assert!(!observer.has_changed());
+}
+
+fn test_closed<R: Lockshare + Send + Sync>()
+where
+    R::Lock: DataWriteLock<Target = usize> + 'static,
+    SensorWriter<R, R::Lock>: 'static + Send + Sync + From<usize>,
+    for<'a> R::Shared<'a>: 'static,
+{
+    let sensor_writer = SensorWriter::from(1);
+    let mut observer = sensor_writer.spawn_observer();
+    drop(sensor_writer);
+    assert!(observer.is_closed());
+    assert_eq!(*observer.pull(), 1);
+}
+
+test_core!(pl_rwl, lock::parking_lot::RwSensorData<_>);
+test_core!(pl_arc_rwl, Arc<lock::parking_lot::RwSensorData<_>>);
+test_core_with_owned_observer!(pl_arc_rwl, Arc<lock::parking_lot::RwSensorData<_>>);
+test_core!(pl_mtx, lock::parking_lot::MutexSensorData<_>);
+test_core!(pl_arc_mtx, Arc<lock::parking_lot::MutexSensorData<_>>);
+test_core_with_owned_observer!(pl_arc_mtx, Arc<lock::parking_lot::MutexSensorData<_>>);
