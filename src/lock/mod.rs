@@ -9,9 +9,12 @@ use std::{
 
 use derived_deref::{Deref, DerefMut};
 
-use crate::{RevisedData, SensorWriter};
+use crate::{RevisedData, SensorObserver, SensorWriter};
 
+pub type AbstractSensorObserver<'a, L> = SensorObserver<&'a RevisedData<L>, L>;
 pub type AbstractSensorWriter<L> = SensorWriter<RevisedData<L>, L>;
+
+pub type AbstractArcSensorObserver<L> = SensorObserver<Arc<RevisedData<L>>, L>;
 pub type AbstractArcSensorWriter<L> = SensorWriter<Arc<RevisedData<L>>, L>;
 
 pub trait ReadGuardSpecifier {
@@ -19,7 +22,6 @@ pub trait ReadGuardSpecifier {
 
     type ReadGuard<'read>: Deref<Target = Self::Target>
     where
-        Self::Target: 'read,
         Self: 'read;
 }
 
@@ -32,7 +34,6 @@ pub trait DataReadLock: ReadGuardSpecifier {
 pub trait DataWriteLock: DataReadLock {
     type WriteGuard<'write>: Deref<Target = Self::Target> + DerefMut
     where
-        Self::Target: 'write,
         Self: 'write;
 
     /// Provides mutable access to the current value inside the lock.

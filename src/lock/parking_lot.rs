@@ -1,4 +1,4 @@
-use std::{cell::UnsafeCell, marker::PhantomData, sync::Arc};
+use std::{cell::UnsafeCell, sync::Arc};
 
 use parking_lot::{self, RwLockWriteGuard};
 
@@ -8,27 +8,39 @@ use crate::{
     ReadGuardSpecifier, RevisedData, SensorCallbackExec, SensorObserver, SensorWrite, SensorWriter,
 };
 
-use super::{AbstractArcSensorWriter, AbstractSensorWriter};
+use super::{
+    AbstractArcSensorObserver, AbstractArcSensorWriter, AbstractSensorObserver,
+    AbstractSensorWriter,
+};
 
+pub type RwSensorData<T> = RevisedData<parking_lot::RwLock<T>>;
+pub type RwSensor<'a, T> = AbstractSensorObserver<'a, parking_lot::RwLock<T>>;
 pub type RwSensorWriter<T> = AbstractSensorWriter<parking_lot::RwLock<T>>;
+
 impl<T> RwSensorWriter<T> {
     #[inline(always)]
     pub const fn new(init: T) -> Self {
         SensorWriter(RevisedData::new(parking_lot::RwLock::new(init)))
     }
 }
-
 impl<T> From<T> for RwSensorWriter<T> {
     #[inline(always)]
     fn from(value: T) -> Self {
         Self::new(value)
     }
 }
+
+pub type RwSensorDataExec<T> =
+    RevisedData<ExecLock<parking_lot::RwLock<ExecData<T, VecBoxManager<T>>>, T, VecBoxManager<T>>>;
+pub type RwSensorExec<'a, T> = AbstractSensorObserver<
+    'a,
+    ExecLock<parking_lot::RwLock<ExecData<T, VecBoxManager<T>>>, T, VecBoxManager<T>>,
+>;
 pub type RwSensorWriterExec<T> = AbstractSensorWriter<
     ExecLock<parking_lot::RwLock<ExecData<T, VecBoxManager<T>>>, T, VecBoxManager<T>>,
 >;
-
 impl<T> RwSensorWriterExec<T> {
+    #[inline(always)]
     pub const fn new(init: T) -> Self {
         SensorWriter(RevisedData::new(ExecLock::new(parking_lot::RwLock::new(
             ExecData {
@@ -38,15 +50,9 @@ impl<T> RwSensorWriterExec<T> {
         ))))
     }
 }
-pub type RwSensor<'a, T> =
-    SensorObserver<&'a RevisedData<parking_lot::RwLock<T>>, parking_lot::RwLock<T>>;
-pub type RwSensorExec<'state, T> = SensorObserver<
-    &'state RevisedData<
-        ExecLock<parking_lot::RwLock<ExecData<T, VecBoxManager<T>>>, T, VecBoxManager<T>>,
-    >,
-    ExecLock<parking_lot::RwLock<ExecData<T, VecBoxManager<T>>>, T, VecBoxManager<T>>,
->;
 
+pub type MutexSensorData<T> = RevisedData<parking_lot::RwLock<T>>;
+pub type MutexSensor<'a, T> = AbstractSensorObserver<'a, parking_lot::RwLock<T>>;
 pub type MutexSensorWriter<T> = AbstractSensorWriter<parking_lot::Mutex<T>>;
 
 impl<T> MutexSensorWriter<T> {
@@ -55,9 +61,14 @@ impl<T> MutexSensorWriter<T> {
     }
 }
 
-pub type MutexSensor<'a, T> =
-    SensorObserver<&'a RevisedData<parking_lot::Mutex<T>>, parking_lot::Mutex<T>>;
+impl<T> From<T> for MutexSensorWriter<T> {
+    #[inline(always)]
+    fn from(value: T) -> Self {
+        Self::new(value)
+    }
+}
 
+pub type ArcRwSensor<T> = AbstractArcSensorObserver<parking_lot::RwLock<T>>;
 pub type ArcRwSensorWriter<T> = AbstractArcSensorWriter<parking_lot::RwLock<T>>;
 
 impl<T> ArcRwSensorWriter<T> {
@@ -71,8 +82,6 @@ impl<T> From<T> for ArcRwSensorWriter<T> {
         Self::new(value)
     }
 }
-pub type ArcRwSensor<T> =
-    SensorObserver<Arc<RevisedData<parking_lot::RwLock<T>>>, parking_lot::RwLock<T>>;
 
 impl<T> ReadGuardSpecifier for parking_lot::RwLock<T> {
     type Target = T;

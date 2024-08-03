@@ -1,38 +1,26 @@
 use paste::paste;
-use sensor_fuse::lock::DataWriteLock;
+use sensor_fuse::lock::{self, DataWriteLock, ReadGuardSpecifier};
 use sensor_fuse::prelude::*;
-use sensor_fuse::{lock, Lockshare, SensorWriter};
-use std::{
-    cell::OnceCell,
-    sync::{Arc, OnceLock},
-    thread,
-};
+use sensor_fuse::{Lockshare, SensorWriter};
+use std::{sync::Arc, thread};
 
-// macro_rules! test_all_with_sensor_writer {
-//     ($prefix:ident, $sensor_writer:ty) => {
-//         paste! {
-//             #[test]
-//             fn [<$prefix _basic_sensor_observation_synced_10_10>]() {
-//                 test_basic_sensor_observation_synced!($sensor_writer, 10, 10);
-//             }
-//         }
-//     };
-// }
+macro_rules! test_all_with_sensor_writer {
+    ($prefix:ident, $sensor_writer:ty) => {
+        paste! {
+            #[test]
+            fn [<$prefix _basic_sensor_observation_synced_10_10>]() {
+                test_basic_sensor_observation_synced::<$sensor_writer>(10, 10);
+            }
+        }
+    };
+}
 
-// #[test]
-// fn pl_basic_sensor_observation_synced() {
-//     test_basic_sensor_observation_synced<>(10, 10);
-// }
-
-fn test_basic_sensor_observation_synced<
-    'share,
-    R: Lockshare<Lock = L> + Send + Sync,
-    L: DataWriteLock<Target = usize> + 'static,
->(
+fn test_basic_sensor_observation_synced<R: Lockshare + Send + Sync>(
     num_threads: usize,
     num_updates: usize,
 ) where
-    SensorWriter<R, L>: 'static + Send + Sync + From<usize>,
+    R::Lock: DataWriteLock<Target = usize> + 'static,
+    SensorWriter<R, R::Lock>: 'static + Send + Sync + From<usize>,
 {
     let sync = Arc::new((
         parking_lot::Mutex::new(0),
@@ -92,5 +80,7 @@ fn test_basic_sensor_observation_synced<
     });
 }
 
-// test_all_with_sensor_writer!(pl_rwl, lock::parking_lot::ArcRwSensorWriter<usize>);
-// test_all_with_sensor_writer!(pl_mtx, lock::parking_lot::MutexSensorWriter<usize>);
+test_all_with_sensor_writer!(pl_rwl, lock::parking_lot::RwSensorData<_>);
+test_all_with_sensor_writer!(pl_arc_rwl, Arc<lock::parking_lot::RwSensorData<_>>);
+test_all_with_sensor_writer!(pl_mtx, lock::parking_lot::MutexSensorData<_>);
+test_all_with_sensor_writer!(pl_arc_mtx, Arc<lock::parking_lot::MutexSensorData<_>>);

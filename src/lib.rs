@@ -3,7 +3,6 @@ pub mod lock;
 pub mod prelude;
 
 use callback_manager::{CallbackManager, ExecData, ExecLock};
-use core::marker::PhantomData;
 use core::{
     ops::Deref,
     sync::atomic::{AtomicUsize, Ordering},
@@ -11,7 +10,6 @@ use core::{
 use lock::{
     DataReadLock, DataWriteLock, FalseReadLock, OwnedData, OwnedFalseLock, ReadGuardSpecifier,
 };
-use std::cell::Ref;
 use std::ops::DerefMut;
 
 use std::sync::Arc;
@@ -61,20 +59,6 @@ impl<T> RevisedData<T> {
         self.version.load(core::sync::atomic::Ordering::Acquire)
     }
 }
-
-// pub trait Lockshare<'share, 'state, L: DataWriteLock + 'state> {
-//     type Shared: Deref<Target = RevisedData<L>> + 'state;
-
-//     /// Construct a new shareable lock from the given lock.
-//     fn new(lock: L) -> Self;
-
-//     /// Share the revised data for the largest possible lifetime.
-//     fn share_lock(&'share self) -> Self::Shared;
-
-//     /// There is probably a better way than this to get an elided reference
-//     /// to the revised data.
-//     fn share_elided_ref(&self) -> &RevisedData<L>;
-// }
 
 #[repr(transparent)]
 pub struct SensorWriter<R, L>(
