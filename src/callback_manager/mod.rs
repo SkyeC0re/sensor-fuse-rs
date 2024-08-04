@@ -2,6 +2,7 @@ use std::{
     cell::UnsafeCell,
     marker::PhantomData,
     ops::{Deref, DerefMut},
+    task::Waker,
 };
 
 use crate::lock::{DataReadLock, DataWriteLock, ReadGuardSpecifier};
@@ -11,6 +12,18 @@ pub mod standard;
 pub trait CallbackManager<T> {
     /// Register a function on the callback manager's execution queue.
     fn register<F: 'static + FnMut(&T) -> bool>(&mut self, f: F);
+
+    /// Register a waker on the callback manager.
+    /// By default any callback manager supports an unoptimized version of handling wakers as a oneshot function.
+    fn register_waker(&mut self, w: &Waker) {
+        let mut waker_clone = Some(w.clone());
+        self.register(move |_| {
+            if let Some(waker) = waker_clone.take() {
+                waker.wake();
+            }
+            false
+        });
+    }
     /// Execute all callbacks registered on the manager and drop all callbacks that returns `false`.
     fn callback(&mut self, value: &T);
 }
