@@ -9,9 +9,14 @@ use crate::lock::{DataReadLock, DataWriteLock, ReadGuardSpecifier};
 
 pub mod standard;
 
-pub trait CallbackManager<T> {
+pub trait CallbackExecute<T> {
+    /// Wake all pending tasks and execute all registered callbacks. All callbacks that returned `false` are dropped.
+    fn callback(&mut self, value: &T);
+}
+
+pub trait CallbackRegister<'req, T>: CallbackExecute<T> {
     /// Register a function on the callback manager's execution queue.
-    fn register<F: 'static + FnMut(&T) -> bool>(&mut self, f: F);
+    fn register<F: 'req + FnMut(&T) -> bool>(&mut self, f: F);
 
     /// Register a waker on the callback manager.
     /// By default any callback manager supports an unoptimized version of handling wakers as a oneshot function.
@@ -24,16 +29,14 @@ pub trait CallbackManager<T> {
             false
         });
     }
-    /// Execute all callbacks registered on the manager and drop all callbacks that returns `false`.
-    fn callback(&mut self, value: &T);
 }
 
-pub struct ExecData<T, E: CallbackManager<T>> {
+pub struct ExecData<T, E: CallbackExecute<T>> {
     pub(crate) exec_manager: UnsafeCell<E>,
     pub(crate) data: T,
 }
 
-impl<T, E: CallbackManager<T>> Deref for ExecData<T, E> {
+impl<T, E: CallbackExecute<T>> Deref for ExecData<T, E> {
     type Target = T;
 
     #[inline(always)]
@@ -42,7 +45,7 @@ impl<T, E: CallbackManager<T>> Deref for ExecData<T, E> {
     }
 }
 
-impl<T, E: CallbackManager<T>> DerefMut for ExecData<T, E> {
+impl<T, E: CallbackExecute<T>> DerefMut for ExecData<T, E> {
     #[inline(always)]
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.data
@@ -53,7 +56,7 @@ impl<T, E: CallbackManager<T>> DerefMut for ExecData<T, E> {
 pub struct ExecLock<L, T, E>
 where
     L: DataWriteLock<Target = ExecData<T, E>>,
-    E: CallbackManager<T>,
+    E: CallbackExecute<T>,
 {
     inner: L,
 }
@@ -61,7 +64,7 @@ where
 impl<L, T, E> ExecLock<L, T, E>
 where
     L: DataWriteLock<Target = ExecData<T, E>>,
-    E: CallbackManager<T>,
+    E: CallbackExecute<T>,
 {
     #[inline(always)]
     pub const fn new(lock: L) -> Self {
@@ -72,7 +75,7 @@ where
 impl<L, T, E> Deref for ExecLock<L, T, E>
 where
     L: DataWriteLock<Target = ExecData<T, E>>,
-    E: CallbackManager<T>,
+    E: CallbackExecute<T>,
 {
     type Target = L;
 
@@ -85,7 +88,7 @@ where
 impl<L, T, E> DerefMut for ExecLock<L, T, E>
 where
     L: DataWriteLock<Target = ExecData<T, E>>,
-    E: CallbackManager<T>,
+    E: CallbackExecute<T>,
 {
     #[inline(always)]
     fn deref_mut(&mut self) -> &mut Self::Target {
@@ -96,7 +99,7 @@ where
 impl<L, T, E> ReadGuardSpecifier for ExecLock<L, T, E>
 where
     L: DataWriteLock<Target = ExecData<T, E>>,
-    E: CallbackManager<T>,
+    E: CallbackExecute<T>,
 {
     type Target = T;
 
@@ -108,7 +111,7 @@ where
 impl<L, T, E> DataReadLock for ExecLock<L, T, E>
 where
     L: DataWriteLock<Target = ExecData<T, E>>,
-    E: CallbackManager<T>,
+    E: CallbackExecute<T>,
 {
     #[inline]
     fn read(&self) -> Self::ReadGuard<'_> {
@@ -130,7 +133,7 @@ where
 impl<L, T, E> DataWriteLock for ExecLock<L, T, E>
 where
     L: DataWriteLock<Target = ExecData<T, E>>,
-    E: CallbackManager<T>,
+    E: CallbackExecute<T>,
 {
     type WriteGuard<'write> = ExecGuardMut<L::WriteGuard<'write>, T, E>
     where
@@ -157,7 +160,7 @@ where
 pub struct ExecGuard<G, T, E>
 where
     G: Deref<Target = ExecData<T, E>>,
-    E: CallbackManager<T>,
+    E: CallbackExecute<T>,
 {
     pub(crate) inner: G,
     _types: PhantomData<(T, E)>,
@@ -166,7 +169,7 @@ where
 impl<G, T, E> ExecGuard<G, T, E>
 where
     G: Deref<Target = ExecData<T, E>>,
-    E: CallbackManager<T>,
+    E: CallbackExecute<T>,
 {
     #[inline(always)]
     pub const fn new(guard: G) -> Self {
@@ -180,7 +183,7 @@ where
 impl<G, T, E> Deref for ExecGuard<G, T, E>
 where
     G: Deref<Target = ExecData<T, E>>,
-    E: CallbackManager<T>,
+    E: CallbackExecute<T>,
 {
     type Target = T;
 
@@ -193,7 +196,7 @@ where
 pub struct ExecGuardMut<G, T, E>
 where
     G: Deref<Target = ExecData<T, E>>,
-    E: CallbackManager<T>,
+    E: CallbackExecute<T>,
 {
     pub(crate) inner: G,
     _types: PhantomData<(T, E)>,
@@ -202,7 +205,7 @@ where
 impl<G, T, E> ExecGuardMut<G, T, E>
 where
     G: Deref<Target = ExecData<T, E>>,
-    E: CallbackManager<T>,
+    E: CallbackExecute<T>,
 {
     #[inline(always)]
     pub const fn new(guard: G) -> Self {
@@ -216,7 +219,7 @@ where
 impl<G, T, E> Deref for ExecGuardMut<G, T, E>
 where
     G: DerefMut<Target = ExecData<T, E>>,
-    E: CallbackManager<T>,
+    E: CallbackExecute<T>,
 {
     type Target = T;
 
@@ -229,7 +232,7 @@ where
 impl<G, T, E> DerefMut for ExecGuardMut<G, T, E>
 where
     G: DerefMut<Target = ExecData<T, E>>,
-    E: CallbackManager<T>,
+    E: CallbackExecute<T>,
 {
     #[inline(always)]
     fn deref_mut(&mut self) -> &mut Self::Target {

@@ -2,7 +2,7 @@ use std::task::Waker;
 
 use derived_deref::{Deref, DerefMut};
 
-use super::CallbackManager;
+use super::{CallbackExecute, CallbackRegister};
 
 pub struct VecBoxManager<T> {
     callbacks: Vec<Box<dyn FnMut(&T) -> bool>>,
@@ -27,15 +27,7 @@ impl<T> VecBoxManager<T> {
     }
 }
 
-impl<T> CallbackManager<T> for VecBoxManager<T> {
-    fn register<F: 'static + FnMut(&T) -> bool>(&mut self, f: F) {
-        self.callbacks.push(Box::new(f));
-    }
-
-    fn register_waker(&mut self, w: &Waker) {
-        self.wakers.push(w.clone());
-    }
-
+impl<T> CallbackExecute<T> for VecBoxManager<T> {
     fn callback(&mut self, value: &T) {
         for waker in self.wakers.drain(..) {
             waker.wake();
@@ -57,6 +49,16 @@ impl<T> CallbackManager<T> for VecBoxManager<T> {
         }
 
         self.callbacks.truncate(len);
+    }
+}
+
+impl<T> CallbackRegister<'static, T> for VecBoxManager<T> {
+    fn register<F: 'static + FnMut(&T) -> bool>(&mut self, f: F) {
+        self.callbacks.push(Box::new(f));
+    }
+
+    fn register_waker(&mut self, w: &Waker) {
+        self.wakers.push(w.clone());
     }
 }
 

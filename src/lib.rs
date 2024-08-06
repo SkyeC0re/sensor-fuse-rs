@@ -2,7 +2,8 @@ pub mod callback_manager;
 pub mod lock;
 pub mod prelude;
 
-use callback_manager::{CallbackManager, ExecData, ExecLock};
+use callback_manager::{CallbackExecute, CallbackRegister, ExecData, ExecLock};
+use derived_deref::{Deref, DerefMut};
 use core::{
     ops::Deref,
     sync::atomic::{AtomicUsize, Ordering},
@@ -10,7 +11,7 @@ use core::{
 use lock::{
     DataReadLock, DataWriteLock, FalseReadLock, OwnedData, OwnedFalseLock, ReadGuardSpecifier,
 };
-use std::ops::DerefMut;
+use std::{future::Future, marker::PhantomData, ops::DerefMut, process::Output, task::Poll};
 
 use std::sync::Arc;
 
@@ -240,19 +241,21 @@ pub trait SensorCallbackExec<T> {
     fn exec(&self);
 }
 
-pub trait SensorCallbackRegister<T> {
-    /// Register a new function to the execution queue.
-    fn register<F: 'static + FnMut(&T) -> bool>(&self, f: F);
-}
+// pub trait SensorCallbackRegister<T> {
+//     /// Register a new function to the execution queue.
+//     fn register<F: 'static + FnMut(&T) -> bool>(&self, f: F);
 
-impl<R, L, T, E> SensorCallbackRegister<T>
-    for SensorWriter<R, R::Lock>
+
+
+// }
+
+impl<'a, R, L, T, E> SensorWriter<R, R::Lock>
 where
     L: DataWriteLock<Target = ExecData<T, E>>,
     R: Lockshare<Lock= ExecLock<L, T, E>>,
-    E: CallbackManager<T>,
+    E: CallbackRegister<'a, T>,
 {
-    fn register<F: 'static + FnMut(&T) -> bool>(&self, f: F) {
+    fn register<F: 'a + FnMut(&T) -> bool>(&self, f: F) {
         self.share_elided_ref()
             .write()
             .inner
@@ -260,17 +263,58 @@ where
             .get_mut()
             .register(f);
     }
+
+
 }
 
-impl<R, L, T, E> SensorCallbackRegister<T> for SensorObserver<R, ExecLock<L, T, E>>
+
+// fn elide<'a: 'b, 'b>(&)
+
+// #[repr(transparent)]
+// pub struct WaitUntilChangedFuture<'a, R, L, T, E>(
+//     &'a mut SensorObserver<R, ExecLock<L, T, E>>, 
+// ) 
+
+// where
+//     L: DataWriteLock<Target = ExecData<T, E>>,
+//     R: Deref<Target = RevisedData<ExecLock<L, T, E>>>,
+//     E: CallbackRegister<'a ,T>;
+
+// impl<'a,'b, R, L, T, E> Future for  WaitUntilChangedFuture<'a, R, L, T, E>
+// where
+//     L: DataWriteLock<Target = ExecData<T, E>> +'a ,
+//     R: Deref<Target = RevisedData<ExecLock<L, T, E>>> +'a,
+//     E: CallbackRegister<'a ,T> + 'a,
+//     T: 'a,
+//     Self: 'a,
+//     //  for<'b> <ExecLock<L, T, E> as ReadGuardSpecifier>::ReadGuard<'b>: 'a,
+//      {
+//         type Output = <ExecLock<L,T,E> as ReadGuardSpecifier>::ReadGuard<'a>;
+    
+//         fn poll(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
+//             if self.0.has_changed() {
+//                 Poll::Ready(self.0.pull_updated()
+//             )
+//             } else {
+//                 self.0.inner.share_elided_ref().write().inner.exec_manager.get_mut().register_waker(cx.waker());
+//                 Poll::Pending
+//             }
+//     }
+//     }
+
+impl<'a, R, L, T, E> SensorObserver<R, ExecLock<L, T, E>>
 where
     L: DataWriteLock<Target = ExecData<T, E>>,
     R: Deref<Target = RevisedData<ExecLock<L, T, E>>>,
-    E: CallbackManager<T>,
+    E: CallbackRegister<'a ,T>,
 {
-    fn register<F: 'static + FnMut(&T) -> bool>(&self, f: F) {
+    fn register<F: 'a + FnMut(&T) -> bool>(&self, f: F) {
         self.inner.write().inner.exec_manager.get_mut().register(f);
     }
+
+    // fn wait_until_changed(&mut self) -> WaitUntilChangedFuture<&mut Self> {
+    //     WaitUntilChangedFuture(self)
+    // }
 }
 
 pub trait SensorObserve {
@@ -726,7 +770,7 @@ mod tests {
             ArcRwSensor, ArcRwSensorWriter, RwSensor, RwSensorExec, RwSensorWriter,
             RwSensorWriterExec,
         },
-        SensorCallbackExec, SensorCallbackRegister, SensorObserve, SensorWrite,
+        SensorCallbackExec, SensorObserve, SensorWrite,
     };
 
     #[test]

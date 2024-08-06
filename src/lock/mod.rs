@@ -25,6 +25,20 @@ pub trait ReadGuardSpecifier {
         Self: 'read;
 }
 
+pub trait ReadGuard<T, G: Deref<Target = T>> {}
+
+pub trait ReadLock<T> {
+    fn read(&self) -> impl Deref<Target = T>;
+
+    fn try_read(&self) -> Option<impl Deref<Target = T>>;
+}
+
+pub trait WriteLock<T> {
+    fn write(&self) -> impl DerefMut<Target = T>;
+
+    fn try_write(&self) -> Option<impl DerefMut<Target = T>>;
+}
+
 pub trait DataReadLock: ReadGuardSpecifier {
     /// Provides at least immutable access to the current value inside the lock.
     fn read(&self) -> Self::ReadGuard<'_>;

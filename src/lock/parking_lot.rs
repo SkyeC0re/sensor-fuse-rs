@@ -4,7 +4,7 @@ use parking_lot::{self, RwLockWriteGuard};
 
 use crate::{
     callback_manager::{standard::VecBoxManager, ExecGuard},
-    CallbackManager, DataReadLock, DataWriteLock, ExecData, ExecLock, Lockshare,
+    CallbackExecute, DataReadLock, DataWriteLock, ExecData, ExecLock, Lockshare,
     ReadGuardSpecifier, RevisedData, SensorCallbackExec, SensorObserver, SensorWrite, SensorWriter,
 };
 
@@ -117,7 +117,7 @@ impl<R, T, E> SensorCallbackExec<T>
     for SensorWriter<R, ExecLock<parking_lot::RwLock<ExecData<T, E>>, T, E>>
 where
     R: Lockshare<Lock = ExecLock<parking_lot::RwLock<ExecData<T, E>>, T, E>>,
-    E: CallbackManager<T>,
+    E: CallbackExecute<T>,
 {
     fn update_exec(&self, sample: T) {
         let mut guard = self.share_elided_ref().write();
@@ -155,7 +155,7 @@ impl<R, T, E> SensorCallbackExec<T>
     for SensorWriter<R, ExecLock<parking_lot::Mutex<ExecData<T, E>>, T, E>>
 where
     R: Lockshare<Lock = ExecLock<parking_lot::Mutex<ExecData<T, E>>, T, E>>,
-    E: CallbackManager<T>,
+    E: CallbackExecute<T>,
 {
     fn update_exec(&self, sample: T) {
         let mut guard = self.share_elided_ref().write();
