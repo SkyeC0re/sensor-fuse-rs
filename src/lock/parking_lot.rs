@@ -126,7 +126,7 @@ where
         let guard = ExecGuard::new(RwLockWriteGuard::downgrade(guard.inner));
 
         // Atomic downgrade just occured. No other modication can happen.
-        unsafe { (*guard.inner.exec_manager.get()).callback(&guard.inner) };
+        unsafe { (*guard.inner.exec_manager.get()).callback(&guard) };
     }
 
     fn modify_with_exec(&self, f: impl FnOnce(&mut T)) {

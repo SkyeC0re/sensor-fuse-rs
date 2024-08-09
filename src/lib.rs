@@ -81,8 +81,8 @@ where
     for<'a> &'a R: Lockshare2<'a, Lock = L>,
 {
     fn drop(&mut self) {
-        self.0
-            .share_elided_ref()
+        let x = &self.0;
+        x.share_elided_ref()
             .version
             .fetch_or(CLOSED_BIT, Ordering::Release);
     }
@@ -115,12 +115,11 @@ where
     #[inline(always)]
     pub fn spawn_referenced_observer(
         &self,
-    ) -> SensorObserver<&RevisedData<<&'_ R as Lockshare2>::Lock>, <&'_ R as Lockshare2>::Lock>
+    ) -> SensorObserver<&'_ RevisedData<<&'_ R as Lockshare2>::Lock>, <&'_ R as Lockshare2>::Lock>
     {
-        SensorObserver {
-            inner: self.0.share_elided_ref(),
-            version: self.0.share_elided_ref().version(),
-        }
+        let inner = (&self.0).share_elided_ref();
+        let version = (&self.0).share_elided_ref().version();
+        SensorObserver { inner, version }
     }
 
     #[inline(always)]
@@ -154,17 +153,17 @@ where
 
 pub trait Lockshare2<'a> {
     type Lock: DataWriteLock;
-    type Shared: Deref<Target = RevisedData<Self::Lock>>;
+    type Shared: Deref<Target = RevisedData<Self::Lock>> + 'a;
 
     // /// Construct a new shareable lock from the given lock.
     // fn new(lock: Self::Lock) -> Self;
 
     /// Share the revised data for the largest possible lifetime.
-    fn share_lock(&self) -> Self::Shared;
+    fn share_lock(self) -> Self::Shared;
 
     /// There is probably a better way than this to get an elided reference
     /// to the revised data.
-    fn share_elided_ref(&self) -> &RevisedData<Self::Lock>;
+    fn share_elided_ref(self) -> &'a RevisedData<Self::Lock>;
 }
 
 impl<'a, L> Lockshare2<'a> for &'a RevisedData<L>
@@ -174,7 +173,7 @@ where
     type Lock = L;
     type Shared = Self;
     #[inline(always)]
-    fn share_lock(&self) -> Self {
+    fn share_lock(self) -> Self {
         self
     }
 
@@ -184,7 +183,7 @@ where
     // }
 
     #[inline(always)]
-    fn share_elided_ref(&self) -> Self {
+    fn share_elided_ref(self) -> Self {
         self
     }
 }
@@ -197,12 +196,12 @@ where
     type Shared = Arc<RevisedData<L>>;
 
     #[inline(always)]
-    fn share_lock(&self) -> Self::Shared {
+    fn share_lock(self) -> Self::Shared {
         self.clone()
     }
 
     #[inline(always)]
-    fn share_elided_ref(&self) -> &RevisedData<L> {
+    fn share_elided_ref(self) -> &'a RevisedData<L> {
         self
     }
 }
@@ -314,7 +313,8 @@ where
     for<'b> &'b R: Lockshare2<'b, Lock = ExecLock<L, T, E>>,
 {
     fn register<F: 'a + FnMut(&T) -> bool>(&self, f: F) {
-        self.share_elided_ref()
+        self.deref()
+            .share_elided_ref()
             .write()
             .inner
             .exec_manager
@@ -325,13 +325,13 @@ where
 
 // fn elide<'a: 'b, 'b>(&)
 
-pub trait StaticFuse<I: 'static, O>
+pub trait StaticFuse<'a, I: 'a, O>
 where
     Self: Deref<Target = I>,
 {
     type Fused: DerefMut<Target = O>;
 
-    unsafe fn static_fuse<F: FnOnce(&'static I) -> O>(self, f: F) -> Self::Fused;
+    unsafe fn static_fuse<F: FnOnce(&'a I) -> O>(self, f: F) -> Self::Fused;
 }
 
 #[repr(transparent)]
@@ -351,10 +351,10 @@ impl<T> DerefMut for FusedRef<T> {
     }
 }
 
-impl<I, O> StaticFuse<I, O> for &'static I {
+impl<'a, I, O> StaticFuse<'a, I, O> for &'a I {
     type Fused = FusedRef<O>;
 
-    unsafe fn static_fuse<F: FnOnce(&'static I) -> O>(self, f: F) -> Self::Fused {
+    unsafe fn static_fuse<F: FnOnce(&'a I) -> O>(self, f: F) -> Self::Fused {
         FusedRef(f(self))
     }
 }
@@ -375,50 +375,51 @@ impl<T, P> DerefMut for FusedHeapPtr<T, P> {
     }
 }
 
-impl<I: 'static, O> StaticFuse<I, O> for Arc<I> {
+impl<'a, I: 'a, O> StaticFuse<'a, I, O> for Arc<I> {
     type Fused = FusedHeapPtr<O, Self>;
 
-    unsafe fn static_fuse<F: FnOnce(&'static I) -> O>(self, f: F) -> Self::Fused {
+    unsafe fn static_fuse<F: FnOnce(&'a I) -> O>(self, f: F) -> Self::Fused {
         let shared_ref = &*(&*self as *const I);
         FusedHeapPtr(f(shared_ref), self)
     }
 }
 
 #[repr(transparent)]
-pub struct WaitUntilChangedFuture<R, L: 'static, T: 'static, E: 'static>(
-    Option<SensorObserver<R, ExecLock<L, T, E>>>,
-    PhantomData<(L, T, E)>,
+pub struct WaitUntilChangedFuture<'a, 'req, R, L, T, E>(
+    Option<&'a mut SensorObserver<R, ExecLock<L, T, E>>>,
+    PhantomData<&'req (L, T, E)>,
 )
 where
     L: DataWriteLock<Target = ExecData<T, E>>,
-    R: StaticFuse<
-        RevisedData<ExecLock<L, T, E>>,
-        <ExecLock<L, T, E> as ReadGuardSpecifier>::ReadGuard<'static>,
-    >,
-    E: CallbackRegister<'static, T>;
+    R: Deref<Target = RevisedData<ExecLock<L, T, E>>>,
+    E: CallbackRegister<'req, T>;
+// &'a R: Lockshare2<'a, Lock = ExecLock<L, T, E>>;
 
-impl<R, L: 'static, T: 'static, E: 'static> Future for WaitUntilChangedFuture<R, L, T, E>
+impl<'a, 'req, R, L, T, E> Future for WaitUntilChangedFuture<'a, 'req, R, L, T, E>
 where
     L: DataWriteLock<Target = ExecData<T, E>>,
-    R: StaticFuse<
-        RevisedData<ExecLock<L, T, E>>,
-        <ExecLock<L, T, E> as ReadGuardSpecifier>::ReadGuard<'static>,
-    >,
-    E: CallbackRegister<'static, T>,
+    R: Deref<Target = RevisedData<ExecLock<L, T, E>>>,
+    E: CallbackRegister<'req, T>,
+    // &'a R: Lockshare2<'a, Lock = ExecLock<L, T, E>>,
     Self: Unpin,
 {
-    type Output = R::Fused;
+    type Output = ExecGuard<L::ReadGuard<'a>, T, E>;
 
     fn poll(
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> Poll<Self::Output> {
         if let Some(value) = self.0.take() {
+            println!("POLLED");
+            // return Poll::Ready(value.pull_updated());
             if value.has_changed() {
-                unsafe { Poll::Ready(value.inner.static_fuse(|x| x.read())) }
+                println!("THIS");
+                Poll::Ready(value.pull_updated())
             } else {
+                print!("POLLED: NOT READY");
                 value
                     .inner
+                    .deref()
                     .share_elided_ref()
                     .write()
                     .inner
@@ -429,23 +430,22 @@ where
                 Poll::Pending
             }
         } else {
+            println!("THIS?");
             Poll::Pending
         }
     }
 }
 
-impl<R, L: 'static, T: 'static, E: 'static> SensorObserver<R, ExecLock<L, T, E>>
+impl<'a, 'req, R, L, T, E> SensorObserver<R, ExecLock<L, T, E>>
 where
     L: DataWriteLock<Target = ExecData<T, E>>,
-    R: StaticFuse<
-        RevisedData<ExecLock<L, T, E>>,
-        <ExecLock<L, T, E> as ReadGuardSpecifier>::ReadGuard<'static>,
-    >,
-    E: CallbackRegister<'static, T>,
-    Self: Clone,
+    R: Deref<Target = RevisedData<ExecLock<L, T, E>>>,
+    E: CallbackRegister<'req, T>,
+    // &'a R: Lockshare2<'a, Lock = ExecLock<L, T, E>>,
+    // Self: 'a,
 {
-    fn wait_until_changed(&self) -> WaitUntilChangedFuture<R, L, T, E> {
-        WaitUntilChangedFuture(Some(self.clone()), PhantomData)
+    fn wait_until_changed(&mut self) -> WaitUntilChangedFuture<'_, 'req, R, L, T, E> {
+        WaitUntilChangedFuture(Some(self), PhantomData)
     }
 }
 
@@ -906,7 +906,13 @@ where
 #[cfg(test)]
 mod tests {
 
-    use std::future;
+    use std::{
+        future,
+        thread::{self, sleep},
+        time::Duration,
+    };
+
+    use futures::executor::block_on;
 
     use crate::{
         lock::parking_lot::{
@@ -916,7 +922,7 @@ mod tests {
         SensorCallbackExec, SensorObserve, SensorWrite,
     };
 
-    // const X: RwSensorWriterExec<i32> = RwSensorWriterExec::new(5);
+    static X: RwSensorWriterExec<i32> = RwSensorWriterExec::new(5);
 
     #[test]
     fn test_1() {
@@ -927,44 +933,63 @@ mod tests {
         let b: RwSensorExec<_> = s2.spawn_observer();
         let z: RwSensor<_> = s3.spawn_observer();
 
-        // let zz = X.spawn_referenced_observer();
-
-        // zz.wait_until_changed();
-
-        let bb: ArcRwSensor<_> = s1.spawn_observer();
-        let bbc = bb.clone();
-
-        let mut x = s1
-            .spawn_observer()
-            .fuse_cached(s2.spawn_observer(), |x, y| *x + *y);
-
-        s2.register(|new_val| {
-            println!("New sample {}", new_val);
-            true
+        let handle = thread::spawn(move || {
+            let xref = &X;
+            let mut zz = xref.spawn_referenced_observer();
+            let x = block_on(async { zz.wait_until_changed().await });
+            println!("{}", *x)
         });
 
-        let d = s2.spawn_observer();
+        X.update_exec(8);
 
-        d.register(|new_val| {
-            println!("New sample OBS {}", new_val);
-            true
-        });
+        // println!("HANDLE JOINED");
+        // let bb: ArcRwSensor<_> = s1.spawn_observer();
+        // let bbc = bb.clone();
 
-        assert!(!x.has_changed());
+        // let mut x = s1
+        //     .spawn_observer()
+        //     .fuse_cached(s2.spawn_observer(), |x, y| *x + *y);
 
-        assert_eq!(*x.pull(), 2);
-        s1.update(3);
-        drop(s1);
-        assert!(x.inner_a().is_closed());
-        assert!(x.has_changed());
-        assert_eq!(*x.pull(), 2);
-        assert_eq!(*x.pull_updated(), 8);
-        assert!(!x.has_changed());
-        let mut x = x.map_cached(|x| x + 2);
+        // s2.register(|new_val| {
+        //     println!("New sample {}", new_val);
+        //     true
+        // });
 
-        s2.update_exec(7);
-        s2.update_exec(10);
+        // let d = s2.spawn_observer();
 
-        assert_eq!(*x.pull(), 10);
+        // d.register(|new_val| {
+        //     println!("New sample OBS {}", new_val);
+        //     true
+        // });
+
+        // assert!(!x.has_changed());
+
+        // assert_eq!(*x.pull(), 2);
+        // s1.update(3);
+        // drop(s1);
+        // assert!(x.inner_a().is_closed());
+        // assert!(x.has_changed());
+        // assert_eq!(*x.pull(), 2);
+        // assert_eq!(*x.pull_updated(), 8);
+        // assert!(!x.has_changed());
+        // let mut x = x.map_cached(|x| x + 2);
+
+        // s2.update_exec(7);
+        // s2.update_exec(10);
+
+        // assert_eq!(*x.pull(), 10);
+
+        sleep(Duration::from_secs(1));
+        X.update_exec(9);
+        sleep(Duration::from_secs(1));
+        X.update_exec(11);
+        X.update_exec(11);
+        X.update_exec(11);
+        X.update_exec(11);
+        X.update_exec(11);
+        X.update_exec(11);
+        X.update_exec(11);
+        // handle.join().unwrap();
+        println!("HELLOPP");
     }
 }

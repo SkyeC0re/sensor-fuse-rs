@@ -29,7 +29,14 @@ impl<T> VecBoxManager<T> {
 
 impl<T> CallbackExecute<T> for VecBoxManager<T> {
     fn callback(&mut self, value: &T) {
+        println!(
+            "CALLBACKS {}, {}, {:?}",
+            self.wakers.len(),
+            self.callbacks.len(),
+            self as *const Self
+        );
         for waker in self.wakers.drain(..) {
+            println!("WAKER AWOKEN");
             waker.wake();
         }
 
@@ -58,15 +65,18 @@ impl<T> CallbackRegister<'static, T> for VecBoxManager<T> {
     }
 
     fn register_waker(&mut self, w: &Waker) {
+        println!("WAKER REGISTERED");
         self.wakers.push(w.clone());
     }
 }
 
-#[derive(Deref, DerefMut, Default)]
-pub struct AsyncVecBoxManager<T>(Vec<Box<dyn FnMut(&T) -> bool>>);
+unsafe impl<T> Send for VecBoxManager<T> where T: Send {}
+unsafe impl<T> Sync for VecBoxManager<T> where T: Sync {}
+// #[derive(Deref, DerefMut, Default)]
+// pub struct AsyncVecBoxManager<T>(Vec<Box<dyn FnMut(&T) -> bool>>);
 
-impl<T> AsyncVecBoxManager<T> {
-    pub const fn new() -> Self {
-        Self(Vec::new())
-    }
-}
+// impl<T> AsyncVecBoxManager<T> {
+//     pub const fn new() -> Self {
+//         Self(Vec::new())
+//     }
+// }

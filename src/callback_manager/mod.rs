@@ -28,6 +28,7 @@ pub trait CallbackRegister<'req, T>: CallbackExecute<T> {
             }
             false
         });
+        panic!()
     }
 }
 
@@ -35,6 +36,9 @@ pub struct ExecData<T, E: CallbackExecute<T>> {
     pub(crate) exec_manager: UnsafeCell<E>,
     pub(crate) data: T,
 }
+
+unsafe impl<T, E: CallbackExecute<T>> Send for ExecData<T, E> where E: Send {}
+unsafe impl<T, E: CallbackExecute<T>> Sync for ExecData<T, E> where E: Sync {}
 
 impl<T, E: CallbackExecute<T>> Deref for ExecData<T, E> {
     type Target = T;
