@@ -2,10 +2,10 @@ use std::task::Waker;
 
 use derived_deref::{Deref, DerefMut};
 
-use super::{CallbackExecute, CallbackRegister};
+use super::{CallbackExecute, CallbackRegister2, WakerRegister};
 
 pub struct VecBoxManager<T> {
-    callbacks: Vec<Box<dyn FnMut(&T) -> bool>>,
+    callbacks: Vec<Box<dyn Send + Sync + FnMut(&T) -> bool>>,
     wakers: Vec<Waker>,
 }
 
@@ -29,14 +29,7 @@ impl<T> VecBoxManager<T> {
 
 impl<T> CallbackExecute<T> for VecBoxManager<T> {
     fn callback(&mut self, value: &T) {
-        println!(
-            "CALLBACKS {}, {}, {:?}",
-            self.wakers.len(),
-            self.callbacks.len(),
-            self as *const Self
-        );
         for waker in self.wakers.drain(..) {
-            println!("WAKER AWOKEN");
             waker.wake();
         }
 
@@ -59,24 +52,16 @@ impl<T> CallbackExecute<T> for VecBoxManager<T> {
     }
 }
 
-impl<T> CallbackRegister<'static, T> for VecBoxManager<T> {
-    fn register<F: 'static + FnMut(&T) -> bool>(&mut self, f: F) {
+impl<T, F: 'static + Send + Sync + FnMut(&T) -> bool> CallbackRegister2<'static, F, T>
+    for VecBoxManager<T>
+{
+    fn register(&mut self, f: F) {
         self.callbacks.push(Box::new(f));
-    }
-
-    fn register_waker(&mut self, w: &Waker) {
-        println!("WAKER REGISTERED");
-        self.wakers.push(w.clone());
     }
 }
 
-unsafe impl<T> Send for VecBoxManager<T> where T: Send {}
-unsafe impl<T> Sync for VecBoxManager<T> where T: Sync {}
-// #[derive(Deref, DerefMut, Default)]
-// pub struct AsyncVecBoxManager<T>(Vec<Box<dyn FnMut(&T) -> bool>>);
-
-// impl<T> AsyncVecBoxManager<T> {
-//     pub const fn new() -> Self {
-//         Self(Vec::new())
-//     }
-// }
+impl<T> WakerRegister for VecBoxManager<T> {
+    fn register_waker(&mut self, w: &Waker) {
+        self.wakers.push(w.clone());
+    }
+}

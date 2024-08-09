@@ -4,7 +4,7 @@ use parking_lot::{self, RwLockWriteGuard};
 
 use crate::{
     callback_manager::{standard::VecBoxManager, ExecGuard},
-    CallbackExecute, DataReadLock, DataWriteLock, ExecData, ExecLock, Lockshare2,
+    CallbackExecute, DataReadLock, DataWriteLock, ExecData, ExecLock, Lockshare,
     ReadGuardSpecifier, RevisedData, SensorCallbackExec, SensorObserver, SensorWrite, SensorWriter,
 };
 
@@ -83,6 +83,26 @@ impl<T> From<T> for ArcRwSensorWriter<T> {
     }
 }
 
+// pub type ArcRwSensorDataExec<T> =
+//     RevisedData<ExecLock<parking_lot::RwLock<ExecData<T, VecBoxManager<T>>>, T, VecBoxManager<T>>>;
+pub type ArcRwSensorExec<T> = AbstractArcSensorObserver<
+    ExecLock<parking_lot::RwLock<ExecData<T, VecBoxManager<T>>>, T, VecBoxManager<T>>,
+>;
+pub type ArcRwSensorWriterExec<T> = AbstractArcSensorWriter<
+    ExecLock<parking_lot::RwLock<ExecData<T, VecBoxManager<T>>>, T, VecBoxManager<T>>,
+>;
+impl<T> ArcRwSensorWriterExec<T> {
+    #[inline(always)]
+    pub fn new(init: T) -> Self {
+        SensorWriter(Arc::new(RevisedData::new(ExecLock::new(
+            parking_lot::RwLock::new(ExecData {
+                exec_manager: UnsafeCell::new(VecBoxManager::new()),
+                data: init,
+            }),
+        ))))
+    }
+}
+
 impl<T> ReadGuardSpecifier for parking_lot::RwLock<T> {
     type Target = T;
     type ReadGuard<'read> = parking_lot::RwLockReadGuard<'read, T> where T: 'read;
@@ -116,7 +136,7 @@ impl<T> DataWriteLock for parking_lot::RwLock<T> {
 impl<R, T, E> SensorCallbackExec<T>
     for SensorWriter<R, ExecLock<parking_lot::RwLock<ExecData<T, E>>, T, E>>
 where
-    for<'a> &'a R: Lockshare2<'a, Lock = ExecLock<parking_lot::RwLock<ExecData<T, E>>, T, E>>,
+    for<'a> &'a R: Lockshare<'a, Lock = ExecLock<parking_lot::RwLock<ExecData<T, E>>, T, E>>,
     E: CallbackExecute<T>,
 {
     fn update_exec(&self, sample: T) {
@@ -154,7 +174,7 @@ where
 impl<R, T, E> SensorCallbackExec<T>
     for SensorWriter<R, ExecLock<parking_lot::Mutex<ExecData<T, E>>, T, E>>
 where
-    for<'a> &'a R: Lockshare2<'a, Lock = ExecLock<parking_lot::Mutex<ExecData<T, E>>, T, E>>,
+    for<'a> &'a R: Lockshare<'a, Lock = ExecLock<parking_lot::Mutex<ExecData<T, E>>, T, E>>,
     E: CallbackExecute<T>,
 {
     fn update_exec(&self, sample: T) {

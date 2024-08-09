@@ -1,1 +1,1 @@
-pub use crate::{SensorCallbackExec, SensorObserve, SensorWrite};
+pub use crate::{RegisterFunction, SensorCallbackExec, SensorObserve, SensorWrite};
