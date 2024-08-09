@@ -2,16 +2,26 @@ pub mod callback_manager;
 pub mod lock;
 pub mod prelude;
 
-use callback_manager::{CallbackExecute, CallbackRegister, ExecData, ExecLock};
-use derived_deref::{Deref, DerefMut};
+use callback_manager::{CallbackExecute, CallbackRegister, ExecData, ExecGuard, ExecLock};
 use core::{
     ops::Deref,
     sync::atomic::{AtomicUsize, Ordering},
 };
+use derived_deref::{Deref, DerefMut};
 use lock::{
     DataReadLock, DataWriteLock, FalseReadLock, OwnedData, OwnedFalseLock, ReadGuardSpecifier,
 };
-use std::{future::Future, marker::PhantomData, ops::DerefMut, process::Output, task::Poll};
+use std::{
+    cell::{Cell, OnceCell, UnsafeCell},
+    future::Future,
+    iter::Fuse,
+    marker::PhantomData,
+    mem::{self, take},
+    ops::DerefMut,
+    process::Output,
+    sync::OnceState,
+    task::Poll,
+};
 
 use std::sync::Arc;
 
@@ -62,15 +72,13 @@ impl<T> RevisedData<T> {
 }
 
 #[repr(transparent)]
-pub struct SensorWriter<R, L>(
-    R,
-)
+pub struct SensorWriter<R, L>(R)
 where
-    R: Lockshare<Lock = L>;
+    for<'a> &'a R: Lockshare2<'a, Lock = L>;
 
 impl<R, L> Drop for SensorWriter<R, L>
 where
-    R: Lockshare<Lock = L>,
+    for<'a> &'a R: Lockshare2<'a, Lock = L>,
 {
     fn drop(&mut self) {
         self.0
@@ -82,7 +90,7 @@ where
 
 impl<R, L> Deref for SensorWriter<R, L>
 where
-    R: Lockshare<Lock = L>,
+    for<'a> &'a R: Lockshare2<'a, Lock = L>,
 {
     type Target = R;
 
@@ -93,7 +101,7 @@ where
 
 impl<R, L> DerefMut for SensorWriter<R, L>
 where
-    R: Lockshare<Lock = L>,
+    for<'a> &'a R: Lockshare2<'a, Lock = L>,
 {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.0
@@ -102,10 +110,13 @@ where
 
 impl<R, L> SensorWriter<R, L>
 where
-    R: Lockshare<Lock = L>,
+    for<'a> &'a R: Lockshare2<'a, Lock = L>,
 {
     #[inline(always)]
-    pub fn spawn_referenced_observer(&self) -> SensorObserver<&RevisedData<R::Lock>, R::Lock> {
+    pub fn spawn_referenced_observer(
+        &self,
+    ) -> SensorObserver<&RevisedData<<&'_ R as Lockshare2>::Lock>, <&'_ R as Lockshare2>::Lock>
+    {
         SensorObserver {
             inner: self.0.share_elided_ref(),
             version: self.0.share_elided_ref().version(),
@@ -113,7 +124,9 @@ where
     }
 
     #[inline(always)]
-    pub fn spawn_observer(&self) -> SensorObserver<R::Shared<'_>, R::Lock> {
+    pub fn spawn_observer(
+        &self,
+    ) -> SensorObserver<<&'_ R as Lockshare2>::Shared, <&'_ R as Lockshare2>::Lock> {
         let inner = self.0.share_lock();
         SensorObserver {
             version: inner.version(),
@@ -122,65 +135,70 @@ where
     }
 }
 
-pub trait Lockshare {
-    type Lock: DataWriteLock;
-    type Shared<'share>: Deref<Target = RevisedData<Self::Lock>>
-    where
-        Self: 'share;
+// pub trait Lockshare {
+//     type Lock: DataWriteLock;
+//     type Shared<'share>: Deref<Target = RevisedData<Self::Lock>>
+//     where
+//         Self: 'share;
 
-    /// Construct a new shareable lock from the given lock.
-    fn new(lock: Self::Lock) -> Self;
+//     /// Construct a new shareable lock from the given lock.
+//     // fn new(lock: Self::Lock) -> Self;
+
+//     /// Share the revised data for the largest possible lifetime.
+//     fn share_lock(&self) -> Self::Shared<'_>;
+
+//     /// There is probably a better way than this to get an elided reference
+//     /// to the revised data.
+//     fn share_elided_ref(&self) -> &RevisedData<Self::Lock>;
+// }
+
+pub trait Lockshare2<'a> {
+    type Lock: DataWriteLock;
+    type Shared: Deref<Target = RevisedData<Self::Lock>>;
+
+    // /// Construct a new shareable lock from the given lock.
+    // fn new(lock: Self::Lock) -> Self;
 
     /// Share the revised data for the largest possible lifetime.
-    fn share_lock(&self) -> Self::Shared<'_>;
+    fn share_lock(&self) -> Self::Shared;
 
     /// There is probably a better way than this to get an elided reference
     /// to the revised data.
     fn share_elided_ref(&self) -> &RevisedData<Self::Lock>;
 }
-// There must be a way to do this sharing without having to have a second lifetime in the trait,
-// but the author is not experienced enough.
-impl<L> Lockshare for RevisedData<L>
+
+impl<'a, L> Lockshare2<'a> for &'a RevisedData<L>
 where
     L: DataWriteLock,
 {
     type Lock = L;
-    type Shared<'share> = &'share Self
-    where 
-        Self: 'share;
+    type Shared = Self;
     #[inline(always)]
-    fn share_lock(&self) -> &Self {
+    fn share_lock(&self) -> Self {
         self
     }
 
-    #[inline(always)]
-    fn new(lock: L) -> Self {
-        RevisedData::new(lock)
-    }
+    // #[inline(always)]
+    // fn new(lock: L) -> Self {
+    //     RevisedData::new(lock)
+    // }
 
     #[inline(always)]
-    fn share_elided_ref(&self) -> &Self {
-        &self
+    fn share_elided_ref(&self) -> Self {
+        self
     }
 }
 
-impl<L> Lockshare for Arc<RevisedData<L>>
+impl<'a, L> Lockshare2<'a> for &'a Arc<RevisedData<L>>
 where
     L: DataWriteLock,
 {
     type Lock = L;
-    type Shared<'share> = Self
-    where
-        Self: 'share;
+    type Shared = Arc<RevisedData<L>>;
 
     #[inline(always)]
-    fn share_lock(&self) -> Self {
+    fn share_lock(&self) -> Self::Shared {
         self.clone()
-    }
-
-    #[inline(always)]
-    fn new(lock: L) -> Self {
-        Arc::new(RevisedData::new(lock))
     }
 
     #[inline(always)]
@@ -188,6 +206,47 @@ where
         self
     }
 }
+
+// // There must be a way to do this sharing without having to have a second lifetime in the trait,
+// // but the author is not experienced enough.
+// impl<L> Lockshare for RevisedData<L>
+// where
+//     L: DataWriteLock,
+// {
+//     type Lock = L;
+//     type Shared<'share> = &'share Self
+//     where
+//         Self: 'share;
+//     #[inline(always)]
+//     fn share_lock(&self) -> &Self {
+//         self
+//     }
+
+//     #[inline(always)]
+//     fn share_elided_ref(&self) -> &Self {
+//         &self
+//     }
+// }
+
+// impl<L> Lockshare for Arc<RevisedData<L>>
+// where
+//     L: DataWriteLock,
+// {
+//     type Lock = L;
+//     type Shared<'share> = Self
+//     where
+//         Self: 'share;
+
+//     #[inline(always)]
+//     fn share_lock(&self) -> Self {
+//         self.clone()
+//     }
+
+//     #[inline(always)]
+//     fn share_elided_ref(&self) -> &RevisedData<L> {
+//         self
+//     }
+// }
 
 pub struct SensorObserver<R, L>
 where
@@ -245,15 +304,14 @@ pub trait SensorCallbackExec<T> {
 //     /// Register a new function to the execution queue.
 //     fn register<F: 'static + FnMut(&T) -> bool>(&self, f: F);
 
-
-
 // }
 
-impl<'a, R, L, T, E> SensorWriter<R, R::Lock>
+impl<'a, R, L, T, E> SensorWriter<R, <&'a R as Lockshare2<'a>>::Lock>
 where
     L: DataWriteLock<Target = ExecData<T, E>>,
-    R: Lockshare<Lock= ExecLock<L, T, E>>,
+    // R: Lockshare2<'a, Lock = ExecLock<L, T, E>>,
     E: CallbackRegister<'a, T>,
+    for<'b> &'b R: Lockshare2<'b, Lock = ExecLock<L, T, E>>,
 {
     fn register<F: 'a + FnMut(&T) -> bool>(&self, f: F) {
         self.share_elided_ref()
@@ -263,58 +321,143 @@ where
             .get_mut()
             .register(f);
     }
-
-
 }
-
 
 // fn elide<'a: 'b, 'b>(&)
 
-// #[repr(transparent)]
-// pub struct WaitUntilChangedFuture<'a, R, L, T, E>(
-//     &'a mut SensorObserver<R, ExecLock<L, T, E>>, 
-// ) 
+pub trait StaticFuse<I: 'static, O>
+where
+    Self: Deref<Target = I>,
+{
+    type Fused: DerefMut<Target = O>;
 
-// where
-//     L: DataWriteLock<Target = ExecData<T, E>>,
-//     R: Deref<Target = RevisedData<ExecLock<L, T, E>>>,
-//     E: CallbackRegister<'a ,T>;
+    unsafe fn static_fuse<F: FnOnce(&'static I) -> O>(self, f: F) -> Self::Fused;
+}
 
-// impl<'a,'b, R, L, T, E> Future for  WaitUntilChangedFuture<'a, R, L, T, E>
-// where
-//     L: DataWriteLock<Target = ExecData<T, E>> +'a ,
-//     R: Deref<Target = RevisedData<ExecLock<L, T, E>>> +'a,
-//     E: CallbackRegister<'a ,T> + 'a,
-//     T: 'a,
-//     Self: 'a,
-//     //  for<'b> <ExecLock<L, T, E> as ReadGuardSpecifier>::ReadGuard<'b>: 'a,
-//      {
-//         type Output = <ExecLock<L,T,E> as ReadGuardSpecifier>::ReadGuard<'a>;
-    
-//         fn poll(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
-//             if self.0.has_changed() {
-//                 Poll::Ready(self.0.pull_updated()
-//             )
-//             } else {
-//                 self.0.inner.share_elided_ref().write().inner.exec_manager.get_mut().register_waker(cx.waker());
-//                 Poll::Pending
-//             }
-//     }
-//     }
+#[repr(transparent)]
+pub struct FusedRef<T>(T);
+
+impl<T> Deref for FusedRef<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<T> DerefMut for FusedRef<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl<I, O> StaticFuse<I, O> for &'static I {
+    type Fused = FusedRef<O>;
+
+    unsafe fn static_fuse<F: FnOnce(&'static I) -> O>(self, f: F) -> Self::Fused {
+        FusedRef(f(self))
+    }
+}
+
+pub struct FusedHeapPtr<T, P>(T, P);
+
+impl<T, P> Deref for FusedHeapPtr<T, P> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<T, P> DerefMut for FusedHeapPtr<T, P> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl<I: 'static, O> StaticFuse<I, O> for Arc<I> {
+    type Fused = FusedHeapPtr<O, Self>;
+
+    unsafe fn static_fuse<F: FnOnce(&'static I) -> O>(self, f: F) -> Self::Fused {
+        let shared_ref = &*(&*self as *const I);
+        FusedHeapPtr(f(shared_ref), self)
+    }
+}
+
+#[repr(transparent)]
+pub struct WaitUntilChangedFuture<R, L: 'static, T: 'static, E: 'static>(
+    Option<SensorObserver<R, ExecLock<L, T, E>>>,
+    PhantomData<(L, T, E)>,
+)
+where
+    L: DataWriteLock<Target = ExecData<T, E>>,
+    R: StaticFuse<
+        RevisedData<ExecLock<L, T, E>>,
+        <ExecLock<L, T, E> as ReadGuardSpecifier>::ReadGuard<'static>,
+    >,
+    E: CallbackRegister<'static, T>;
+
+impl<R, L: 'static, T: 'static, E: 'static> Future for WaitUntilChangedFuture<R, L, T, E>
+where
+    L: DataWriteLock<Target = ExecData<T, E>>,
+    R: StaticFuse<
+        RevisedData<ExecLock<L, T, E>>,
+        <ExecLock<L, T, E> as ReadGuardSpecifier>::ReadGuard<'static>,
+    >,
+    E: CallbackRegister<'static, T>,
+    Self: Unpin,
+{
+    type Output = R::Fused;
+
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> Poll<Self::Output> {
+        if let Some(value) = self.0.take() {
+            if value.has_changed() {
+                unsafe { Poll::Ready(value.inner.static_fuse(|x| x.read())) }
+            } else {
+                value
+                    .inner
+                    .share_elided_ref()
+                    .write()
+                    .inner
+                    .exec_manager
+                    .get_mut()
+                    .register_waker(cx.waker());
+                self.0 = Some(value);
+                Poll::Pending
+            }
+        } else {
+            Poll::Pending
+        }
+    }
+}
+
+impl<R, L: 'static, T: 'static, E: 'static> SensorObserver<R, ExecLock<L, T, E>>
+where
+    L: DataWriteLock<Target = ExecData<T, E>>,
+    R: StaticFuse<
+        RevisedData<ExecLock<L, T, E>>,
+        <ExecLock<L, T, E> as ReadGuardSpecifier>::ReadGuard<'static>,
+    >,
+    E: CallbackRegister<'static, T>,
+    Self: Clone,
+{
+    fn wait_until_changed(&self) -> WaitUntilChangedFuture<R, L, T, E> {
+        WaitUntilChangedFuture(Some(self.clone()), PhantomData)
+    }
+}
 
 impl<'a, R, L, T, E> SensorObserver<R, ExecLock<L, T, E>>
 where
     L: DataWriteLock<Target = ExecData<T, E>>,
     R: Deref<Target = RevisedData<ExecLock<L, T, E>>>,
-    E: CallbackRegister<'a ,T>,
+    E: CallbackRegister<'a, T>,
 {
     fn register<F: 'a + FnMut(&T) -> bool>(&self, f: F) {
         self.inner.write().inner.exec_manager.get_mut().register(f);
     }
-
-    // fn wait_until_changed(&mut self) -> WaitUntilChangedFuture<&mut Self> {
-    //     WaitUntilChangedFuture(self)
-    // }
 }
 
 pub trait SensorObserve {
@@ -379,12 +522,10 @@ pub trait SensorObserve {
     }
 }
 
-impl<R, L: DataWriteLock> SensorWrite
-    for SensorWriter<R, L>
+impl<R, L: DataWriteLock> SensorWrite for SensorWriter<R, L>
 where
-    R: Lockshare<Lock=L>,
+    for<'a> &'a R: Lockshare2<'a, Lock = L>,
 {
-
     type Lock = L;
 
     #[inline(always)]
@@ -765,6 +906,8 @@ where
 #[cfg(test)]
 mod tests {
 
+    use std::future;
+
     use crate::{
         lock::parking_lot::{
             ArcRwSensor, ArcRwSensorWriter, RwSensor, RwSensorExec, RwSensorWriter,
@@ -772,6 +915,8 @@ mod tests {
         },
         SensorCallbackExec, SensorObserve, SensorWrite,
     };
+
+    // const X: RwSensorWriterExec<i32> = RwSensorWriterExec::new(5);
 
     #[test]
     fn test_1() {
@@ -781,6 +926,10 @@ mod tests {
 
         let b: RwSensorExec<_> = s2.spawn_observer();
         let z: RwSensor<_> = s3.spawn_observer();
+
+        // let zz = X.spawn_referenced_observer();
+
+        // zz.wait_until_changed();
 
         let bb: ArcRwSensor<_> = s1.spawn_observer();
         let bbc = bb.clone();

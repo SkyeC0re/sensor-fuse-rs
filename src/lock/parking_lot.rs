@@ -1,10 +1,10 @@
-use std::{cell::UnsafeCell, sync::Arc};
+use std::{cell::UnsafeCell, marker::PhantomData, sync::Arc};
 
 use parking_lot::{self, RwLockWriteGuard};
 
 use crate::{
     callback_manager::{standard::VecBoxManager, ExecGuard},
-    CallbackExecute, DataReadLock, DataWriteLock, ExecData, ExecLock, Lockshare,
+    CallbackExecute, DataReadLock, DataWriteLock, ExecData, ExecLock, Lockshare2,
     ReadGuardSpecifier, RevisedData, SensorCallbackExec, SensorObserver, SensorWrite, SensorWriter,
 };
 
@@ -116,7 +116,7 @@ impl<T> DataWriteLock for parking_lot::RwLock<T> {
 impl<R, T, E> SensorCallbackExec<T>
     for SensorWriter<R, ExecLock<parking_lot::RwLock<ExecData<T, E>>, T, E>>
 where
-    R: Lockshare<Lock = ExecLock<parking_lot::RwLock<ExecData<T, E>>, T, E>>,
+    for<'a> &'a R: Lockshare2<'a, Lock = ExecLock<parking_lot::RwLock<ExecData<T, E>>, T, E>>,
     E: CallbackExecute<T>,
 {
     fn update_exec(&self, sample: T) {
@@ -154,11 +154,11 @@ where
 impl<R, T, E> SensorCallbackExec<T>
     for SensorWriter<R, ExecLock<parking_lot::Mutex<ExecData<T, E>>, T, E>>
 where
-    R: Lockshare<Lock = ExecLock<parking_lot::Mutex<ExecData<T, E>>, T, E>>,
+    for<'a> &'a R: Lockshare2<'a, Lock = ExecLock<parking_lot::Mutex<ExecData<T, E>>, T, E>>,
     E: CallbackExecute<T>,
 {
     fn update_exec(&self, sample: T) {
-        let mut guard = self.share_elided_ref().write();
+        let mut guard = (&self.0).share_elided_ref().write();
         *guard = sample;
         self.mark_all_unseen();
 

@@ -25,6 +25,14 @@ pub trait ReadGuardSpecifier {
         Self: 'read;
 }
 
+pub trait ReadGuardSpecifier2 {
+    type Target;
+
+    type ReadGuard<'read>: Deref<Target = Self::Target>
+    where
+        Self: 'read;
+}
+
 pub trait ReadGuard<T, G: Deref<Target = T>> {}
 
 pub trait ReadLock<T> {
