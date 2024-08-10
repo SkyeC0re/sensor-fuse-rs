@@ -139,7 +139,7 @@ where
 
 pub trait Lockshare<'a> {
     type Lock: DataWriteLock;
-    type Shared: Deref<Target = RevisedData<Self::Lock>> + 'a;
+    type Shared: Deref<Target = RevisedData<Self::Lock>>;
 
     // /// Construct a new shareable lock from the given lock.
     // fn new(lock: Self::Lock) -> Self;
