@@ -14,13 +14,14 @@ use lock::{
     DataReadLock, DataWriteLock, FalseReadLock, OwnedData, OwnedFalseLock, ReadGuardSpecifier,
 };
 use std::{
-    cell::{Cell, OnceCell, UnsafeCell},
+    cell::{Cell, OnceCell, Ref, UnsafeCell},
     future::Future,
     iter::Fuse,
     marker::PhantomData,
     mem::{self, take},
     ops::DerefMut,
     process::Output,
+    ptr::{null, null_mut},
     sync::OnceState,
     task::Poll,
 };
@@ -335,7 +336,7 @@ impl<'a, I: 'a, O> StaticFuse<'a, I, O> for Arc<I> {
 
 #[repr(transparent)]
 pub struct WaitUntilChangedFuture<'a, R, L, T, E>(
-    Option<&'a mut SensorObserver<R, ExecLock<L, T, E>>>,
+    Option<&'a SensorObserver<R, ExecLock<L, T, E>>>,
     PhantomData<(L, T, E)>,
 )
 where
@@ -350,7 +351,7 @@ where
     E: WakerRegister + CallbackExecute<T>,
     Self: Unpin,
 {
-    type Output = ExecGuard<L::ReadGuard<'a>, T, E>;
+    type Output = ();
 
     fn poll(
         mut self: std::pin::Pin<&mut Self>,
@@ -358,11 +359,10 @@ where
     ) -> Poll<Self::Output> {
         if let Some(value) = self.0.take() {
             if value.has_changed() {
-                Poll::Ready(value.pull_updated())
+                Poll::Ready(())
             } else {
                 value
                     .inner
-                    .deref()
                     .share_elided_ref()
                     .write()
                     .inner
@@ -373,9 +373,65 @@ where
                 Poll::Pending
             }
         } else {
-            // TODO Maybe panic?
+            #[cfg(debug_assertions)]
+            panic!("Poll called after future returned ready.");
+            #[cfg(not(debug_assertions))]
             Poll::Pending
         }
+    }
+}
+
+pub struct WaitForFuture<'a, R: 'a, L, T, E, F>(
+    *mut SensorObserver<R, ExecLock<L, T, E>>,
+    F,
+    PhantomData<&'a (L, T, E)>,
+)
+where
+    L: DataWriteLock<Target = ExecData<T, E>>,
+    R: Deref<Target = RevisedData<ExecLock<L, T, E>>>,
+    E: WakerRegister + CallbackExecute<T>;
+
+impl<'a, R: 'a, L, T, E, F> Future for WaitForFuture<'a, R, L, T, E, F>
+where
+    L: DataWriteLock<Target = ExecData<T, E>>,
+    R: Deref<Target = RevisedData<ExecLock<L, T, E>>>,
+    E: WakerRegister + CallbackExecute<T>,
+    F: Send + FnMut(&T) -> bool,
+    Self: Unpin,
+{
+    type Output = ExecGuard<L::ReadGuard<'a>, T, E>;
+
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> Poll<Self::Output> {
+        // Safe code does not seem to want to compile without a guard reaquisition. Possibly inexperience, but also possibly a compiler bug or a quirk of `Option`.
+        if !self.0.is_null() {
+            let mut observer = unsafe { &mut *self.0 };
+            let changed = observer.has_changed();
+            let guard = observer.pull_updated();
+            if changed && (self.1)(&guard) {
+                self.0 = null_mut();
+                return Poll::Ready(guard);
+            } else {
+                drop(guard);
+                observer = unsafe { &mut *self.0 };
+                observer
+                    .inner
+                    .share_elided_ref()
+                    .write()
+                    .inner
+                    .exec_manager
+                    .get_mut()
+                    .register_waker(cx.waker());
+                return Poll::Pending;
+            }
+        }
+
+        #[cfg(debug_assertions)]
+        panic!("Poll called after future returned ready.");
+        #[cfg(not(debug_assertions))]
+        Poll::Pending
     }
 }
 
@@ -385,8 +441,15 @@ where
     R: Deref<Target = RevisedData<ExecLock<L, T, E>>>,
     E: WakerRegister + CallbackExecute<T>,
 {
-    fn wait_until_changed(&mut self) -> WaitUntilChangedFuture<'_, R, L, T, E> {
+    /// Asyncronously wait until the sensor value is updated. This call will **not** update the observer's version,
+    /// as such an additional call to `pull` or `pull_updated` is required.
+    fn wait_until_changed(&self) -> WaitUntilChangedFuture<'_, R, L, T, E> {
         WaitUntilChangedFuture(Some(self), PhantomData)
+    }
+    /// Asyncronously wait until the sensor value has been updated with a value that satisfies a condition. This call **will** update the observer's version
+    /// and evaluate the condition function on values obtained by `pull_updated`.
+    fn wait_for<F: Send + FnMut(&T) -> bool>(&mut self, f: F) -> WaitForFuture<'_, R, L, T, E, F> {
+        WaitForFuture(self, f, PhantomData)
     }
 }
 impl<'a, R, L, T, E, F: 'a + FnMut(&T) -> bool> RegisterFunction<'a, R, L, T, E, F>
@@ -849,7 +912,7 @@ mod tests {
 
     use std::{
         future,
-        thread::{self, sleep},
+        thread::{self, sleep, yield_now},
         time::Duration,
     };
 
@@ -880,8 +943,11 @@ mod tests {
         let handle = thread::spawn(move || {
             // let xref = &X;
             // let mut zz = xref.spawn_referenced_observer();
-            let x = block_on(x_observe.wait_until_changed());
-            println!("{}", *x)
+            println!("WAITING");
+            loop {
+                let x = block_on(x_observe.wait_for(|v| *v % 2 == 0));
+                println!("{}", *x)
+            }
         });
 
         X.update_exec(8);
@@ -922,18 +988,9 @@ mod tests {
         s2.update_exec(10);
 
         assert_eq!(*x.pull(), 10);
-
-        sleep(Duration::from_secs(1));
-        k.update_exec(9);
-        sleep(Duration::from_secs(1));
-        k.update_exec(11);
-        k.update_exec(11);
-        k.update_exec(11);
-        k.update_exec(11);
-        k.update_exec(11);
-        k.update_exec(11);
-        k.update_exec(11);
-        // handle.join().unwrap();
-        println!("HELLOPP");
+        for i in 0..100 {
+            k.update_exec(i);
+            yield_now();
+        }
     }
 }

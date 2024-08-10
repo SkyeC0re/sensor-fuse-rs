@@ -28,7 +28,7 @@ pub struct ExecData<T, E: CallbackExecute<T>> {
     pub(crate) data: T,
 }
 
-/// The executor will only ever be called from behind an exclusive lock.
+/// Executor is always mutably borrowed and through an exlusive locking mechanism.
 unsafe impl<T: Sync, E: CallbackExecute<T>> Sync for ExecData<T, E> {}
 
 impl<T, E: CallbackExecute<T>> Deref for ExecData<T, E> {
