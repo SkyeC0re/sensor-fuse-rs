@@ -14,25 +14,7 @@ pub trait CallbackExecute<T> {
     fn callback(&mut self, value: &T);
 }
 
-// pub trait CallbackRegister<'req, T>: CallbackExecute<T> {
-//     /// Register a function on the callback manager's execution queue.
-//     fn register<F: 'req + FnMut(&T) -> bool>(&mut self, f: F);
-
-//     /// Register a waker on the callback manager.
-//     /// By default any callback manager supports an unoptimized version of handling wakers as a oneshot function.
-//     fn register_waker(&mut self, w: &Waker) {
-//         let mut waker_clone = Some(w.clone());
-//         self.register(move |_| {
-//             if let Some(waker) = waker_clone.take() {
-//                 waker.wake();
-//             }
-//             false
-//         });
-//         panic!()
-//     }
-// }
-
-pub trait CallbackRegister2<'req, F: 'req + FnMut(&T) -> bool, T> {
+pub trait CallbackRegister<'req, F: 'req + FnMut(&T) -> bool, T> {
     /// Register a function on the callback manager's execution queue.
     fn register(&mut self, f: F);
 }
@@ -46,8 +28,8 @@ pub struct ExecData<T, E: CallbackExecute<T>> {
     pub(crate) data: T,
 }
 
-unsafe impl<T, E: CallbackExecute<T>> Send for ExecData<T, E> where E: Send {}
-unsafe impl<T, E: CallbackExecute<T>> Sync for ExecData<T, E> where E: Sync {}
+/// The executor will only ever be called from behind an exclusive lock.
+unsafe impl<T: Sync, E: CallbackExecute<T>> Sync for ExecData<T, E> {}
 
 impl<T, E: CallbackExecute<T>> Deref for ExecData<T, E> {
     type Target = T;

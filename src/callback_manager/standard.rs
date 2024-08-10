@@ -2,10 +2,10 @@ use std::task::Waker;
 
 use derived_deref::{Deref, DerefMut};
 
-use super::{CallbackExecute, CallbackRegister2, WakerRegister};
+use super::{CallbackExecute, CallbackRegister, WakerRegister};
 
 pub struct VecBoxManager<T> {
-    callbacks: Vec<Box<dyn Send + Sync + FnMut(&T) -> bool>>,
+    callbacks: Vec<Box<dyn Send + FnMut(&T) -> bool>>,
     wakers: Vec<Waker>,
 }
 
@@ -52,7 +52,7 @@ impl<T> CallbackExecute<T> for VecBoxManager<T> {
     }
 }
 
-impl<T, F: 'static + Send + Sync + FnMut(&T) -> bool> CallbackRegister2<'static, F, T>
+impl<T, F: 'static + Send + FnMut(&T) -> bool> CallbackRegister<'static, F, T>
     for VecBoxManager<T>
 {
     fn register(&mut self, f: F) {

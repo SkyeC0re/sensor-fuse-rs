@@ -3,7 +3,7 @@ pub mod lock;
 pub mod prelude;
 
 use callback_manager::{
-    CallbackExecute, CallbackRegister2, ExecData, ExecGuard, ExecLock, WakerRegister,
+    CallbackExecute, CallbackRegister, ExecData, ExecGuard, ExecLock, WakerRegister,
 };
 use core::{
     ops::Deref,
@@ -248,7 +248,7 @@ pub trait RegisterFunction<'a, R, L, T, E, F: 'a + FnMut(&T) -> bool>
 where
     L: DataWriteLock<Target = ExecData<T, E>>,
     // R: Lockshare2<'a, Lock = ExecLock<L, T, E>>,
-    E: CallbackRegister2<'a, F, T> + CallbackExecute<T>,
+    E: CallbackRegister<'a, F, T> + CallbackExecute<T>,
 {
     fn register(&self, f: F);
 }
@@ -258,7 +258,7 @@ impl<'a, R, L, T, E, F: 'a + FnMut(&T) -> bool> RegisterFunction<'a, R, L, T, E,
 where
     L: DataWriteLock<Target = ExecData<T, E>>,
     // R: Lockshare2<'a, Lock = ExecLock<L, T, E>>,
-    E: CallbackRegister2<'a, F, T> + CallbackExecute<T>,
+    E: CallbackRegister<'a, F, T> + CallbackExecute<T>,
     for<'b> &'b R: Lockshare<'b, Lock = ExecLock<L, T, E>>,
 {
     fn register(&self, f: F) {
@@ -393,24 +393,13 @@ impl<'a, R, L, T, E, F: 'a + FnMut(&T) -> bool> RegisterFunction<'a, R, L, T, E,
     for SensorObserver<R, ExecLock<L, T, E>>
 where
     L: DataWriteLock<Target = ExecData<T, E>>,
-    // R: Lockshare2<'a, Lock = ExecLock<L, T, E>>,
-    E: CallbackRegister2<'a, F, T> + CallbackExecute<T>,
+    E: CallbackRegister<'a, F, T> + CallbackExecute<T>,
     R: Deref<Target = RevisedData<ExecLock<L, T, E>>>,
 {
     fn register(&self, f: F) {
         self.inner.write().inner.exec_manager.get_mut().register(f);
     }
 }
-// impl<'a, R, L, T, E> SensorObserver<R, ExecLock<L, T, E>>
-// where
-//     L: DataWriteLock<Target = ExecData<T, E>>,
-//     R: Deref<Target = RevisedData<ExecLock<L, T, E>>>,
-//     E: CallbackRegister<'a, T>,
-// {
-//     fn register<F: 'a + FnMut(&T) -> bool>(&self, f: F) {
-//         self.inner.write().inner.exec_manager.get_mut().register(f);
-//     }
-// }
 
 pub trait SensorObserve {
     type Lock: ReadGuardSpecifier + ?Sized;
