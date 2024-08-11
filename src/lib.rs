@@ -254,10 +254,7 @@ where
 }
 
 #[repr(transparent)]
-pub struct WaitUntilChangedFuture<'a, R, L, T, E>(
-    Option<&'a SensorObserver<R, ExecLock<L, T, E>>>,
-    PhantomData<(L, T, E)>,
-)
+pub struct WaitUntilChangedFuture<'a, R, L, T, E>(Option<&'a SensorObserver<R, ExecLock<L, T, E>>>)
 where
     L: DataWriteLock<Target = ExecData<T, E>>,
     R: Deref<Target = RevisedData<ExecLock<L, T, E>>>,
@@ -300,17 +297,17 @@ where
     }
 }
 
-pub struct WaitForFuture<'a, R, L, T, E, F>(
+pub struct WaitForFuture<'a, R: 'a, L: 'a, T: 'a, E: 'a, F>(
     *mut SensorObserver<R, ExecLock<L, T, E>>,
     F,
-    PhantomData<&'a (L, T, E)>,
+    PhantomData<&'a ()>,
 )
 where
     L: DataWriteLock<Target = ExecData<T, E>>,
     R: Deref<Target = RevisedData<ExecLock<L, T, E>>>,
     E: WakerRegister + CallbackExecute<T>;
 
-impl<'a, R: 'a, L, T, E, F> Future for WaitForFuture<'a, R, L, T, E, F>
+impl<'a, R: 'a, L: 'a, T: 'a, E: 'a, F> Future for WaitForFuture<'a, R, L, T, E, F>
 where
     L: DataWriteLock<Target = ExecData<T, E>>,
     R: Deref<Target = RevisedData<ExecLock<L, T, E>>>,
@@ -363,12 +360,15 @@ where
 {
     /// Asyncronously wait until the sensor value is updated. This call will **not** update the observer's version,
     /// as such an additional call to `pull` or `pull_updated` is required.
-    fn wait_until_changed(&self) -> WaitUntilChangedFuture<'_, R, L, T, E> {
-        WaitUntilChangedFuture(Some(self), PhantomData)
+    pub fn wait_until_changed(&self) -> WaitUntilChangedFuture<'_, R, L, T, E> {
+        WaitUntilChangedFuture(Some(self))
     }
     /// Asyncronously wait until the sensor value has been updated with a value that satisfies a condition. This call **will** update the observer's version
     /// and evaluate the condition function on values obtained by `pull_updated`.
-    fn wait_for<F: Send + FnMut(&T) -> bool>(&mut self, f: F) -> WaitForFuture<'_, R, L, T, E, F> {
+    pub fn wait_for<F: Send + FnMut(&T) -> bool>(
+        &mut self,
+        f: F,
+    ) -> WaitForFuture<'_, R, L, T, E, F> {
         WaitForFuture(self, f, PhantomData)
     }
 }

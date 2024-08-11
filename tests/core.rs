@@ -1,9 +1,26 @@
+use async_std::future::timeout;
+use futures::executor::block_on;
 use paste::paste;
+use sensor_fuse::callback_manager::standard::VecBoxManager;
+use sensor_fuse::callback_manager::{CallbackExecute, ExecData, ExecLock, WakerRegister};
+use sensor_fuse::lock::parking_lot::RwSensorDataExec;
 use sensor_fuse::lock::{self, DataWriteLock};
 use sensor_fuse::{prelude::*, RevisedData};
 use sensor_fuse::{Lockshare, SensorWriter};
 use std::ops::Deref;
+use std::time::Duration;
 use std::{sync::Arc, thread};
+
+macro_rules! test_core_with_owned_observer {
+    ($prefix:ident, $sensor_writer:ty) => {
+        paste! {
+            #[test]
+            fn [<$prefix _closed>]() {
+                test_closed::<$sensor_writer, _, _>();
+            }
+        }
+    };
+}
 
 macro_rules! test_core {
     ($prefix:ident, $sensor_writer:ty) => {
@@ -42,21 +59,22 @@ macro_rules! test_core {
     };
 }
 
-macro_rules! test_core_with_owned_observer {
+macro_rules! test_core_exec {
     ($prefix:ident, $sensor_writer:ty) => {
         paste! {
+
             #[test]
-            fn [<$prefix _closed>]() {
-                test_closed::<$sensor_writer, _, _>();
+            fn [<$prefix _test_wait_until_changed>]() {
+                test_wait_until_changed::<$sensor_writer, _, _, _>();
             }
         }
     };
 }
 
-fn test_basic_sensor_observation_synced<S, L: DataWriteLock>(num_threads: usize, num_updates: usize)
+fn test_basic_sensor_observation_synced<S, L>(num_threads: usize, num_updates: usize)
 where
-    for<'a> &'a S: Lockshare<'a, Lock = L> + Send + Sync,
     L: DataWriteLock<Target = usize> + 'static,
+    for<'a> &'a S: Lockshare<'a, Lock = L> + Send + Sync,
     SensorWriter<S, L>: 'static + Send + Sync + From<usize>,
 {
     let sync = Arc::new((
@@ -126,12 +144,10 @@ where
     });
 }
 
-fn test_basic_sensor_observation_unsynced<S, L: DataWriteLock>(
-    num_threads: usize,
-    num_updates: usize,
-) where
-    for<'a> &'a S: Lockshare<'a, Lock = L>,
+fn test_basic_sensor_observation_unsynced<S, L>(num_threads: usize, num_updates: usize)
+where
     L: DataWriteLock<Target = usize> + 'static,
+    for<'a> &'a S: Lockshare<'a, Lock = L>,
     SensorWriter<S, L>: 'static + Send + Sync + From<usize>,
 {
     let sensor_writer = Arc::new(SensorWriter::from(0));
@@ -166,11 +182,11 @@ fn test_basic_sensor_observation_unsynced<S, L: DataWriteLock>(
     });
 }
 
-fn test_mapped_sensor<S, L: DataWriteLock>()
+fn test_mapped_sensor<S, L>()
 where
-    for<'a> &'a S: Lockshare<'a, Lock = L>,
     L: DataWriteLock<Target = usize> + 'static,
-    SensorWriter<S, L>: 'static + Send + Sync + From<usize>,
+    for<'a> &'a S: Lockshare<'a, Lock = L>,
+    SensorWriter<S, L>: 'static + From<usize>,
 {
     let sensor_writer = SensorWriter::from(0);
     let mut observer = sensor_writer.spawn_observer().map(|x| x + 1);
@@ -187,11 +203,11 @@ where
     assert_eq!(new, 3);
 }
 
-fn test_mapped_sensor_cached<S, L: DataWriteLock>()
+fn test_mapped_sensor_cached<S, L>()
 where
-    for<'a> &'a S: Lockshare<'a, Lock = L>,
     L: DataWriteLock<Target = usize> + 'static,
-    SensorWriter<S, L>: 'static + Send + Sync + From<usize>,
+    for<'a> &'a S: Lockshare<'a, Lock = L>,
+    SensorWriter<S, L>: 'static + From<usize>,
 {
     let sensor_writer = SensorWriter::from(0);
     let mut observer = sensor_writer.spawn_observer().map_cached(|x| x + 1);
@@ -208,11 +224,11 @@ where
     assert_eq!(new, 3);
 }
 
-fn test_fused_sensor<S, L: DataWriteLock>()
+fn test_fused_sensor<S, L>()
 where
-    for<'a> &'a S: Lockshare<'a, Lock = L>,
     L: DataWriteLock<Target = usize> + 'static,
-    SensorWriter<S, L>: 'static + Send + Sync + From<usize>,
+    for<'a> &'a S: Lockshare<'a, Lock = L>,
+    SensorWriter<S, L>: 'static + From<usize>,
 {
     let sensor_writer_1 = SensorWriter::from(1);
     let sensor_writer_2 = SensorWriter::from(2);
@@ -245,11 +261,11 @@ where
     assert!(!observer.has_changed());
 }
 
-fn test_fused_sensor_cached<S, L: DataWriteLock>()
+fn test_fused_sensor_cached<S, L>()
 where
-    for<'a> &'a S: Lockshare<'a, Lock = L>,
     L: DataWriteLock<Target = usize> + 'static,
-    SensorWriter<S, L>: 'static + Send + Sync + From<usize>,
+    for<'a> &'a S: Lockshare<'a, Lock = L>,
+    SensorWriter<S, L>: 'static + From<usize>,
 {
     let sensor_writer_1 = Arc::new(SensorWriter::from(1));
     let sensor_writer_2 = Arc::new(SensorWriter::from(2));
@@ -282,10 +298,11 @@ where
     assert!(!observer.has_changed());
 }
 
-fn test_closed<S, L: DataWriteLock, R: Deref<Target = RevisedData<L>>>()
+fn test_closed<S, L, R>()
 where
-    for<'a> &'a S: Lockshare<'a, Lock = L, Shared = R>,
+    R: Deref<Target = RevisedData<L>>,
     L: DataWriteLock<Target = usize> + 'static,
+    for<'a> &'a S: Lockshare<'a, Lock = L, Shared = R>,
     SensorWriter<S, L>: 'static + From<usize>,
 {
     let sensor_writer = SensorWriter::from(1);
@@ -295,9 +312,50 @@ where
     assert_eq!(*observer.pull(), 1);
 }
 
+fn test_wait_until_changed<S, R, L, E>()
+where
+    // R: Deref<Target = RevisedData<ExecLock<L, usize, E>>>,
+    L: DataWriteLock<Target = ExecData<usize, E>> + 'static,
+    E: WakerRegister + CallbackExecute<usize>,
+    for<'a> &'a S: Lockshare<'a, Lock = ExecLock<L, usize, E>, Shared = R>,
+    for<'a> <&'a S as Lockshare<'a>>::Shared: Deref<Target = RevisedData<ExecLock<L, usize, E>>>,
+    SensorWriter<S, ExecLock<L, usize, E>>:
+        'static + SensorCallbackExec<usize> + Send + Sync + From<usize>,
+{
+    let sensor_writer = Arc::new(SensorWriter::from(1));
+
+    let sensor_writer_clone = sensor_writer.clone();
+    let handle = thread::spawn(move || {
+        let observer = sensor_writer_clone.spawn_observer();
+        block_on(observer.wait_until_changed());
+    });
+
+    let observer = sensor_writer.spawn_observer();
+    let res = block_on(timeout(
+        Duration::from_millis(10),
+        observer.wait_until_changed(),
+    ));
+    assert!(res.is_err());
+    sensor_writer.update_exec(2);
+    // Will hang if the waker was not successfully called.
+    handle.join().unwrap();
+}
+
 test_core!(pl_rwl, lock::parking_lot::RwSensorData<_>);
 test_core!(pl_arc_rwl, Arc<lock::parking_lot::RwSensorData<_>>);
 test_core_with_owned_observer!(pl_arc_rwl, Arc<lock::parking_lot::RwSensorData<_>>);
 test_core!(pl_mtx, lock::parking_lot::MutexSensorData<_>);
 test_core!(pl_arc_mtx, Arc<lock::parking_lot::MutexSensorData<_>>);
 test_core_with_owned_observer!(pl_arc_mtx, Arc<lock::parking_lot::MutexSensorData<_>>);
+
+// test_core_exec!(pl_exec, RwSensorDataExec<_>);
+
+// #[test]
+// fn test() {
+//     test_wait_until_changed::<
+//         RwSensorDataExec<usize>,
+//         &'a RevisedData<_>,
+//         parking_lot::RwLock<ExecData<usize, VecBoxManager<usize>>>,
+//         _,
+//     >()
+// }

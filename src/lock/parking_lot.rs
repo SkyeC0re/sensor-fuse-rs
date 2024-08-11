@@ -51,6 +51,13 @@ impl<T> RwSensorWriterExec<T> {
     }
 }
 
+impl<T> From<T> for RwSensorWriterExec<T> {
+    #[inline(always)]
+    fn from(value: T) -> Self {
+        Self::new(value)
+    }
+}
+
 pub type MutexSensorData<T> = RevisedData<parking_lot::RwLock<T>>;
 pub type MutexSensor<'a, T> = AbstractSensorObserver<'a, parking_lot::RwLock<T>>;
 pub type MutexSensorWriter<T> = AbstractSensorWriter<parking_lot::Mutex<T>>;
