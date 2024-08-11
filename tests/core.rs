@@ -65,7 +65,7 @@ macro_rules! test_core_exec {
 
             #[test]
             fn [<$prefix _test_wait_until_changed>]() {
-                test_wait_until_changed::<$sensor_writer, _, _, _>();
+                test_wait_until_changed::<$sensor_writer, _, _>();
             }
         }
     };
@@ -300,8 +300,8 @@ where
 
 fn test_closed<S, L, R>()
 where
-    R: Deref<Target = RevisedData<L>>,
     L: DataWriteLock<Target = usize> + 'static,
+    R: Deref<Target = RevisedData<L>> + 'static,
     for<'a> &'a S: Lockshare<'a, Lock = L, Shared = R>,
     SensorWriter<S, L>: 'static + From<usize>,
 {
@@ -312,13 +312,11 @@ where
     assert_eq!(*observer.pull(), 1);
 }
 
-fn test_wait_until_changed<S, R, L, E>()
+fn test_wait_until_changed<'a, S, L, E>()
 where
-    // R: Deref<Target = RevisedData<ExecLock<L, usize, E>>>,
     L: DataWriteLock<Target = ExecData<usize, E>> + 'static,
     E: WakerRegister + CallbackExecute<usize>,
-    for<'a> &'a S: Lockshare<'a, Lock = ExecLock<L, usize, E>, Shared = R>,
-    for<'a> <&'a S as Lockshare<'a>>::Shared: Deref<Target = RevisedData<ExecLock<L, usize, E>>>,
+    for<'b> &'b S: Lockshare<'b, Lock = ExecLock<L, usize, E>>,
     SensorWriter<S, ExecLock<L, usize, E>>:
         'static + SensorCallbackExec<usize> + Send + Sync + From<usize>,
 {
@@ -328,6 +326,7 @@ where
     let handle = thread::spawn(move || {
         let observer = sensor_writer_clone.spawn_observer();
         block_on(observer.wait_until_changed());
+        assert!(observer.has_changed());
     });
 
     let observer = sensor_writer.spawn_observer();
@@ -348,14 +347,4 @@ test_core!(pl_mtx, lock::parking_lot::MutexSensorData<_>);
 test_core!(pl_arc_mtx, Arc<lock::parking_lot::MutexSensorData<_>>);
 test_core_with_owned_observer!(pl_arc_mtx, Arc<lock::parking_lot::MutexSensorData<_>>);
 
-// test_core_exec!(pl_exec, RwSensorDataExec<_>);
-
-// #[test]
-// fn test() {
-//     test_wait_until_changed::<
-//         RwSensorDataExec<usize>,
-//         &'a RevisedData<_>,
-//         parking_lot::RwLock<ExecData<usize, VecBoxManager<usize>>>,
-//         _,
-//     >()
-// }
+test_core_exec!(pl_exec, RwSensorDataExec<_>);

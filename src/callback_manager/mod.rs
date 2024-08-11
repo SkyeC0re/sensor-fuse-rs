@@ -1,6 +1,5 @@
 use std::{
     cell::UnsafeCell,
-    marker::PhantomData,
     ops::{Deref, DerefMut},
     task::Waker,
 };
@@ -99,7 +98,6 @@ where
     type Target = T;
 
     type ReadGuard<'read> = ExecGuard<L::ReadGuard<'read>, T, E>   where
-        Self::Target: 'read,
         Self: 'read;
 }
 
@@ -112,16 +110,14 @@ where
     fn read(&self) -> Self::ReadGuard<'_> {
         ExecGuard {
             inner: self.inner.read(),
-            _types: PhantomData,
         }
     }
 
     #[inline]
     fn try_read(&self) -> Option<Self::ReadGuard<'_>> {
-        self.inner.try_read().map(|guard| ExecGuard {
-            inner: guard,
-            _types: PhantomData,
-        })
+        self.inner
+            .try_read()
+            .map(|guard| ExecGuard { inner: guard })
     }
 }
 
@@ -132,23 +128,20 @@ where
 {
     type WriteGuard<'write> = ExecGuardMut<L::WriteGuard<'write>, T, E>
     where
-        Self::Target: 'write,
         Self: 'write;
 
     #[inline]
     fn write(&self) -> Self::WriteGuard<'_> {
         ExecGuardMut {
             inner: self.inner.write(),
-            _types: PhantomData,
         }
     }
 
     #[inline]
     fn try_write(&self) -> Option<Self::WriteGuard<'_>> {
-        self.inner.try_write().map(|guard| ExecGuardMut {
-            inner: guard,
-            _types: PhantomData,
-        })
+        self.inner
+            .try_write()
+            .map(|guard| ExecGuardMut { inner: guard })
     }
 }
 
@@ -158,7 +151,6 @@ where
     E: CallbackExecute<T>,
 {
     pub(crate) inner: G,
-    _types: PhantomData<(T, E)>,
 }
 
 impl<G, T, E> ExecGuard<G, T, E>
@@ -168,10 +160,7 @@ where
 {
     #[inline(always)]
     pub const fn new(guard: G) -> Self {
-        Self {
-            inner: guard,
-            _types: PhantomData,
-        }
+        Self { inner: guard }
     }
 }
 
@@ -194,7 +183,6 @@ where
     E: CallbackExecute<T>,
 {
     pub(crate) inner: G,
-    _types: PhantomData<(T, E)>,
 }
 
 impl<G, T, E> ExecGuardMut<G, T, E>
@@ -204,10 +192,7 @@ where
 {
     #[inline(always)]
     pub const fn new(guard: G) -> Self {
-        Self {
-            inner: guard,
-            _types: PhantomData,
-        }
+        Self { inner: guard }
     }
 }
 
