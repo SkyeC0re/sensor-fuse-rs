@@ -1,6 +1,6 @@
 use paste::paste;
 use sensor_fuse::lock::{self, DataWriteLock};
-use sensor_fuse::{prelude::*, RevisedData, SensorObserver};
+use sensor_fuse::{prelude::*, RevisedData};
 use sensor_fuse::{Lockshare, SensorWriter};
 use std::ops::Deref;
 use std::{sync::Arc, thread};
@@ -53,11 +53,11 @@ macro_rules! test_core_with_owned_observer {
     };
 }
 
-fn test_basic_sensor_observation_synced<R, L: DataWriteLock>(num_threads: usize, num_updates: usize)
+fn test_basic_sensor_observation_synced<S, L: DataWriteLock>(num_threads: usize, num_updates: usize)
 where
-    for<'a> &'a R: Lockshare<'a, Lock = L> + Send + Sync,
+    for<'a> &'a S: Lockshare<'a, Lock = L> + Send + Sync,
     L: DataWriteLock<Target = usize> + 'static,
-    SensorWriter<R, L>: 'static + Send + Sync + From<usize>,
+    SensorWriter<S, L>: 'static + Send + Sync + From<usize>,
 {
     let sync = Arc::new((
         parking_lot::Mutex::new(Some(0)),
@@ -126,13 +126,13 @@ where
     });
 }
 
-fn test_basic_sensor_observation_unsynced<R, L: DataWriteLock>(
+fn test_basic_sensor_observation_unsynced<S, L: DataWriteLock>(
     num_threads: usize,
     num_updates: usize,
 ) where
-    for<'a> &'a R: Lockshare<'a, Lock = L>,
+    for<'a> &'a S: Lockshare<'a, Lock = L>,
     L: DataWriteLock<Target = usize> + 'static,
-    SensorWriter<R, L>: 'static + Send + Sync + From<usize>,
+    SensorWriter<S, L>: 'static + Send + Sync + From<usize>,
 {
     let sensor_writer = Arc::new(SensorWriter::from(0));
 
@@ -166,11 +166,11 @@ fn test_basic_sensor_observation_unsynced<R, L: DataWriteLock>(
     });
 }
 
-fn test_mapped_sensor<R, L: DataWriteLock>()
+fn test_mapped_sensor<S, L: DataWriteLock>()
 where
-    for<'a> &'a R: Lockshare<'a, Lock = L>,
+    for<'a> &'a S: Lockshare<'a, Lock = L>,
     L: DataWriteLock<Target = usize> + 'static,
-    SensorWriter<R, L>: 'static + Send + Sync + From<usize>,
+    SensorWriter<S, L>: 'static + Send + Sync + From<usize>,
 {
     let sensor_writer = SensorWriter::from(0);
     let mut observer = sensor_writer.spawn_observer().map(|x| x + 1);
@@ -187,11 +187,11 @@ where
     assert_eq!(new, 3);
 }
 
-fn test_mapped_sensor_cached<R, L: DataWriteLock>()
+fn test_mapped_sensor_cached<S, L: DataWriteLock>()
 where
-    for<'a> &'a R: Lockshare<'a, Lock = L>,
+    for<'a> &'a S: Lockshare<'a, Lock = L>,
     L: DataWriteLock<Target = usize> + 'static,
-    SensorWriter<R, L>: 'static + Send + Sync + From<usize>,
+    SensorWriter<S, L>: 'static + Send + Sync + From<usize>,
 {
     let sensor_writer = SensorWriter::from(0);
     let mut observer = sensor_writer.spawn_observer().map_cached(|x| x + 1);
@@ -208,11 +208,11 @@ where
     assert_eq!(new, 3);
 }
 
-fn test_fused_sensor<R, L: DataWriteLock>()
+fn test_fused_sensor<S, L: DataWriteLock>()
 where
-    for<'a> &'a R: Lockshare<'a, Lock = L>,
+    for<'a> &'a S: Lockshare<'a, Lock = L>,
     L: DataWriteLock<Target = usize> + 'static,
-    SensorWriter<R, L>: 'static + Send + Sync + From<usize>,
+    SensorWriter<S, L>: 'static + Send + Sync + From<usize>,
 {
     let sensor_writer_1 = SensorWriter::from(1);
     let sensor_writer_2 = SensorWriter::from(2);
@@ -245,11 +245,11 @@ where
     assert!(!observer.has_changed());
 }
 
-fn test_fused_sensor_cached<R, L: DataWriteLock>()
+fn test_fused_sensor_cached<S, L: DataWriteLock>()
 where
-    for<'a> &'a R: Lockshare<'a, Lock = L>,
+    for<'a> &'a S: Lockshare<'a, Lock = L>,
     L: DataWriteLock<Target = usize> + 'static,
-    SensorWriter<R, L>: 'static + Send + Sync + From<usize>,
+    SensorWriter<S, L>: 'static + Send + Sync + From<usize>,
 {
     let sensor_writer_1 = Arc::new(SensorWriter::from(1));
     let sensor_writer_2 = Arc::new(SensorWriter::from(2));
@@ -282,11 +282,11 @@ where
     assert!(!observer.has_changed());
 }
 
-fn test_closed<R, L: DataWriteLock, S: Deref<Target = RevisedData<L>>>()
+fn test_closed<S, L: DataWriteLock, R: Deref<Target = RevisedData<L>>>()
 where
-    for<'a> &'a R: Lockshare<'a, Lock = L, Shared = S>,
+    for<'a> &'a S: Lockshare<'a, Lock = L, Shared = R>,
     L: DataWriteLock<Target = usize> + 'static,
-    SensorWriter<R, L>: 'static + From<usize>,
+    SensorWriter<S, L>: 'static + From<usize>,
 {
     let sensor_writer = SensorWriter::from(1);
     let mut observer = sensor_writer.spawn_observer();

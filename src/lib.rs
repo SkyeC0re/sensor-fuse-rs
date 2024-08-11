@@ -9,22 +9,10 @@ use core::{
     ops::Deref,
     sync::atomic::{AtomicUsize, Ordering},
 };
-use derived_deref::{Deref, DerefMut};
 use lock::{
     DataReadLock, DataWriteLock, FalseReadLock, OwnedData, OwnedFalseLock, ReadGuardSpecifier,
 };
-use std::{
-    cell::{Cell, OnceCell, Ref, UnsafeCell},
-    future::Future,
-    iter::Fuse,
-    marker::PhantomData,
-    mem::{self, take},
-    ops::DerefMut,
-    process::Output,
-    ptr::{null, null_mut},
-    sync::OnceState,
-    task::Poll,
-};
+use std::{future::Future, marker::PhantomData, ops::DerefMut, ptr::null_mut, task::Poll};
 
 use std::sync::Arc;
 
@@ -75,13 +63,13 @@ impl<T> RevisedData<T> {
 }
 
 #[repr(transparent)]
-pub struct SensorWriter<R, L>(R)
+pub struct SensorWriter<S, L>(S)
 where
-    for<'a> &'a R: Lockshare<'a, Lock = L>;
+    for<'a> &'a S: Lockshare<'a, Lock = L>;
 
-impl<R, L> Drop for SensorWriter<R, L>
+impl<S, L> Drop for SensorWriter<S, L>
 where
-    for<'a> &'a R: Lockshare<'a, Lock = L>,
+    for<'a> &'a S: Lockshare<'a, Lock = L>,
 {
     fn drop(&mut self) {
         let x = &self.0;
@@ -91,34 +79,34 @@ where
     }
 }
 
-impl<R, L> Deref for SensorWriter<R, L>
+impl<S, L> Deref for SensorWriter<S, L>
 where
-    for<'a> &'a R: Lockshare<'a, Lock = L>,
+    for<'a> &'a S: Lockshare<'a, Lock = L>,
 {
-    type Target = R;
+    type Target = S;
 
     fn deref(&self) -> &Self::Target {
         &self.0
     }
 }
 
-impl<R, L> DerefMut for SensorWriter<R, L>
+impl<S, L> DerefMut for SensorWriter<S, L>
 where
-    for<'a> &'a R: Lockshare<'a, Lock = L>,
+    for<'a> &'a S: Lockshare<'a, Lock = L>,
 {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.0
     }
 }
 
-impl<R, L> SensorWriter<R, L>
+impl<S, L> SensorWriter<S, L>
 where
-    for<'a> &'a R: Lockshare<'a, Lock = L>,
+    for<'a> &'a S: Lockshare<'a, Lock = L>,
 {
     #[inline(always)]
     pub fn spawn_referenced_observer(
         &self,
-    ) -> SensorObserver<&'_ RevisedData<<&'_ R as Lockshare>::Lock>, <&'_ R as Lockshare>::Lock>
+    ) -> SensorObserver<&'_ RevisedData<<&'_ S as Lockshare>::Lock>, <&'_ S as Lockshare>::Lock>
     {
         let inner = (&self.0).share_elided_ref();
         let version = (&self.0).share_elided_ref().version();
@@ -128,7 +116,7 @@ where
     #[inline(always)]
     pub fn spawn_observer(
         &self,
-    ) -> SensorObserver<<&'_ R as Lockshare>::Shared, <&'_ R as Lockshare>::Lock> {
+    ) -> SensorObserver<<&'_ S as Lockshare>::Shared, <&'_ S as Lockshare>::Lock> {
         let inner = self.0.share_lock();
         SensorObserver {
             version: inner.version(),
@@ -239,28 +227,20 @@ pub trait SensorCallbackExec<T> {
     fn exec(&self);
 }
 
-// pub trait SensorCallbackRegister<T> {
-//     /// Register a new function to the execution queue.
-//     fn register<F: 'static + FnMut(&T) -> bool>(&self, f: F);
-
-// }
-
-pub trait RegisterFunction<'a, R, L, T, E, F: 'a + FnMut(&T) -> bool>
+pub trait RegisterFunction<'a, S, L, T, E, F: 'a + FnMut(&T) -> bool>
 where
     L: DataWriteLock<Target = ExecData<T, E>>,
-    // R: Lockshare2<'a, Lock = ExecLock<L, T, E>>,
     E: CallbackRegister<'a, F, T> + CallbackExecute<T>,
 {
     fn register(&self, f: F);
 }
 
-impl<'a, R, L, T, E, F: 'a + FnMut(&T) -> bool> RegisterFunction<'a, R, L, T, E, F>
-    for SensorWriter<R, ExecLock<L, T, E>>
+impl<'a, S, L, T, E, F: 'a + FnMut(&T) -> bool> RegisterFunction<'a, S, L, T, E, F>
+    for SensorWriter<S, ExecLock<L, T, E>>
 where
     L: DataWriteLock<Target = ExecData<T, E>>,
-    // R: Lockshare2<'a, Lock = ExecLock<L, T, E>>,
     E: CallbackRegister<'a, F, T> + CallbackExecute<T>,
-    for<'b> &'b R: Lockshare<'b, Lock = ExecLock<L, T, E>>,
+    for<'b> &'b S: Lockshare<'b, Lock = ExecLock<L, T, E>>,
 {
     fn register(&self, f: F) {
         self.deref()
@@ -270,67 +250,6 @@ where
             .exec_manager
             .get_mut()
             .register(f);
-    }
-}
-
-// fn elide<'a: 'b, 'b>(&)
-
-pub trait StaticFuse<'a, I: 'a, O>
-where
-    Self: Deref<Target = I>,
-{
-    type Fused: DerefMut<Target = O>;
-
-    unsafe fn static_fuse<F: FnOnce(&'a I) -> O>(self, f: F) -> Self::Fused;
-}
-
-#[repr(transparent)]
-pub struct FusedRef<T>(T);
-
-impl<T> Deref for FusedRef<T> {
-    type Target = T;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl<T> DerefMut for FusedRef<T> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
-    }
-}
-
-impl<'a, I, O> StaticFuse<'a, I, O> for &'a I {
-    type Fused = FusedRef<O>;
-
-    unsafe fn static_fuse<F: FnOnce(&'a I) -> O>(self, f: F) -> Self::Fused {
-        FusedRef(f(self))
-    }
-}
-
-pub struct FusedHeapPtr<T, P>(T, P);
-
-impl<T, P> Deref for FusedHeapPtr<T, P> {
-    type Target = T;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl<T, P> DerefMut for FusedHeapPtr<T, P> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
-    }
-}
-
-impl<'a, I: 'a, O> StaticFuse<'a, I, O> for Arc<I> {
-    type Fused = FusedHeapPtr<O, Self>;
-
-    unsafe fn static_fuse<F: FnOnce(&'a I) -> O>(self, f: F) -> Self::Fused {
-        let shared_ref = &*(&*self as *const I);
-        FusedHeapPtr(f(shared_ref), self)
     }
 }
 
@@ -344,7 +263,7 @@ where
     R: Deref<Target = RevisedData<ExecLock<L, T, E>>>,
     E: WakerRegister + CallbackExecute<T>;
 
-impl<'a, 'req, R, L, T, E> Future for WaitUntilChangedFuture<'a, R, L, T, E>
+impl<'a, R, L, T, E> Future for WaitUntilChangedFuture<'a, R, L, T, E>
 where
     L: DataWriteLock<Target = ExecData<T, E>>,
     R: Deref<Target = RevisedData<ExecLock<L, T, E>>>,
@@ -381,7 +300,7 @@ where
     }
 }
 
-pub struct WaitForFuture<'a, R: 'a, L, T, E, F>(
+pub struct WaitForFuture<'a, R, L, T, E, F>(
     *mut SensorObserver<R, ExecLock<L, T, E>>,
     F,
     PhantomData<&'a (L, T, E)>,
@@ -405,7 +324,8 @@ where
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> Poll<Self::Output> {
-        // Safe code does not seem to want to compile without a guard reaquisition. Possibly inexperience, but also possibly a compiler bug or a quirk of `Option`.
+        // Safe code does not seem to want to compile without a guard reaquisition. Possibly inexperience,
+        // but also possibly a quirk of `Option`'s `None` variant still storing type information.
         if !self.0.is_null() {
             let mut observer = unsafe { &mut *self.0 };
             let changed = observer.has_changed();
@@ -435,7 +355,7 @@ where
     }
 }
 
-impl<'a, 'req, R, L, T, E> SensorObserver<R, ExecLock<L, T, E>>
+impl<'a, R, L, T, E> SensorObserver<R, ExecLock<L, T, E>>
 where
     L: DataWriteLock<Target = ExecData<T, E>>,
     R: Deref<Target = RevisedData<ExecLock<L, T, E>>>,
@@ -526,9 +446,9 @@ pub trait SensorObserve {
     }
 }
 
-impl<R, L: DataWriteLock> SensorWrite for SensorWriter<R, L>
+impl<S, L: DataWriteLock> SensorWrite for SensorWriter<S, L>
 where
-    for<'a> &'a R: Lockshare<'a, Lock = L>,
+    for<'a> &'a S: Lockshare<'a, Lock = L>,
 {
     type Lock = L;
 
