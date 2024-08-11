@@ -1,11 +1,11 @@
-use std::{cell::UnsafeCell, marker::PhantomData, sync::Arc};
+use std::{cell::UnsafeCell, sync::Arc};
 
 use parking_lot::{self, RwLockWriteGuard};
 
 use crate::{
     callback_manager::{standard::VecBoxManager, ExecGuard},
     CallbackExecute, DataReadLock, DataWriteLock, ExecData, ExecLock, Lockshare,
-    ReadGuardSpecifier, RevisedData, SensorCallbackExec, SensorObserver, SensorWrite, SensorWriter,
+    ReadGuardSpecifier, RevisedData, SensorCallbackExec, SensorWrite, SensorWriter,
 };
 
 use super::{
@@ -75,6 +75,34 @@ impl<T> From<T> for MutexSensorWriter<T> {
     }
 }
 
+pub type MutexSensorDataExec<T> =
+    RevisedData<ExecLock<parking_lot::Mutex<ExecData<T, VecBoxManager<T>>>, T, VecBoxManager<T>>>;
+pub type MutexSensorExec<'a, T> = AbstractSensorObserver<
+    'a,
+    ExecLock<parking_lot::Mutex<ExecData<T, VecBoxManager<T>>>, T, VecBoxManager<T>>,
+>;
+pub type MutexSensorWriterExec<T> = AbstractSensorWriter<
+    ExecLock<parking_lot::Mutex<ExecData<T, VecBoxManager<T>>>, T, VecBoxManager<T>>,
+>;
+impl<T> MutexSensorWriterExec<T> {
+    #[inline(always)]
+    pub const fn new(init: T) -> Self {
+        SensorWriter(RevisedData::new(ExecLock::new(parking_lot::Mutex::new(
+            ExecData {
+                exec_manager: UnsafeCell::new(VecBoxManager::new()),
+                data: init,
+            },
+        ))))
+    }
+}
+
+impl<T> From<T> for MutexSensorWriterExec<T> {
+    #[inline(always)]
+    fn from(value: T) -> Self {
+        Self::new(value)
+    }
+}
+
 pub type ArcRwSensor<T> = AbstractArcSensorObserver<parking_lot::RwLock<T>>;
 pub type ArcRwSensorWriter<T> = AbstractArcSensorWriter<parking_lot::RwLock<T>>;
 
@@ -90,14 +118,13 @@ impl<T> From<T> for ArcRwSensorWriter<T> {
     }
 }
 
-// pub type ArcRwSensorDataExec<T> =
-//     RevisedData<ExecLock<parking_lot::RwLock<ExecData<T, VecBoxManager<T>>>, T, VecBoxManager<T>>>;
 pub type ArcRwSensorExec<T> = AbstractArcSensorObserver<
     ExecLock<parking_lot::RwLock<ExecData<T, VecBoxManager<T>>>, T, VecBoxManager<T>>,
 >;
 pub type ArcRwSensorWriterExec<T> = AbstractArcSensorWriter<
     ExecLock<parking_lot::RwLock<ExecData<T, VecBoxManager<T>>>, T, VecBoxManager<T>>,
 >;
+
 impl<T> ArcRwSensorWriterExec<T> {
     #[inline(always)]
     pub fn new(init: T) -> Self {
@@ -109,11 +136,59 @@ impl<T> ArcRwSensorWriterExec<T> {
         ))))
     }
 }
+impl<T> From<T> for ArcRwSensorWriterExec<T> {
+    #[inline(always)]
+    fn from(value: T) -> Self {
+        Self::new(value)
+    }
+}
+
+pub type ArcMutexSensor<T> = AbstractArcSensorObserver<parking_lot::Mutex<T>>;
+pub type ArcMutexSensorWriter<T> = AbstractArcSensorWriter<parking_lot::Mutex<T>>;
+
+impl<T> ArcMutexSensorWriter<T> {
+    pub fn new(init: T) -> Self {
+        SensorWriter(Arc::new(RevisedData::new(parking_lot::Mutex::new(init))))
+    }
+}
+
+impl<T> From<T> for ArcMutexSensorWriter<T> {
+    #[inline(always)]
+    fn from(value: T) -> Self {
+        Self::new(value)
+    }
+}
+
+pub type ArcMutexSensorExec<T> = AbstractArcSensorObserver<
+    ExecLock<parking_lot::Mutex<ExecData<T, VecBoxManager<T>>>, T, VecBoxManager<T>>,
+>;
+pub type ArcMutexSensorWriterExec<T> = AbstractArcSensorWriter<
+    ExecLock<parking_lot::Mutex<ExecData<T, VecBoxManager<T>>>, T, VecBoxManager<T>>,
+>;
+impl<T> ArcMutexSensorWriterExec<T> {
+    #[inline(always)]
+    pub fn new(init: T) -> Self {
+        SensorWriter(Arc::new(RevisedData::new(ExecLock::new(
+            parking_lot::Mutex::new(ExecData {
+                exec_manager: UnsafeCell::new(VecBoxManager::new()),
+                data: init,
+            }),
+        ))))
+    }
+}
+
+impl<T> From<T> for ArcMutexSensorWriterExec<T> {
+    #[inline(always)]
+    fn from(value: T) -> Self {
+        Self::new(value)
+    }
+}
 
 impl<T> ReadGuardSpecifier for parking_lot::RwLock<T> {
     type Target = T;
     type ReadGuard<'read> = parking_lot::RwLockReadGuard<'read, T> where T: 'read;
 }
+
 impl<T> DataReadLock for parking_lot::RwLock<T> {
     #[inline(always)]
     fn read(&self) -> Self::ReadGuard<'_> {

@@ -1,9 +1,7 @@
 use async_std::future::timeout;
 use futures::executor::block_on;
 use paste::paste;
-use sensor_fuse::callback_manager::standard::VecBoxManager;
 use sensor_fuse::callback_manager::{CallbackExecute, ExecData, ExecLock, WakerRegister};
-use sensor_fuse::lock::parking_lot::RwSensorDataExec;
 use sensor_fuse::lock::{self, DataWriteLock};
 use sensor_fuse::{prelude::*, RevisedData};
 use sensor_fuse::{Lockshare, SensorWriter};
@@ -25,7 +23,6 @@ macro_rules! test_core_with_owned_observer {
 macro_rules! test_core {
     ($prefix:ident, $sensor_writer:ty) => {
         paste! {
-
             #[test]
             fn [<$prefix _basic_sensor_observation_synced_10_1000>]() {
                 test_basic_sensor_observation_synced::<$sensor_writer, _>(10, 1000);
@@ -62,10 +59,14 @@ macro_rules! test_core {
 macro_rules! test_core_exec {
     ($prefix:ident, $sensor_writer:ty) => {
         paste! {
-
             #[test]
             fn [<$prefix _test_wait_until_changed>]() {
                 test_wait_until_changed::<$sensor_writer, _, _>();
+            }
+
+            #[test]
+            fn [<$prefix _test_wait_for>]() {
+                test_wait_for::<$sensor_writer, _, _>();
             }
         }
     };
@@ -340,11 +341,50 @@ where
     handle.join().unwrap();
 }
 
+fn test_wait_for<'a, S, L, E>()
+where
+    L: DataWriteLock<Target = ExecData<usize, E>> + 'static,
+    E: WakerRegister + CallbackExecute<usize>,
+    for<'b> &'b S: Lockshare<'b, Lock = ExecLock<L, usize, E>>,
+    SensorWriter<S, ExecLock<L, usize, E>>:
+        'static + SensorCallbackExec<usize> + Send + Sync + From<usize>,
+{
+    let sensor_writer = Arc::new(SensorWriter::from(1));
+
+    let sensor_writer_clone = sensor_writer.clone();
+    let handle = thread::spawn(move || {
+        let mut observer = sensor_writer_clone.spawn_observer();
+        let value: usize = *block_on(observer.wait_for(|x| *x % 2 == 0));
+        assert_eq!(value, 2);
+        // Value should have been marked as seen.
+        assert!(!observer.has_changed());
+    });
+
+    let mut observer = sensor_writer.spawn_observer();
+    let res = block_on(timeout(
+        Duration::from_millis(10),
+        observer.wait_for(|x| *x % 2 == 0),
+    ));
+    assert!(res.is_err());
+    sensor_writer.update_exec(2);
+    // Will hang if the waker was not successfully called.
+    handle.join().unwrap();
+}
+
 test_core!(pl_rwl, lock::parking_lot::RwSensorData<_>);
+
 test_core!(pl_arc_rwl, Arc<lock::parking_lot::RwSensorData<_>>);
 test_core_with_owned_observer!(pl_arc_rwl, Arc<lock::parking_lot::RwSensorData<_>>);
+
 test_core!(pl_mtx, lock::parking_lot::MutexSensorData<_>);
+
 test_core!(pl_arc_mtx, Arc<lock::parking_lot::MutexSensorData<_>>);
 test_core_with_owned_observer!(pl_arc_mtx, Arc<lock::parking_lot::MutexSensorData<_>>);
 
-test_core_exec!(pl_exec, RwSensorDataExec<_>);
+test_core_exec!(pl_rwl, lock::parking_lot::RwSensorDataExec<_>);
+
+test_core_exec!(pl_arc_rwl, Arc<lock::parking_lot::RwSensorDataExec<_>>);
+
+test_core_exec!(pl_mtx, lock::parking_lot::MutexSensorDataExec<_>);
+
+test_core_exec!(pl_arc_mtx, Arc<lock::parking_lot::MutexSensorDataExec<_>>);
