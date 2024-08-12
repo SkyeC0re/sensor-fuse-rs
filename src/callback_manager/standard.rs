@@ -1,7 +1,5 @@
 use std::task::Waker;
 
-use derived_deref::{Deref, DerefMut};
-
 use super::{CallbackExecute, CallbackRegister, WakerRegister};
 
 pub struct VecBoxManager<T> {

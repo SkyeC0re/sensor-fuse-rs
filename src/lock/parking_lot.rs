@@ -1,11 +1,10 @@
 use std::{cell::UnsafeCell, sync::Arc};
 
-use parking_lot::{self, RwLockWriteGuard};
+use parking_lot;
 
 use crate::{
-    callback_manager::{standard::VecBoxManager, ExecGuard},
-    CallbackExecute, DataReadLock, DataWriteLock, ExecData, ExecLock, Lockshare,
-    ReadGuardSpecifier, RevisedData, SensorCallbackExec, SensorWrite, SensorWriter,
+    callback_manager::standard::VecBoxManager, DataReadLock, DataWriteLock, ExecData, ExecLock,
+    ReadGuardSpecifier, RevisedData, SensorWriter,
 };
 
 use super::{
@@ -213,75 +212,12 @@ impl<T> DataWriteLock for parking_lot::RwLock<T> {
     fn try_write(&self) -> Option<Self::WriteGuard<'_>> {
         self.try_write()
     }
-}
 
-impl<R, T, E> SensorCallbackExec<T>
-    for SensorWriter<R, ExecLock<parking_lot::RwLock<ExecData<T, E>>, T, E>>
-where
-    for<'a> &'a R: Lockshare<'a, Lock = ExecLock<parking_lot::RwLock<ExecData<T, E>>, T, E>>,
-    E: CallbackExecute<T>,
-{
-    fn update_exec(&self, sample: T) {
-        let mut guard = self.0.share_elided_ref().write();
-        *guard = sample;
-        self.mark_all_unseen();
-        let guard = ExecGuard::new(RwLockWriteGuard::downgrade(guard.inner));
-
-        // Atomic downgrade just occured. No other modication can happen.
-        unsafe { (*guard.inner.exec_manager.get()).callback(&guard) };
-    }
-
-    fn modify_with_exec(&self, f: impl FnOnce(&mut T)) {
-        let mut guard = self.0.share_elided_ref().write();
-        f(&mut guard);
-        self.mark_all_unseen();
-        let guard = ExecGuard::new(RwLockWriteGuard::downgrade(guard.inner));
-
-        // Atomic downgrade just occured. No other modification can happen.
-        unsafe {
-            (*guard.inner.exec_manager.get()).callback(&guard.inner);
-        };
-    }
-
-    fn exec(&self) {
-        let guard = ExecGuard::new(RwLockWriteGuard::downgrade(
-            self.0.share_elided_ref().write().inner,
-        ));
-
-        // Atomic downgrade just occured. No other modification can happen.
-        unsafe { (*guard.inner.exec_manager.get()).callback(&guard.inner) };
-    }
-}
-
-impl<R, T, E> SensorCallbackExec<T>
-    for SensorWriter<R, ExecLock<parking_lot::Mutex<ExecData<T, E>>, T, E>>
-where
-    for<'a> &'a R: Lockshare<'a, Lock = ExecLock<parking_lot::Mutex<ExecData<T, E>>, T, E>>,
-    E: CallbackExecute<T>,
-{
-    fn update_exec(&self, sample: T) {
-        let mut guard = (&self.0).share_elided_ref().write();
-        *guard = sample;
-        self.mark_all_unseen();
-
-        let ExecData { exec_manager, data } = &mut *guard.inner;
-        exec_manager.get_mut().callback(data);
-    }
-
-    fn modify_with_exec(&self, f: impl FnOnce(&mut T)) {
-        let mut guard = self.0.share_elided_ref().write();
-        f(&mut guard);
-        self.mark_all_unseen();
-
-        let ExecData { exec_manager, data } = &mut *guard.inner;
-        exec_manager.get_mut().callback(data);
-    }
-
-    fn exec(&self) {
-        let mut guard = self.0.share_elided_ref().write();
-
-        let ExecData { exec_manager, data } = &mut *guard.inner;
-        exec_manager.get_mut().callback(data);
+    #[inline(always)]
+    fn atomic_downgrade(
+        write_guard: Self::WriteGuard<'_>,
+    ) -> impl std::ops::Deref<Target = Self::Target> {
+        parking_lot::RwLockWriteGuard::downgrade(write_guard)
     }
 }
 

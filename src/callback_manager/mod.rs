@@ -52,7 +52,7 @@ where
     L: DataWriteLock<Target = ExecData<T, E>>,
     E: CallbackExecute<T>,
 {
-    inner: L,
+    pub(crate) inner: L,
 }
 
 impl<L, T, E> ExecLock<L, T, E>

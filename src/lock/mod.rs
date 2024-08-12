@@ -24,20 +24,6 @@ pub trait ReadGuardSpecifier {
     where
         Self: 'read;
 }
-pub trait ReadGuard<T, G: Deref<Target = T>> {}
-
-pub trait ReadLock<T> {
-    fn read(&self) -> impl Deref<Target = T>;
-
-    fn try_read(&self) -> Option<impl Deref<Target = T>>;
-}
-
-pub trait WriteLock<T> {
-    fn write(&self) -> impl DerefMut<Target = T>;
-
-    fn try_write(&self) -> Option<impl DerefMut<Target = T>>;
-}
-
 pub trait DataReadLock: ReadGuardSpecifier {
     /// Provides at least immutable access to the current value inside the lock.
     fn read(&self) -> Self::ReadGuard<'_>;
@@ -53,6 +39,15 @@ pub trait DataWriteLock: DataReadLock {
     fn write(&self) -> Self::WriteGuard<'_>;
 
     fn try_write(&self) -> Option<Self::WriteGuard<'_>>;
+
+    /// Optional optimization for accessing the executor in callback enabled sensor writers and observers.
+    /// This method, if manually implemented, should return a read guard which was atomically downgraded from
+    /// the given write guard.
+    #[inline(always)]
+    #[allow(refining_impl_trait)]
+    fn atomic_downgrade(write_guard: Self::WriteGuard<'_>) -> impl Deref<Target = Self::Target> {
+        write_guard
+    }
 }
 
 #[derive(Deref, DerefMut, Clone)]

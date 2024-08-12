@@ -109,9 +109,6 @@ pub trait Lockshare<'a> {
     type Lock: DataWriteLock;
     type Shared: Deref<Target = RevisedData<Self::Lock>>;
 
-    // /// Construct a new shareable lock from the given lock.
-    // fn new(lock: Self::Lock) -> Self;
-
     /// Share the revised data for the largest possible lifetime.
     fn share_lock(self) -> Self::Shared;
 
@@ -207,19 +204,56 @@ pub trait SensorCallbackExec<T> {
     fn exec(&self);
 }
 
-pub trait RegisterFunction<'a, S, L, T, E, F: 'a + FnMut(&T) -> bool>
+impl<S, L, T, E> SensorCallbackExec<T> for SensorWriter<S, ExecLock<L, T, E>>
+where
+    for<'a> &'a S: Lockshare<'a, Lock = ExecLock<L, T, E>>,
+    L: DataWriteLock<Target = ExecData<T, E>>,
+    E: CallbackExecute<T>,
+{
+    fn update_exec(&self, sample: T) {
+        let mut guard = self.0.share_elided_ref().data.inner.write();
+        **guard = sample;
+        self.mark_all_unseen();
+        let guard = L::atomic_downgrade(guard);
+
+        // Atomic downgrade just occured. No other modication can happen.
+        unsafe { (*guard.exec_manager.get()).callback(&guard.data) };
+    }
+
+    fn modify_with_exec(&self, f: impl FnOnce(&mut T)) {
+        let mut guard = self.0.share_elided_ref().data.inner.write();
+        f(&mut guard.data);
+        self.mark_all_unseen();
+        let guard = L::atomic_downgrade(guard);
+
+        // Atomic downgrade just occured. No other modification can happen.
+        unsafe {
+            (*guard.exec_manager.get()).callback(&guard.data);
+        };
+    }
+
+    fn exec(&self) {
+        let guard = L::atomic_downgrade(self.0.share_elided_ref().data.inner.write());
+
+        // Atomic downgrade just occured. No other modification can happen.
+        unsafe { (*guard.exec_manager.get()).callback(&guard.data) };
+    }
+}
+
+pub trait RegisterFunction<'a, S, L, T, E, F>
 where
     L: DataWriteLock<Target = ExecData<T, E>>,
     E: CallbackRegister<'a, F, T> + CallbackExecute<T>,
+    F: 'a + FnMut(&T) -> bool,
 {
     fn register(&self, f: F);
 }
 
-impl<'a, S, L, T, E, F: 'a + FnMut(&T) -> bool> RegisterFunction<'a, S, L, T, E, F>
-    for SensorWriter<S, ExecLock<L, T, E>>
+impl<'a, S, L, T, E, F> RegisterFunction<'a, S, L, T, E, F> for SensorWriter<S, ExecLock<L, T, E>>
 where
     L: DataWriteLock<Target = ExecData<T, E>>,
     E: CallbackRegister<'a, F, T> + CallbackExecute<T>,
+    F: 'a + FnMut(&T) -> bool,
     for<'b> &'b S: Lockshare<'b, Lock = ExecLock<L, T, E>>,
 {
     fn register(&self, f: F) {
