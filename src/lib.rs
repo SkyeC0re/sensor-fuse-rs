@@ -830,11 +830,7 @@ where
 #[cfg(test)]
 mod tests {
 
-    use std::{
-        future,
-        thread::{self, sleep, yield_now},
-        time::Duration,
-    };
+    use std::thread::{self, yield_now};
 
     use futures::executor::block_on;
 
