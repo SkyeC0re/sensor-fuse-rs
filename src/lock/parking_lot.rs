@@ -222,7 +222,7 @@ where
     E: CallbackExecute<T>,
 {
     fn update_exec(&self, sample: T) {
-        let mut guard = self.share_elided_ref().write();
+        let mut guard = self.0.share_elided_ref().write();
         *guard = sample;
         self.mark_all_unseen();
         let guard = ExecGuard::new(RwLockWriteGuard::downgrade(guard.inner));
@@ -232,7 +232,7 @@ where
     }
 
     fn modify_with_exec(&self, f: impl FnOnce(&mut T)) {
-        let mut guard = self.share_elided_ref().write();
+        let mut guard = self.0.share_elided_ref().write();
         f(&mut guard);
         self.mark_all_unseen();
         let guard = ExecGuard::new(RwLockWriteGuard::downgrade(guard.inner));
@@ -245,7 +245,7 @@ where
 
     fn exec(&self) {
         let guard = ExecGuard::new(RwLockWriteGuard::downgrade(
-            self.share_elided_ref().write().inner,
+            self.0.share_elided_ref().write().inner,
         ));
 
         // Atomic downgrade just occured. No other modification can happen.
@@ -269,7 +269,7 @@ where
     }
 
     fn modify_with_exec(&self, f: impl FnOnce(&mut T)) {
-        let mut guard = self.share_elided_ref().write();
+        let mut guard = self.0.share_elided_ref().write();
         f(&mut guard);
         self.mark_all_unseen();
 
@@ -278,7 +278,7 @@ where
     }
 
     fn exec(&self) {
-        let mut guard = self.share_elided_ref().write();
+        let mut guard = self.0.share_elided_ref().write();
 
         let ExecData { exec_manager, data } = &mut *guard.inner;
         exec_manager.get_mut().callback(data);

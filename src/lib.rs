@@ -79,26 +79,6 @@ where
     }
 }
 
-impl<S, L> Deref for SensorWriter<S, L>
-where
-    for<'a> &'a S: Lockshare<'a, Lock = L>,
-{
-    type Target = S;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl<S, L> DerefMut for SensorWriter<S, L>
-where
-    for<'a> &'a S: Lockshare<'a, Lock = L>,
-{
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
-    }
-}
-
 impl<S, L> SensorWriter<S, L>
 where
     for<'a> &'a S: Lockshare<'a, Lock = L>,
@@ -243,7 +223,7 @@ where
     for<'b> &'b S: Lockshare<'b, Lock = ExecLock<L, T, E>>,
 {
     fn register(&self, f: F) {
-        self.deref()
+        self.0
             .share_elided_ref()
             .write()
             .inner
@@ -454,31 +434,31 @@ where
 
     #[inline(always)]
     fn mark_all_unseen(&self) {
-        self.share_elided_ref().update_version(STEP_SIZE)
+        self.0.share_elided_ref().update_version(STEP_SIZE)
     }
 
     #[inline]
     fn update(&self, sample: L::Target) {
-        let mut guard = self.share_elided_ref().data.write();
+        let mut guard = self.0.share_elided_ref().data.write();
         self.mark_all_unseen();
         *guard = sample;
     }
 
     #[inline]
     fn modify_with(&self, f: impl FnOnce(&mut L::Target)) {
-        let mut guard = self.share_elided_ref().data.write();
+        let mut guard = self.0.share_elided_ref().data.write();
         self.mark_all_unseen();
         f(&mut guard);
     }
 
     #[inline]
     fn read(&self) -> L::ReadGuard<'_> {
-        self.share_elided_ref().data.read()
+        self.0.share_elided_ref().data.read()
     }
 
     #[inline]
     fn write(&self) -> L::WriteGuard<'_> {
-        self.share_elided_ref().data.write()
+        self.0.share_elided_ref().data.write()
     }
 }
 
