@@ -4,12 +4,13 @@ use parking_lot;
 
 use crate::{
     callback_manager::standard::VecBoxManager, DataReadLock, DataWriteLock, ExecData, ExecLock,
-    ReadGuardSpecifier, RevisedData, SensorWriter,
+    ReadGuardSpecifier, RevisedData, SensorWriter, SensorWriterExec,
 };
 
 use super::{
-    AbstractArcSensorObserver, AbstractArcSensorWriter, AbstractSensorObserver,
-    AbstractSensorWriter,
+    AbstractArcSensorObserver, AbstractArcSensorObserverExec, AbstractArcSensorWriter,
+    AbstractArcSensorWriterExec, AbstractSensorObserver, AbstractSensorObserverExec,
+    AbstractSensorWriter, AbstractSensorWriterExec,
 };
 
 pub type RwSensorData<T> = RevisedData<parking_lot::RwLock<T>>;
@@ -31,17 +32,21 @@ impl<T> From<T> for RwSensorWriter<T> {
 
 pub type RwSensorDataExec<T> =
     RevisedData<ExecLock<parking_lot::RwLock<ExecData<T, VecBoxManager<T>>>, T, VecBoxManager<T>>>;
-pub type RwSensorExec<'a, T> = AbstractSensorObserver<
+pub type RwSensorExec<'a, T> = AbstractSensorObserverExec<
     'a,
-    ExecLock<parking_lot::RwLock<ExecData<T, VecBoxManager<T>>>, T, VecBoxManager<T>>,
+    parking_lot::RwLock<ExecData<T, VecBoxManager<T>>>,
+    T,
+    VecBoxManager<T>,
 >;
-pub type RwSensorWriterExec<T> = AbstractSensorWriter<
-    ExecLock<parking_lot::RwLock<ExecData<T, VecBoxManager<T>>>, T, VecBoxManager<T>>,
+pub type RwSensorWriterExec<T> = AbstractSensorWriterExec<
+    parking_lot::RwLock<ExecData<T, VecBoxManager<T>>>,
+    T,
+    VecBoxManager<T>,
 >;
 impl<T> RwSensorWriterExec<T> {
     #[inline(always)]
     pub const fn new(init: T) -> Self {
-        SensorWriter(RevisedData::new(ExecLock::new(parking_lot::RwLock::new(
+        SensorWriterExec(RevisedData::new(ExecLock::new(parking_lot::RwLock::new(
             ExecData {
                 exec_manager: UnsafeCell::new(VecBoxManager::new()),
                 data: init,
@@ -76,17 +81,22 @@ impl<T> From<T> for MutexSensorWriter<T> {
 
 pub type MutexSensorDataExec<T> =
     RevisedData<ExecLock<parking_lot::Mutex<ExecData<T, VecBoxManager<T>>>, T, VecBoxManager<T>>>;
-pub type MutexSensorExec<'a, T> = AbstractSensorObserver<
+pub type MutexSensorExec<'a, T> = AbstractSensorObserverExec<
     'a,
-    ExecLock<parking_lot::Mutex<ExecData<T, VecBoxManager<T>>>, T, VecBoxManager<T>>,
+    parking_lot::Mutex<ExecData<T, VecBoxManager<T>>>,
+    T,
+    VecBoxManager<T>,
 >;
-pub type MutexSensorWriterExec<T> = AbstractSensorWriter<
-    ExecLock<parking_lot::Mutex<ExecData<T, VecBoxManager<T>>>, T, VecBoxManager<T>>,
+
+pub type MutexSensorWriterExec<T> = AbstractSensorWriterExec<
+    parking_lot::Mutex<ExecData<T, VecBoxManager<T>>>,
+    T,
+    VecBoxManager<T>,
 >;
 impl<T> MutexSensorWriterExec<T> {
     #[inline(always)]
     pub const fn new(init: T) -> Self {
-        SensorWriter(RevisedData::new(ExecLock::new(parking_lot::Mutex::new(
+        SensorWriterExec(RevisedData::new(ExecLock::new(parking_lot::Mutex::new(
             ExecData {
                 exec_manager: UnsafeCell::new(VecBoxManager::new()),
                 data: init,
@@ -117,17 +127,21 @@ impl<T> From<T> for ArcRwSensorWriter<T> {
     }
 }
 
-pub type ArcRwSensorExec<T> = AbstractArcSensorObserver<
-    ExecLock<parking_lot::RwLock<ExecData<T, VecBoxManager<T>>>, T, VecBoxManager<T>>,
+pub type ArcRwSensorExec<T> = AbstractArcSensorObserverExec<
+    parking_lot::RwLock<ExecData<T, VecBoxManager<T>>>,
+    T,
+    VecBoxManager<T>,
 >;
-pub type ArcRwSensorWriterExec<T> = AbstractArcSensorWriter<
-    ExecLock<parking_lot::RwLock<ExecData<T, VecBoxManager<T>>>, T, VecBoxManager<T>>,
+pub type ArcRwSensorWriterExec<T> = AbstractArcSensorWriterExec<
+    parking_lot::RwLock<ExecData<T, VecBoxManager<T>>>,
+    T,
+    VecBoxManager<T>,
 >;
 
 impl<T> ArcRwSensorWriterExec<T> {
     #[inline(always)]
     pub fn new(init: T) -> Self {
-        SensorWriter(Arc::new(RevisedData::new(ExecLock::new(
+        SensorWriterExec(Arc::new(RevisedData::new(ExecLock::new(
             parking_lot::RwLock::new(ExecData {
                 exec_manager: UnsafeCell::new(VecBoxManager::new()),
                 data: init,
@@ -158,16 +172,20 @@ impl<T> From<T> for ArcMutexSensorWriter<T> {
     }
 }
 
-pub type ArcMutexSensorExec<T> = AbstractArcSensorObserver<
-    ExecLock<parking_lot::Mutex<ExecData<T, VecBoxManager<T>>>, T, VecBoxManager<T>>,
+pub type ArcMutexSensorExec<T> = AbstractArcSensorObserverExec<
+    parking_lot::Mutex<ExecData<T, VecBoxManager<T>>>,
+    T,
+    VecBoxManager<T>,
 >;
-pub type ArcMutexSensorWriterExec<T> = AbstractArcSensorWriter<
-    ExecLock<parking_lot::Mutex<ExecData<T, VecBoxManager<T>>>, T, VecBoxManager<T>>,
+pub type ArcMutexSensorWriterExec<T> = AbstractArcSensorWriterExec<
+    parking_lot::Mutex<ExecData<T, VecBoxManager<T>>>,
+    T,
+    VecBoxManager<T>,
 >;
 impl<T> ArcMutexSensorWriterExec<T> {
     #[inline(always)]
     pub fn new(init: T) -> Self {
-        SensorWriter(Arc::new(RevisedData::new(ExecLock::new(
+        SensorWriterExec(Arc::new(RevisedData::new(ExecLock::new(
             parking_lot::Mutex::new(ExecData {
                 exec_manager: UnsafeCell::new(VecBoxManager::new()),
                 data: init,

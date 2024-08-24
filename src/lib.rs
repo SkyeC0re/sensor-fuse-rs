@@ -105,6 +105,52 @@ where
     }
 }
 
+#[repr(transparent)]
+pub struct SensorWriterExec<S, L, T, E>(S)
+where
+    L: DataWriteLock<Target = ExecData<T, E>>,
+    E: CallbackExecute<T>,
+    for<'a> &'a S: Lockshare<'a, Lock = ExecLock<L, T, E>>;
+
+impl<S, L, T, E> Drop for SensorWriterExec<S, L, T, E>
+where
+    L: DataWriteLock<Target = ExecData<T, E>>,
+    E: CallbackExecute<T>,
+    for<'a> &'a S: Lockshare<'a, Lock = ExecLock<L, T, E>>,
+{
+    fn drop(&mut self) {
+        let x = &self.0;
+        x.share_elided_ref()
+            .version
+            .fetch_or(CLOSED_BIT, Ordering::Release);
+    }
+}
+
+impl<S, L, T, E> SensorWriterExec<S, L, T, E>
+where
+    L: DataWriteLock<Target = ExecData<T, E>>,
+    E: CallbackExecute<T>,
+    for<'a> &'a S: Lockshare<'a, Lock = ExecLock<L, T, E>>,
+{
+    #[inline(always)]
+    pub fn spawn_referenced_observer(
+        &self,
+    ) -> SensorObserverExec<&'_ RevisedData<ExecLock<L, T, E>>, L, T, E> {
+        let inner = (&self.0).share_elided_ref();
+        let version = (&self.0).share_elided_ref().version();
+        SensorObserverExec { inner, version }
+    }
+
+    #[inline(always)]
+    pub fn spawn_observer(&self) -> SensorObserverExec<<&'_ S as Lockshare>::Shared, L, T, E> {
+        let inner = self.0.share_lock();
+        SensorObserverExec {
+            version: inner.version(),
+            inner,
+        }
+    }
+}
+
 pub trait Lockshare<'a> {
     type Lock: DataWriteLock;
     type Shared: Deref<Target = RevisedData<Self::Lock>>;
@@ -183,47 +229,96 @@ where
     }
 }
 
-pub trait SensorWrite {
-    type Lock: DataWriteLock;
+pub struct SensorObserverExec<R, L, T, E>
+where
+    R: Deref<Target = RevisedData<ExecLock<L, T, E>>>,
+    L: DataWriteLock<Target = ExecData<T, E>>,
+    E: CallbackExecute<T>,
+{
+    inner: R,
+    version: usize,
+}
+
+impl<R, L, T, E> SensorObserverExec<R, L, T, E>
+where
+    R: Deref<Target = RevisedData<ExecLock<L, T, E>>>,
+    L: DataWriteLock<Target = ExecData<T, E>>,
+    E: CallbackExecute<T>,
+{
+    /// Returns true once all upstream writers have disconnected.
+    #[inline(always)]
+    pub fn is_closed(&self) -> bool {
+        self.inner.version() & CLOSED_BIT == CLOSED_BIT
+    }
+}
+
+impl<R, L, T, E> Clone for SensorObserverExec<R, L, T, E>
+where
+    R: Deref<Target = RevisedData<ExecLock<L, T, E>>> + Clone,
+    L: DataWriteLock<Target = ExecData<T, E>>,
+    E: CallbackExecute<T>,
+{
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            version: self.version,
+        }
+    }
+}
+
+pub trait SensorWrite<T> {
+    type Lock: DataWriteLock<Target = T>;
 
     fn read(&self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_>;
     fn write(&self) -> <Self::Lock as DataWriteLock>::WriteGuard<'_>;
-    fn update(&self, sample: <Self::Lock as ReadGuardSpecifier>::Target);
+    fn update(&self, sample: T);
     /// Modify the sensor value in place and notify observers.
-    fn modify_with(&self, f: impl FnOnce(&mut <Self::Lock as ReadGuardSpecifier>::Target));
+    fn modify_with(&self, f: impl FnOnce(&mut T));
     /// Mark the current sensor value as unseen to all observers.
     fn mark_all_unseen(&self);
 }
 
-pub trait SensorCallbackExec<T> {
-    /// Update the sensor's current value, notify observers and execute all registered functions.
-    fn update_exec(&self, sample: T);
-    /// Modify the sensor value in place, notify observers and execute all registered functions.
-    fn modify_with_exec(&self, f: impl FnOnce(&mut T));
-    /// Execute all registered functions.
-    fn exec(&self);
-}
+// pub trait SensorCallbackExec<T> {
+//     /// Update the sensor's current value, notify observers and execute all registered functions.
+//     fn update_exec(&self, sample: T);
+//     /// Modify the sensor value in place, notify observers and execute all registered functions.
+//     fn modify_with_exec(&self, f: impl FnOnce(&mut T));
+//     /// Execute all registered functions.
+//     fn exec(&self);
+// }
 
-impl<S, L, T, E> SensorCallbackExec<T> for SensorWriter<S, ExecLock<L, T, E>>
+impl<S, L, T, E> SensorWrite<T> for SensorWriterExec<S, L, T, E>
 where
     for<'a> &'a S: Lockshare<'a, Lock = ExecLock<L, T, E>>,
     L: DataWriteLock<Target = ExecData<T, E>>,
     E: CallbackExecute<T>,
 {
-    fn update_exec(&self, sample: T) {
-        let mut guard = self.0.share_elided_ref().data.inner.write();
+    type Lock = ExecLock<L, T, E>;
+
+    fn read(&self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_> {
+        self.0.share_elided_ref().data.read()
+    }
+
+    fn write(&self) -> <Self::Lock as DataWriteLock>::WriteGuard<'_> {
+        self.0.share_elided_ref().data.write()
+    }
+
+    fn update(&self, sample: T) {
+        let revised_data = self.0.share_elided_ref();
+        let mut guard = revised_data.data.inner.write();
         **guard = sample;
-        self.mark_all_unseen();
+        revised_data.update_version(STEP_SIZE);
         let guard = L::atomic_downgrade(guard);
 
         // Atomic downgrade just occured. No other modication can happen.
         unsafe { (*guard.exec_manager.get()).callback(&guard.data) };
     }
 
-    fn modify_with_exec(&self, f: impl FnOnce(&mut T)) {
-        let mut guard = self.0.share_elided_ref().data.inner.write();
+    fn modify_with(&self, f: impl FnOnce(&mut T)) {
+        let revised_data = self.0.share_elided_ref();
+        let mut guard = revised_data.data.inner.write();
         f(&mut guard.data);
-        self.mark_all_unseen();
+        revised_data.update_version(STEP_SIZE);
         let guard = L::atomic_downgrade(guard);
 
         // Atomic downgrade just occured. No other modification can happen.
@@ -232,8 +327,10 @@ where
         };
     }
 
-    fn exec(&self) {
-        let guard = L::atomic_downgrade(self.0.share_elided_ref().data.inner.write());
+    fn mark_all_unseen(&self) {
+        let revised_data = self.0.share_elided_ref();
+        let guard = L::atomic_downgrade(revised_data.data.inner.write());
+        revised_data.update_version(STEP_SIZE);
 
         // Atomic downgrade just occured. No other modification can happen.
         unsafe { (*guard.exec_manager.get()).callback(&guard.data) };
@@ -249,7 +346,7 @@ where
     fn register(&self, f: F);
 }
 
-impl<'a, S, L, T, E, F> RegisterFunction<'a, S, L, T, E, F> for SensorWriter<S, ExecLock<L, T, E>>
+impl<'a, S, L, T, E, F> RegisterFunction<'a, S, L, T, E, F> for SensorWriterExec<S, L, T, E>
 where
     L: DataWriteLock<Target = ExecData<T, E>>,
     E: CallbackRegister<'a, F, T> + CallbackExecute<T>,
@@ -268,7 +365,7 @@ where
 }
 
 #[repr(transparent)]
-pub struct WaitUntilChangedFuture<'a, R, L, T, E>(Option<&'a SensorObserver<R, ExecLock<L, T, E>>>)
+pub struct WaitUntilChangedFuture<'a, R, L, T, E>(Option<&'a SensorObserverExec<R, L, T, E>>)
 where
     L: DataWriteLock<Target = ExecData<T, E>>,
     R: Deref<Target = RevisedData<ExecLock<L, T, E>>>,
@@ -312,7 +409,7 @@ where
 }
 
 pub struct WaitForFuture<'a, R: 'a, L: 'a, T: 'a, E: 'a, F>(
-    *mut SensorObserver<R, ExecLock<L, T, E>>,
+    *mut SensorObserverExec<R, L, T, E>,
     F,
     PhantomData<&'a ()>,
 )
@@ -366,7 +463,7 @@ where
     }
 }
 
-impl<'a, R, L, T, E> SensorObserver<R, ExecLock<L, T, E>>
+impl<'a, R, L, T, E> SensorObserverExec<R, L, T, E>
 where
     L: DataWriteLock<Target = ExecData<T, E>>,
     R: Deref<Target = RevisedData<ExecLock<L, T, E>>>,
@@ -387,7 +484,7 @@ where
     }
 }
 impl<'a, R, L, T, E, F: 'a + FnMut(&T) -> bool> RegisterFunction<'a, R, L, T, E, F>
-    for SensorObserver<R, ExecLock<L, T, E>>
+    for SensorObserverExec<R, L, T, E>
 where
     L: DataWriteLock<Target = ExecData<T, E>>,
     E: CallbackRegister<'a, F, T> + CallbackExecute<T>,
@@ -460,7 +557,7 @@ pub trait SensorObserve {
     }
 }
 
-impl<S, L: DataWriteLock> SensorWrite for SensorWriter<S, L>
+impl<S, L: DataWriteLock> SensorWrite<L::Target> for SensorWriter<S, L>
 where
     for<'a> &'a S: Lockshare<'a, Lock = L>,
 {
@@ -528,6 +625,46 @@ where
     fn has_changed(&self) -> bool {
         self.version >> 1 != self.inner.version() >> 1
     }
+    #[inline(always)]
+    fn is_cached(&self) -> bool {
+        false
+    }
+}
+
+impl<R, L, T, E> SensorObserve for SensorObserverExec<R, L, T, E>
+where
+    R: Deref<Target = RevisedData<ExecLock<L, T, E>>>,
+    L: DataWriteLock<Target = ExecData<T, E>>,
+    E: CallbackExecute<T>,
+{
+    type Lock = ExecLock<L, T, E>;
+
+    #[inline(always)]
+    fn pull_updated(&mut self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_> {
+        self.mark_seen();
+        self.inner.data.read()
+    }
+
+    #[inline(always)]
+    fn pull(&mut self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_> {
+        self.inner.data.read()
+    }
+
+    #[inline(always)]
+    fn mark_seen(&mut self) {
+        self.version = self.inner.version();
+    }
+
+    #[inline(always)]
+    fn mark_unseen(&mut self) {
+        self.version = self.inner.version().wrapping_sub(STEP_SIZE);
+    }
+
+    #[inline(always)]
+    fn has_changed(&self) -> bool {
+        self.version >> 1 != self.inner.version() >> 1
+    }
+
     #[inline(always)]
     fn is_cached(&self) -> bool {
         false
@@ -854,7 +991,7 @@ mod tests {
             RwSensorWriter, RwSensorWriterExec,
         },
         prelude::*,
-        SensorCallbackExec, SensorObserve, SensorWrite,
+        SensorObserve, SensorWrite,
     };
 
     static X: RwSensorWriterExec<i32> = RwSensorWriterExec::new(5);
@@ -880,7 +1017,7 @@ mod tests {
             }
         });
 
-        X.update_exec(8);
+        X.update(8);
 
         println!("HANDLE JOINED");
         let bb: ArcRwSensor<_> = s1.spawn_observer();
@@ -914,12 +1051,12 @@ mod tests {
         assert!(!x.has_changed());
         let mut x = x.map_cached(|x| x + 2);
 
-        s2.update_exec(7);
-        s2.update_exec(10);
+        s2.update(7);
+        s2.update(10);
 
         assert_eq!(*x.pull(), 10);
         for i in 0..100 {
-            k.update_exec(i);
+            k.update(i);
             yield_now();
         }
     }

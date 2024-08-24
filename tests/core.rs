@@ -3,7 +3,7 @@ use futures::executor::block_on;
 use paste::paste;
 use sensor_fuse::callback_manager::{CallbackExecute, ExecData, ExecLock, WakerRegister};
 use sensor_fuse::lock::{self, DataWriteLock};
-use sensor_fuse::{prelude::*, RevisedData};
+use sensor_fuse::{prelude::*, RevisedData, SensorWriterExec};
 use sensor_fuse::{Lockshare, SensorWriter};
 use std::ops::Deref;
 use std::time::Duration;
@@ -318,10 +318,9 @@ where
     L: DataWriteLock<Target = ExecData<usize, E>> + 'static,
     E: WakerRegister + CallbackExecute<usize>,
     for<'b> &'b S: Lockshare<'b, Lock = ExecLock<L, usize, E>>,
-    SensorWriter<S, ExecLock<L, usize, E>>:
-        'static + SensorCallbackExec<usize> + Send + Sync + From<usize>,
+    SensorWriterExec<S, L, usize, E>: 'static + Send + Sync + From<usize>,
 {
-    let sensor_writer = Arc::new(SensorWriter::from(1));
+    let sensor_writer = Arc::new(SensorWriterExec::from(1));
 
     let sensor_writer_clone = sensor_writer.clone();
     let handle = thread::spawn(move || {
@@ -336,7 +335,7 @@ where
         observer.wait_until_changed(),
     ));
     assert!(res.is_err());
-    sensor_writer.update_exec(2);
+    sensor_writer.update(2);
     // Will hang if the waker was not successfully called.
     handle.join().unwrap();
 }
@@ -346,10 +345,9 @@ where
     L: DataWriteLock<Target = ExecData<usize, E>> + 'static,
     E: WakerRegister + CallbackExecute<usize>,
     for<'b> &'b S: Lockshare<'b, Lock = ExecLock<L, usize, E>>,
-    SensorWriter<S, ExecLock<L, usize, E>>:
-        'static + SensorCallbackExec<usize> + Send + Sync + From<usize>,
+    SensorWriterExec<S, L, usize, E>: 'static + Send + Sync + From<usize>,
 {
-    let sensor_writer = Arc::new(SensorWriter::from(1));
+    let sensor_writer = Arc::new(SensorWriterExec::from(1));
 
     let sensor_writer_clone = sensor_writer.clone();
     let handle = thread::spawn(move || {
@@ -366,7 +364,7 @@ where
         observer.wait_for(|x| *x % 2 == 0),
     ));
     assert!(res.is_err());
-    sensor_writer.update_exec(2);
+    sensor_writer.update(2);
     // Will hang if the waker was not successfully called.
     handle.join().unwrap();
 }
