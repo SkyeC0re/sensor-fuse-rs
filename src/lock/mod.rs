@@ -10,7 +10,7 @@ use std::{
 use derived_deref::{Deref, DerefMut};
 
 use crate::{
-    callback_manager::ExecLock, RevisedData, SensorObserver, SensorObserverExec, SensorWriter,
+    callback::ExecLock, RevisedData, SensorObserver, SensorObserverExec, SensorWriter,
     SensorWriterExec,
 };
 

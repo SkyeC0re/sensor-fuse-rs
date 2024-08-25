@@ -3,7 +3,7 @@ use std::{cell::UnsafeCell, sync::Arc};
 use parking_lot;
 
 use crate::{
-    callback_manager::standard::VecBoxManager, DataReadLock, DataWriteLock, ExecData, ExecLock,
+    callback::vec_box::VecBoxManager, DataReadLock, DataWriteLock, ExecData, ExecLock,
     ReadGuardSpecifier, RevisedData, SensorWriter, SensorWriterExec,
 };
 

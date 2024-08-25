@@ -50,9 +50,7 @@ impl<T> CallbackExecute<T> for VecBoxManager<T> {
     }
 }
 
-impl<T, F: 'static + Send + FnMut(&T) -> bool> CallbackRegister<'static, F, T>
-    for VecBoxManager<T>
-{
+impl<T, F: 'static + Send + FnMut(&T) -> bool> CallbackRegister<F, T> for VecBoxManager<T> {
     fn register(&mut self, f: F) {
         self.callbacks.push(Box::new(f));
     }

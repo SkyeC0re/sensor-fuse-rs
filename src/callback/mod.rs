@@ -6,14 +6,14 @@ use std::{
 
 use crate::lock::{DataReadLock, DataWriteLock, ReadGuardSpecifier};
 
-pub mod standard;
+pub mod vec_box;
 
 pub trait CallbackExecute<T> {
     /// Wake all pending tasks and execute all registered callbacks. All callbacks that returned `false` are dropped.
     fn callback(&mut self, value: &T);
 }
 
-pub trait CallbackRegister<'req, F: 'req + FnMut(&T) -> bool, T> {
+pub trait CallbackRegister<F: FnMut(&T) -> bool, T> {
     /// Register a function on the callback manager's execution queue.
     fn register(&mut self, f: F);
 }
