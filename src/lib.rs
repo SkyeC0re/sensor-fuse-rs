@@ -77,29 +77,6 @@ where
     }
 }
 
-// impl<S, L> SensorWriter<S, L>
-// where
-//     for<'a> &'a S: Lockshare<'a, Lock = L>,
-// {
-//     #[inline(always)]
-//     pub fn spawn_referenced_observer(&self) -> SensorObserver<&'_ RevisedData<L>, L> {
-//         let inner = self.0.share_elided_ref();
-//         SensorObserver {
-//             inner,
-//             version: inner.version(),
-//         }
-//     }
-
-//     #[inline(always)]
-//     pub fn spawn_observer(&self) -> SensorObserver<<&'_ S as Lockshare>::Shared, L> {
-//         let inner = self.0.share_lock();
-//         SensorObserver {
-//             version: inner.version(),
-//             inner,
-//         }
-//     }
-// }
-
 #[repr(transparent)]
 pub struct SensorWriterExec<S, L, T, E>(S)
 where
@@ -175,17 +152,6 @@ where
     inner: R,
     version: usize,
 }
-
-// impl<R, L> SensorObserver<R, L>
-// where
-//     R: Deref<Target = RevisedData<L>>,
-// {
-//     /// Returns true once all upstream writers have disconnected.
-//     #[inline(always)]
-//     pub fn is_closed(&self) -> bool {
-//         self.inner.version() & CLOSED_BIT == CLOSED_BIT
-//     }
-// }
 
 impl<R, L> Clone for SensorObserver<R, L>
 where
