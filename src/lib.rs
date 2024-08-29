@@ -341,7 +341,7 @@ where
 impl<S, L, T, E, F> RegisterFunction<T, F> for SensorWriterExec<S, L, T, E>
 where
     L: DataWriteLock<Target = ExecData<T, E>>,
-    E: CallbackRegister<F, T> + CallbackExecute<T>,
+    E: CallbackRegister<T, F> + CallbackExecute<T>,
     F: FnMut(&T) -> bool,
     for<'b> &'b S: Lockshare<'b, Lock = ExecLock<L, T, E>>,
 {
@@ -479,7 +479,7 @@ impl<R, L, T, E, F: FnMut(&T) -> bool> RegisterFunction<T, F>
     for SensorObserver<R, ExecLock<L, T, E>>
 where
     L: DataWriteLock<Target = ExecData<T, E>>,
-    E: CallbackRegister<F, T> + CallbackExecute<T>,
+    E: CallbackRegister<T, F> + CallbackExecute<T>,
     R: Deref<Target = RevisedData<ExecLock<L, T, E>>>,
 {
     fn register(&self, f: F) {

@@ -13,7 +13,7 @@ pub trait CallbackExecute<T> {
     fn callback(&mut self, value: &T);
 }
 
-pub trait CallbackRegister<F: FnMut(&T) -> bool, T> {
+pub trait CallbackRegister<T, F: FnMut(&T) -> bool> {
     /// Register a function on the callback manager's execution queue.
     fn register(&mut self, f: F);
 }

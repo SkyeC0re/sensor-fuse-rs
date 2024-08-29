@@ -403,7 +403,7 @@ where
 fn test_callbacks<W, L, E>()
 where
     L: DataWriteLock<Target = ExecData<usize, E>>,
-    E: CallbackRegister<Box<dyn Send + FnMut(&usize) -> bool>, usize> + CallbackExecute<usize>,
+    E: CallbackRegister<usize, Box<dyn Send + FnMut(&usize) -> bool>> + CallbackExecute<usize>,
     W: SensorWrite<usize>
         + From<usize>
         + SensorWrite<usize, Lock = ExecLock<L, usize, E>>
