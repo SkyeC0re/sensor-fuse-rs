@@ -1,4 +1,5 @@
 use async_std::future::timeout;
+use async_std::sync;
 use futures::executor::block_on;
 use paste::paste;
 use sensor_fuse::callback::{CallbackExecute, ExecData, ExecLock, WakerRegister};
@@ -8,6 +9,7 @@ use sensor_fuse::{Lockshare, SensorWriter};
 use std::ops::Deref;
 use std::time::Duration;
 use std::{sync::Arc, thread};
+use tokio::sync::watch;
 
 macro_rules! test_core_with_owned_observer {
     ($prefix:ident, $sensor_writer:ty) => {
@@ -60,14 +62,14 @@ macro_rules! test_core_exec {
     ($prefix:ident, $sensor_writer:ty) => {
         paste! {
             #[test]
-            fn [<$prefix _test_wait_until_changed>]() {
-                test_wait_until_changed::<$sensor_writer, _, _>();
+            fn [<$prefix _test_async_waiting>]() {
+                test_async_waiting::<$sensor_writer, _, _>();
             }
 
-            #[test]
-            fn [<$prefix _test_wait_for>]() {
-                test_wait_for::<$sensor_writer, _, _>();
-            }
+            // #[test]
+            // fn [<$prefix _test_wait_for>]() {
+            //     test_wait_for::<$sensor_writer, _, _>();
+            // }
         }
     };
 }
@@ -300,7 +302,7 @@ where
     assert_eq!(*observer.pull(), 1);
 }
 
-fn test_wait_until_changed<S, L, E>()
+fn test_async_waiting<S, L, E>()
 where
     L: DataWriteLock<Target = ExecData<usize, E>> + 'static,
     E: WakerRegister + CallbackExecute<usize>,
@@ -308,53 +310,44 @@ where
     SensorWriterExec<S, L, usize, E>:
         'static + Send + Sync + From<usize> + SensorWrite<usize, Lock = ExecLock<L, usize, E>>,
 {
+    let sync_send = watch::Sender::new(());
+    let mut sync_recv = sync_send.subscribe();
     let sensor_writer = Arc::new(SensorWriterExec::from(1));
 
     let sensor_writer_clone = sensor_writer.clone();
     let handle = thread::spawn(move || {
-        let observer = sensor_writer_clone.spawn_observer();
-        block_on(observer.wait_until_changed());
-        assert!(observer.has_changed());
-    });
+        let _ = block_on(timeout(Duration::from_secs(1), sync_recv.changed()))
+            .expect("Timeout waiting for initial confirmation");
 
-    let observer = sensor_writer.spawn_observer();
-    let res = block_on(timeout(
-        Duration::from_millis(10),
-        observer.wait_until_changed(),
-    ));
-    assert!(res.is_err());
-    sensor_writer.update(2);
-    // Will hang if the waker was not successfully called.
-    handle.join().unwrap();
-}
+        sensor_writer_clone.update(5);
 
-fn test_wait_for<S, L, E>()
-where
-    L: DataWriteLock<Target = ExecData<usize, E>> + 'static,
-    E: WakerRegister + CallbackExecute<usize>,
-    for<'b> &'b S: Lockshare<'b, Lock = ExecLock<L, usize, E>>,
-    SensorWriterExec<S, L, usize, E>:
-        'static + Send + Sync + From<usize> + SensorWrite<usize, Lock = ExecLock<L, usize, E>>,
-{
-    let sensor_writer = Arc::new(SensorWriterExec::<S, L, usize, E>::from(1));
+        let _ = block_on(timeout(Duration::from_secs(1), sync_recv.changed()))
+            .expect("Timeout waiting for secondary confirmation");
 
-    let sensor_writer_clone = sensor_writer.clone();
-    let handle = thread::spawn(move || {
-        let mut observer = sensor_writer_clone.spawn_observer();
-        let value: usize = *block_on(observer.wait_for(|x| *x % 2 == 0));
-        assert_eq!(value, 2);
-        // Value should have been marked as seen.
-        assert!(!observer.has_changed());
+        sensor_writer_clone.modify_with(|x| *x += 1);
     });
 
     let mut observer = sensor_writer.spawn_observer();
-    let res = block_on(timeout(
-        Duration::from_millis(10),
-        observer.wait_for(|x| *x % 2 == 0),
-    ));
-    assert!(res.is_err());
-    sensor_writer.update(2);
-    // Will hang if the waker was not successfully called.
+    sync_send.send_replace(());
+    block_on(timeout(
+        Duration::from_secs(1),
+        observer.wait_until_changed(),
+    ))
+    .expect("Timeout occured waiting for first update.");
+
+    assert!(observer.has_changed());
+    assert_eq!(*observer.pull_updated(), 5);
+
+    sync_send.send_replace(());
+    block_on(timeout(
+        Duration::from_secs(1),
+        observer.wait_for(|x| *x == 6),
+    ))
+    .expect("Timeout occured waiting for second update.");
+
+    assert!(!observer.has_changed());
+    assert_eq!(*observer.pull(), 6);
+
     handle.join().unwrap();
 }
 
@@ -371,9 +364,13 @@ test_core_with_owned_observer!(pl_arc_mtx, lock::parking_lot::ArcMutexSensorWrit
 test_core!(pl_rwl_exec, lock::parking_lot::RwSensorWriterExec<_>);
 test_core_exec!(pl_rwl_exec, lock::parking_lot::RwSensorDataExec<_>);
 
-// test_core_exec!(pl_arc_rwl_exec, Arc<lock::parking_lot::RwSensorDataExec<_>>);
+test_core!(pl_arc_rwl_exec, lock::parking_lot::ArcRwSensorWriterExec<_>);
 
-// test_core_exec!(pl_mtx_exec, lock::parking_lot::MutexSensorDataExec<_>);
+test_core_with_owned_observer!(pl_arc_rwl_exec, lock::parking_lot::ArcMutexSensorWriter<_>);
+test_core_exec!(pl_arc_rwl_exec, Arc<lock::parking_lot::RwSensorDataExec<_>>);
+
+test_core!(pl_mtx_exec, lock::parking_lot::MutexSensorWriterExec<_>);
+test_core_exec!(pl_mtx_exec, lock::parking_lot::MutexSensorDataExec<_>);
 
 // test_core_exec!(
 //     pl_arc_mtx_exec,
