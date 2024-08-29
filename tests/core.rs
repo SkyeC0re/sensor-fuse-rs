@@ -1,11 +1,10 @@
 use async_std::future::timeout;
-use async_std::sync;
 use futures::executor::block_on;
 use paste::paste;
-use sensor_fuse::callback::{CallbackExecute, ExecData, ExecLock, WakerRegister};
-use sensor_fuse::lock::{self, DataWriteLock, ReadGuardSpecifier};
-use sensor_fuse::{prelude::*, RevisedData, SensorWriterExec};
-use sensor_fuse::{Lockshare, SensorWriter};
+use sensor_fuse::callback::{CallbackExecute, CallbackRegister, ExecData, ExecLock, WakerRegister};
+use sensor_fuse::lock::{self, DataWriteLock};
+use sensor_fuse::{prelude::*, RevisedData};
+use sensor_fuse::{Lockshare, SensorObserver};
 use std::ops::Deref;
 use std::time::Duration;
 use std::{sync::Arc, thread};
@@ -26,13 +25,18 @@ macro_rules! test_core {
     ($prefix:ident, $sensor_writer:ty) => {
         paste! {
             #[test]
-            fn [<$prefix _basic_sensor_observation_synced_10_1000>]() {
-                test_basic_sensor_observation_synced::<$sensor_writer>(10, 1000);
+            fn [<$prefix _basic_sensor_observation>]() {
+                test_basic_sensor_observation::<$sensor_writer>();
             }
 
             #[test]
-            fn [<$prefix _basic_sensor_observation_unsynced_10_1000>]() {
-                test_basic_sensor_observation_unsynced::<$sensor_writer>(10, 1000);
+            fn [<$prefix _basic_sensor_observation_parallel_synced_10_1000>]() {
+                test_basic_sensor_observation_parallel_synced::<$sensor_writer>(10, 1000);
+            }
+
+            #[test]
+            fn [<$prefix _basic_sensor_observation_parallel_unsynced_10_1000>]() {
+                test_basic_sensor_observation_parallel_unsynced::<$sensor_writer>(10, 1000);
             }
 
             #[test]
@@ -66,15 +70,57 @@ macro_rules! test_core_exec {
                 test_async_waiting::<$sensor_writer, _, _>();
             }
 
-            // #[test]
-            // fn [<$prefix _test_wait_for>]() {
-            //     test_wait_for::<$sensor_writer, _, _>();
-            // }
+            #[test]
+            fn [<$prefix _test_callbacks>]() {
+                test_callbacks::<$sensor_writer, _, _>();
+            }
         }
     };
 }
 
-fn test_basic_sensor_observation_synced<W>(num_threads: usize, num_updates: usize)
+fn test_basic_sensor_observation<W>()
+where
+    W: SensorWrite<usize> + 'static + Send + Sync + From<usize>,
+    for<'a> SensorObserver<<W::LockshareStrategy<'a> as Lockshare<'a>>::Shared, W::Lock>: Clone,
+{
+    let sensor_writer = W::from(0);
+
+    let mut observers: Vec<Box<dyn SensorObserve<Lock = W::Lock>>> = Vec::new();
+
+    let observer = sensor_writer.spawn_observer();
+    observers.push(Box::new(observer.clone()));
+    observers.push(Box::new(observer));
+    let ref_observer = sensor_writer.spawn_referenced_observer();
+    observers.push(Box::new(ref_observer.clone()));
+    observers.push(Box::new(ref_observer));
+
+    *sensor_writer.write() = 1;
+    for observer in &mut observers {
+        assert!(!observer.has_changed());
+        assert_eq!(*observer.pull(), 1);
+    }
+
+    sensor_writer.mark_all_unseen();
+    for observer in &mut observers {
+        assert!(observer.has_changed());
+    }
+
+    sensor_writer.update(2);
+    for observer in &mut observers {
+        assert!(observer.has_changed());
+        assert_eq!(*observer.pull(), 2);
+    }
+
+    sensor_writer.modify_with(|x| *x += 1);
+    for observer in &mut observers {
+        assert!(observer.has_changed());
+        assert_eq!(*observer.pull_updated(), 3);
+    }
+
+    assert_eq!(*sensor_writer.read(), 3);
+}
+
+fn test_basic_sensor_observation_parallel_synced<W>(num_threads: usize, num_updates: usize)
 where
     W: SensorWrite<usize> + 'static + Send + Sync + From<usize>,
 {
@@ -145,7 +191,7 @@ where
     });
 }
 
-fn test_basic_sensor_observation_unsynced<W>(num_threads: usize, num_updates: usize)
+fn test_basic_sensor_observation_parallel_unsynced<W>(num_threads: usize, num_updates: usize)
 where
     W: SensorWrite<usize> + 'static + Send + Sync + From<usize>,
 {
@@ -291,9 +337,9 @@ where
 
 fn test_closed<W, R>()
 where
-    R: Deref<Target = RevisedData<W::Lock>> + 'static,
+    R: Deref<Target = RevisedData<W::Lock>>,
     for<'a> W::LockshareStrategy<'a>: Lockshare<'a, Shared = R>,
-    W: SensorWrite<usize> + 'static + From<usize>,
+    W: SensorWrite<usize> + From<usize>,
 {
     let sensor_writer = W::from(1);
     let mut observer = sensor_writer.spawn_observer();
@@ -302,17 +348,20 @@ where
     assert_eq!(*observer.pull(), 1);
 }
 
-fn test_async_waiting<S, L, E>()
+fn test_async_waiting<W, L, E>()
 where
-    L: DataWriteLock<Target = ExecData<usize, E>> + 'static,
+    L: DataWriteLock<Target = ExecData<usize, E>>,
     E: WakerRegister + CallbackExecute<usize>,
-    for<'b> &'b S: Lockshare<'b, Lock = ExecLock<L, usize, E>>,
-    SensorWriterExec<S, L, usize, E>:
-        'static + Send + Sync + From<usize> + SensorWrite<usize, Lock = ExecLock<L, usize, E>>,
+    W: SensorWrite<usize>
+        + 'static
+        + Send
+        + Sync
+        + From<usize>
+        + SensorWrite<usize, Lock = ExecLock<L, usize, E>>,
 {
     let sync_send = watch::Sender::new(());
     let mut sync_recv = sync_send.subscribe();
-    let sensor_writer = Arc::new(SensorWriterExec::from(1));
+    let sensor_writer = Arc::new(W::from(1));
 
     let sensor_writer_clone = sensor_writer.clone();
     let handle = thread::spawn(move || {
@@ -327,7 +376,7 @@ where
         sensor_writer_clone.modify_with(|x| *x += 1);
     });
 
-    let mut observer = sensor_writer.spawn_observer();
+    let mut observer = sensor_writer.as_ref().spawn_observer();
     sync_send.send_replace(());
     block_on(timeout(
         Duration::from_secs(1),
@@ -351,6 +400,82 @@ where
     handle.join().unwrap();
 }
 
+fn test_callbacks<W, L, E>()
+where
+    L: DataWriteLock<Target = ExecData<usize, E>>,
+    E: CallbackRegister<Box<dyn Send + FnMut(&usize) -> bool>, usize> + CallbackExecute<usize>,
+    W: SensorWrite<usize>
+        + From<usize>
+        + SensorWrite<usize, Lock = ExecLock<L, usize, E>>
+        + RegisterFunction<usize, Box<dyn Send + FnMut(&usize) -> bool>>,
+{
+    let sensor_writer = W::from(1);
+    let writer_callback_state = Arc::new(parking_lot::Mutex::new(1));
+    let observer_callback_state = Arc::new(parking_lot::Mutex::new(1));
+
+    let writer_callback_state_clone = writer_callback_state.clone();
+    sensor_writer.register(Box::new(move |x| {
+        let mut guard = writer_callback_state_clone.as_ref().lock();
+        if *guard == 0 {
+            return false;
+        }
+
+        *guard = *x;
+        return true;
+    }));
+    let observer = sensor_writer.spawn_observer();
+    let observer_callback_state_clone = observer_callback_state.clone();
+    observer.register(Box::new(move |x| {
+        let mut guard = observer_callback_state_clone.as_ref().lock();
+        if *guard == 0 {
+            return false;
+        }
+
+        *guard = *x;
+
+        return true;
+    }));
+
+    sensor_writer.update(2);
+    println!("{}", writer_callback_state.as_ref().lock());
+    assert_eq!(*writer_callback_state.as_ref().lock(), 2);
+    assert_eq!(*observer_callback_state.as_ref().lock(), 2);
+
+    *sensor_writer.write() = 3;
+    assert_eq!(*writer_callback_state.as_ref().lock(), 2);
+    assert_eq!(*observer_callback_state.as_ref().lock(), 2);
+
+    sensor_writer.mark_all_unseen();
+    assert_eq!(*writer_callback_state.as_ref().lock(), 3);
+    assert_eq!(*observer_callback_state.as_ref().lock(), 3);
+
+    sensor_writer.modify_with(|x| *x += 1);
+    assert_eq!(*writer_callback_state.as_ref().lock(), 4);
+    assert_eq!(*observer_callback_state.as_ref().lock(), 4);
+
+    sensor_writer.update(2);
+    assert_eq!(*writer_callback_state.as_ref().lock(), 2);
+    assert_eq!(*observer_callback_state.as_ref().lock(), 2);
+
+    *sensor_writer.write() = 3;
+    assert_eq!(*writer_callback_state.as_ref().lock(), 2);
+    assert_eq!(*observer_callback_state.as_ref().lock(), 2);
+
+    sensor_writer.mark_all_unseen();
+    assert_eq!(*writer_callback_state.as_ref().lock(), 3);
+    assert_eq!(*observer_callback_state.as_ref().lock(), 3);
+
+    sensor_writer.modify_with(|x| *x += 1);
+    assert_eq!(*writer_callback_state.as_ref().lock(), 4);
+    assert_eq!(*observer_callback_state.as_ref().lock(), 4);
+
+    *writer_callback_state.as_ref().lock() = 0;
+    *observer_callback_state.as_ref().lock() = 0;
+    sensor_writer.update(2);
+    assert_eq!(*writer_callback_state.as_ref().lock(), 0);
+    assert_eq!(*observer_callback_state.as_ref().lock(), 0);
+}
+
 test_core!(pl_rwl, lock::parking_lot::RwSensorWriter<_>);
 
 test_core!(pl_arc_rwl, lock::parking_lot::ArcRwSensorWriter<_>);
@@ -362,15 +487,15 @@ test_core!(pl_arc_mtx, lock::parking_lot::ArcMutexSensorWriter<_>);
 test_core_with_owned_observer!(pl_arc_mtx, lock::parking_lot::ArcMutexSensorWriter<_>);
 
 test_core!(pl_rwl_exec, lock::parking_lot::RwSensorWriterExec<_>);
-test_core_exec!(pl_rwl_exec, lock::parking_lot::RwSensorDataExec<_>);
+test_core_exec!(pl_rwl_exec, lock::parking_lot::RwSensorWriterExec<_>);
 
 test_core!(pl_arc_rwl_exec, lock::parking_lot::ArcRwSensorWriterExec<_>);
 
 test_core_with_owned_observer!(pl_arc_rwl_exec, lock::parking_lot::ArcMutexSensorWriter<_>);
-test_core_exec!(pl_arc_rwl_exec, Arc<lock::parking_lot::RwSensorDataExec<_>>);
+test_core_exec!(pl_arc_rwl_exec, lock::parking_lot::ArcRwSensorWriterExec<_>);
 
 test_core!(pl_mtx_exec, lock::parking_lot::MutexSensorWriterExec<_>);
-test_core_exec!(pl_mtx_exec, lock::parking_lot::MutexSensorDataExec<_>);
+test_core_exec!(pl_mtx_exec, lock::parking_lot::MutexSensorWriterExec<_>);
 
 // test_core_exec!(
 //     pl_arc_mtx_exec,

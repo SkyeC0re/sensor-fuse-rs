@@ -365,16 +365,14 @@ where
     }
 }
 
-pub trait RegisterFunction<S, L, T, E, F>
+pub trait RegisterFunction<T, F>
 where
-    L: DataWriteLock<Target = ExecData<T, E>>,
-    E: CallbackRegister<F, T> + CallbackExecute<T>,
     F: FnMut(&T) -> bool,
 {
     fn register(&self, f: F);
 }
 
-impl<'a, S, L, T, E, F> RegisterFunction<S, L, T, E, F> for SensorWriterExec<S, L, T, E>
+impl<S, L, T, E, F> RegisterFunction<T, F> for SensorWriterExec<S, L, T, E>
 where
     L: DataWriteLock<Target = ExecData<T, E>>,
     E: CallbackRegister<F, T> + CallbackExecute<T>,
@@ -491,7 +489,7 @@ where
     }
 }
 
-impl<'a, R, L, T, E> SensorObserver<R, ExecLock<L, T, E>>
+impl<R, L, T, E> SensorObserver<R, ExecLock<L, T, E>>
 where
     L: DataWriteLock<Target = ExecData<T, E>>,
     R: Deref<Target = RevisedData<ExecLock<L, T, E>>>,
@@ -511,7 +509,7 @@ where
         WaitForFuture(self, f, PhantomData)
     }
 }
-impl<'a, R, L, T, E, F: FnMut(&T) -> bool> RegisterFunction<R, L, T, E, F>
+impl<R, L, T, E, F: FnMut(&T) -> bool> RegisterFunction<T, F>
     for SensorObserver<R, ExecLock<L, T, E>>
 where
     L: DataWriteLock<Target = ExecData<T, E>>,
