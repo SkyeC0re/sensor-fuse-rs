@@ -121,32 +121,32 @@ where
     }
 }
 
-impl<S, L, T, E> SensorWriterExec<S, L, T, E>
-where
-    L: DataWriteLock<Target = ExecData<T, E>>,
-    E: CallbackExecute<T>,
-    for<'a> &'a S: Lockshare<'a, Lock = ExecLock<L, T, E>>,
-{
-    #[inline(always)]
-    pub fn spawn_referenced_observer(
-        &self,
-    ) -> SensorObserverExec<&'_ RevisedData<ExecLock<L, T, E>>, L, T, E> {
-        let inner = self.0.share_elided_ref();
-        SensorObserverExec {
-            inner,
-            version: inner.version(),
-        }
-    }
+// impl<S, L, T, E> SensorWriterExec<S, L, T, E>
+// where
+//     L: DataWriteLock<Target = ExecData<T, E>>,
+//     E: CallbackExecute<T>,
+//     for<'a> &'a S: Lockshare<'a, Lock = ExecLock<L, T, E>>,
+// {
+//     #[inline(always)]
+//     pub fn spawn_referenced_observer(
+//         &self,
+//     ) -> SensorObserverExec<&'_ RevisedData<ExecLock<L, T, E>>, L, T, E> {
+//         let inner = self.0.share_elided_ref();
+//         SensorObserverExec {
+//             inner,
+//             version: inner.version(),
+//         }
+//     }
 
-    #[inline(always)]
-    pub fn spawn_observer(&self) -> SensorObserverExec<<&'_ S as Lockshare>::Shared, L, T, E> {
-        let inner = self.0.share_lock();
-        SensorObserverExec {
-            version: inner.version(),
-            inner,
-        }
-    }
-}
+//     #[inline(always)]
+//     pub fn spawn_observer(&self) -> SensorObserverExec<<&'_ S as Lockshare>::Shared, L, T, E> {
+//         let inner = self.0.share_lock();
+//         SensorObserverExec {
+//             version: inner.version(),
+//             inner,
+//         }
+//     }
+// }
 
 pub trait Lockshare<'a> {
     type Lock: DataWriteLock;
@@ -203,16 +203,16 @@ where
     version: usize,
 }
 
-impl<R, L> SensorObserver<R, L>
-where
-    R: Deref<Target = RevisedData<L>>,
-{
-    /// Returns true once all upstream writers have disconnected.
-    #[inline(always)]
-    pub fn is_closed(&self) -> bool {
-        self.inner.version() & CLOSED_BIT == CLOSED_BIT
-    }
-}
+// impl<R, L> SensorObserver<R, L>
+// where
+//     R: Deref<Target = RevisedData<L>>,
+// {
+//     /// Returns true once all upstream writers have disconnected.
+//     #[inline(always)]
+//     pub fn is_closed(&self) -> bool {
+//         self.inner.version() & CLOSED_BIT == CLOSED_BIT
+//     }
+// }
 
 impl<R, L> Clone for SensorObserver<R, L>
 where
@@ -236,18 +236,18 @@ where
     version: usize,
 }
 
-impl<R, L, T, E> SensorObserverExec<R, L, T, E>
-where
-    R: Deref<Target = RevisedData<ExecLock<L, T, E>>>,
-    L: DataWriteLock<Target = ExecData<T, E>>,
-    E: CallbackExecute<T>,
-{
-    /// Returns true once all upstream writers have disconnected.
-    #[inline(always)]
-    pub fn is_closed(&self) -> bool {
-        self.inner.version() & CLOSED_BIT == CLOSED_BIT
-    }
-}
+// impl<R, L, T, E> SensorObserverExec<R, L, T, E>
+// where
+//     R: Deref<Target = RevisedData<ExecLock<L, T, E>>>,
+//     L: DataWriteLock<Target = ExecData<T, E>>,
+//     E: CallbackExecute<T>,
+// {
+//     /// Returns true once all upstream writers have disconnected.
+//     #[inline(always)]
+//     pub fn is_closed(&self) -> bool {
+//         self.inner.version() & CLOSED_BIT == CLOSED_BIT
+//     }
+// }
 
 impl<R, L, T, E> Clone for SensorObserverExec<R, L, T, E>
 where
@@ -265,6 +265,9 @@ where
 
 pub trait SensorWrite<T> {
     type Lock: DataWriteLock<Target = T>;
+    type LockshareStrategy<'a>: Lockshare<'a, Lock = Self::Lock>
+    where
+        Self: 'a;
 
     /// Acquire a read lock on the underlying data.
     fn read(&self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_>;
@@ -276,6 +279,12 @@ pub trait SensorWrite<T> {
     fn modify_with(&self, f: impl FnOnce(&mut T));
     /// Mark the current sensor value as unseen to all observers and notify them.
     fn mark_all_unseen(&self);
+
+    fn spawn_referenced_observer(&self) -> SensorObserver<&RevisedData<Self::Lock>, Self::Lock>;
+
+    fn spawn_observer(
+        &self,
+    ) -> SensorObserver<<Self::LockshareStrategy<'_> as Lockshare>::Shared, Self::Lock>;
 }
 
 impl<S, L: DataWriteLock> SensorWrite<L::Target> for SensorWriter<S, L>
@@ -283,6 +292,9 @@ where
     for<'a> &'a S: Lockshare<'a, Lock = L>,
 {
     type Lock = L;
+    type LockshareStrategy<'a> = &'a S
+    where
+        Self: 'a;
 
     #[inline(always)]
     fn mark_all_unseen(&self) {
@@ -312,6 +324,26 @@ where
     fn write(&self) -> L::WriteGuard<'_> {
         self.0.share_elided_ref().data.write()
     }
+
+    #[allow(refining_impl_trait)]
+    #[inline(always)]
+    fn spawn_referenced_observer(&self) -> SensorObserver<&'_ RevisedData<L>, L> {
+        let inner = self.0.share_elided_ref();
+        SensorObserver {
+            inner,
+            version: inner.version(),
+        }
+    }
+
+    #[allow(refining_impl_trait)]
+    #[inline(always)]
+    fn spawn_observer(&self) -> SensorObserver<<&'_ S as Lockshare>::Shared, L> {
+        let inner = self.0.share_lock();
+        SensorObserver {
+            version: inner.version(),
+            inner,
+        }
+    }
 }
 
 impl<S, L, T, E> SensorWrite<T> for SensorWriterExec<S, L, T, E>
@@ -321,6 +353,9 @@ where
     E: CallbackExecute<T>,
 {
     type Lock = ExecLock<L, T, E>;
+    type LockshareStrategy<'a> = &'a S
+    where
+        Self: 'a;
 
     #[inline(always)]
     fn read(&self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_> {
@@ -370,6 +405,28 @@ where
         // Atomic downgrade just occured. No other modification can happen.
         unsafe { (*guard.exec_manager.get()).callback(&guard.data) };
     }
+
+    #[allow(refining_impl_trait)]
+    #[inline(always)]
+    fn spawn_referenced_observer(
+        &self,
+    ) -> SensorObserver<&'_ RevisedData<ExecLock<L, T, E>>, ExecLock<L, T, E>> {
+        let inner = self.0.share_elided_ref();
+        SensorObserver {
+            inner,
+            version: inner.version(),
+        }
+    }
+
+    #[allow(refining_impl_trait)]
+    #[inline(always)]
+    fn spawn_observer(&self) -> SensorObserver<<&'_ S as Lockshare>::Shared, ExecLock<L, T, E>> {
+        let inner = self.0.share_lock();
+        SensorObserver {
+            version: inner.version(),
+            inner,
+        }
+    }
 }
 
 pub trait RegisterFunction<S, L, T, E, F>
@@ -400,7 +457,7 @@ where
 }
 
 #[repr(transparent)]
-pub struct WaitUntilChangedFuture<'a, R, L, T, E>(Option<&'a SensorObserverExec<R, L, T, E>>)
+pub struct WaitUntilChangedFuture<'a, R, L, T, E>(Option<&'a SensorObserver<R, ExecLock<L, T, E>>>)
 where
     L: DataWriteLock<Target = ExecData<T, E>>,
     R: Deref<Target = RevisedData<ExecLock<L, T, E>>>,
@@ -444,7 +501,7 @@ where
 }
 
 pub struct WaitForFuture<'a, R: 'a, L: 'a, T: 'a, E: 'a, F>(
-    *mut SensorObserverExec<R, L, T, E>,
+    *mut SensorObserver<R, ExecLock<L, T, E>>,
     F,
     PhantomData<&'a ()>,
 )
@@ -498,7 +555,7 @@ where
     }
 }
 
-impl<'a, R, L, T, E> SensorObserverExec<R, L, T, E>
+impl<'a, R, L, T, E> SensorObserver<R, ExecLock<L, T, E>>
 where
     L: DataWriteLock<Target = ExecData<T, E>>,
     R: Deref<Target = RevisedData<ExecLock<L, T, E>>>,
@@ -519,7 +576,7 @@ where
     }
 }
 impl<'a, R, L, T, E, F: FnMut(&T) -> bool> RegisterFunction<R, L, T, E, F>
-    for SensorObserverExec<R, L, T, E>
+    for SensorObserver<R, ExecLock<L, T, E>>
 where
     L: DataWriteLock<Target = ExecData<T, E>>,
     E: CallbackRegister<F, T> + CallbackExecute<T>,
@@ -531,7 +588,7 @@ where
 }
 
 pub trait SensorObserve {
-    type Lock: ReadGuardSpecifier + ?Sized;
+    type Lock: ReadGuardSpecifier;
 
     /// Returns the latest value obtainable by the sensor. The sesnor's internal cache is guaranteed to
     /// be updated after this call if the sensor is cached.
@@ -547,6 +604,8 @@ pub trait SensorObserve {
     fn has_changed(&self) -> bool;
     /// Returns true if `pull` may produce stale results.
     fn is_cached(&self) -> bool;
+    /// Returns true if all upstream writers has been dropped and no more updates can occur.
+    fn is_closed(&self) -> bool;
 
     #[inline(always)]
     fn fuse<B, T, F>(self, other: B, f: F) -> FusedSensorObserver<Self, B, T, F>
@@ -629,6 +688,11 @@ where
     fn is_cached(&self) -> bool {
         false
     }
+
+    #[inline(always)]
+    fn is_closed(&self) -> bool {
+        self.inner.version() & CLOSED_BIT == CLOSED_BIT
+    }
 }
 
 impl<R, L, T, E> SensorObserve for SensorObserverExec<R, L, T, E>
@@ -668,6 +732,11 @@ where
     #[inline(always)]
     fn is_cached(&self) -> bool {
         false
+    }
+
+    #[inline(always)]
+    fn is_closed(&self) -> bool {
+        self.inner.version() & CLOSED_BIT == CLOSED_BIT
     }
 }
 
@@ -737,6 +806,11 @@ where
     fn is_cached(&self) -> bool {
         false
     }
+
+    #[inline(always)]
+    fn is_closed(&self) -> bool {
+        self.a.is_closed()
+    }
 }
 
 pub struct MappedSensorObserverCached<
@@ -802,6 +876,11 @@ where
     #[inline(always)]
     fn is_cached(&self) -> bool {
         true
+    }
+
+    #[inline(always)]
+    fn is_closed(&self) -> bool {
+        self.a.is_closed()
     }
 }
 pub struct FusedSensorObserver<
@@ -887,6 +966,11 @@ where
     #[inline(always)]
     fn is_cached(&self) -> bool {
         self.a.is_cached() || self.b.is_cached()
+    }
+
+    #[inline(always)]
+    fn is_closed(&self) -> bool {
+        self.a.is_closed() && self.b.is_closed()
     }
 }
 
@@ -976,88 +1060,93 @@ where
     fn is_cached(&self) -> bool {
         true
     }
+
+    #[inline(always)]
+    fn is_closed(&self) -> bool {
+        self.a.is_closed() && self.b.is_closed()
+    }
 }
 
-// #[cfg(test)]
-// mod tests {
+#[cfg(test)]
+mod tests {
 
-//     use std::thread::{self, yield_now};
+    use std::thread::{self, yield_now};
 
-//     use futures::executor::block_on;
+    use futures::executor::block_on;
 
-//     use crate::{
-//         lock::parking_lot::{
-//             ArcRwSensor, ArcRwSensorWriter, ArcRwSensorWriterExec, RwSensor, RwSensorExec,
-//             RwSensorWriter, RwSensorWriterExec,
-//         },
-//         prelude::*,
-//         SensorObserve, SensorWrite,
-//     };
+    use crate::{
+        lock::parking_lot::{
+            ArcRwSensor, ArcRwSensorWriter, ArcRwSensorWriterExec, RwSensor, RwSensorExec,
+            RwSensorWriter, RwSensorWriterExec,
+        },
+        prelude::*,
+        SensorObserve, SensorWrite,
+    };
 
-//     static X: RwSensorWriterExec<i32> = RwSensorWriterExec::new(5);
+    static X: RwSensorWriterExec<i32> = RwSensorWriterExec::new(5);
 
-//     #[test]
-//     fn test_1() {
-//         let s1 = ArcRwSensorWriter::new(-3);
-//         let s2 = RwSensorWriterExec::new(5);
-//         let s3 = RwSensorWriter::new(8);
+    #[test]
+    fn test_1() {
+        let s1 = ArcRwSensorWriter::new(-3);
+        let s2 = RwSensorWriterExec::new(5);
+        let s3 = RwSensorWriter::new(8);
 
-//         let b: RwSensorExec<_> = s2.spawn_observer();
-//         let z: RwSensor<_> = s3.spawn_observer();
+        let b = s2.spawn_observer();
+        let z: RwSensor<_> = s3.spawn_observer();
 
-//         let k = ArcRwSensorWriterExec::new(-3);
-//         let mut x_observe = k.spawn_observer();
-//         let handle = thread::spawn(move || {
-//             // let xref = &X;
-//             // let mut zz = xref.spawn_referenced_observer();
-//             println!("WAITING");
-//             loop {
-//                 let x = block_on(x_observe.wait_for(|v| *v % 2 == 0));
-//                 println!("{}", *x)
-//             }
-//         });
+        let k = ArcRwSensorWriterExec::new(-3);
+        let mut x_observe = k.spawn_observer();
+        let handle = thread::spawn(move || {
+            // let xref = &X;
+            // let mut zz = xref.spawn_referenced_observer();
+            println!("WAITING");
+            loop {
+                let x = block_on(x_observe.wait_for(|v| *v % 2 == 0));
+                println!("{}", *x)
+            }
+        });
 
-//         X.update(8);
+        X.update(8);
 
-//         println!("HANDLE JOINED");
-//         let bb: ArcRwSensor<_> = s1.spawn_observer();
-//         let bbc = bb.clone();
+        println!("HANDLE JOINED");
+        let bb: ArcRwSensor<_> = s1.spawn_observer();
+        let bbc = bb.clone();
 
-//         let mut x = s1
-//             .spawn_observer()
-//             .fuse_cached(s2.spawn_observer(), |x, y| *x + *y);
+        let mut x = s1
+            .spawn_observer()
+            .fuse_cached(s2.spawn_observer(), |x, y| *x + *y);
 
-//         s2.register(|new_val| {
-//             println!("New sample {}", new_val);
-//             true
-//         });
+        s2.register(|new_val| {
+            println!("New sample {}", new_val);
+            true
+        });
 
-//         let d = s2.spawn_observer();
+        let d = s2.spawn_observer();
 
-//         d.register(|new_val| {
-//             println!("New sample OBS {}", new_val);
-//             true
-//         });
+        d.register(|new_val| {
+            println!("New sample OBS {}", new_val);
+            true
+        });
 
-//         assert!(!x.has_changed());
+        assert!(!x.has_changed());
 
-//         assert_eq!(*x.pull(), 2);
-//         s1.update(3);
-//         drop(s1);
-//         assert!(x.inner_a().is_closed());
-//         assert!(x.has_changed());
-//         assert_eq!(*x.pull(), 2);
-//         assert_eq!(*x.pull_updated(), 8);
-//         assert!(!x.has_changed());
-//         let mut x = x.map_cached(|x| x + 2);
+        assert_eq!(*x.pull(), 2);
+        s1.update(3);
+        drop(s1);
+        assert!(x.inner_a().is_closed());
+        assert!(x.has_changed());
+        assert_eq!(*x.pull(), 2);
+        assert_eq!(*x.pull_updated(), 8);
+        assert!(!x.has_changed());
+        let mut x = x.map_cached(|x| x + 2);
 
-//         s2.update(7);
-//         s2.update(10);
+        s2.update(7);
+        s2.update(10);
 
-//         assert_eq!(*x.pull(), 10);
-//         for i in 0..100 {
-//             k.update(i);
-//             yield_now();
-//         }
-//     }
-// }
+        assert_eq!(*x.pull(), 10);
+        for i in 0..100 {
+            k.update(i);
+            yield_now();
+        }
+    }
+}
