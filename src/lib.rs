@@ -130,8 +130,10 @@ pub trait SensorWrite<T> {
     /// Mark the current sensor value as unseen to all observers and notify them.
     fn mark_all_unseen(&self);
 
+    /// Spawn an observer by immutably borrowing from the sensor writer.
     fn spawn_referenced_observer(&self) -> SensorObserver<&RevisedData<Self::Lock>, Self::Lock>;
 
+    /// Spawn an observer using the appropriate cloning strategy for the sensor data.
     fn spawn_observer(
         &self,
     ) -> SensorObserver<<Self::LockshareStrategy<'_> as Lockshare>::Shared, Self::Lock>;
@@ -262,7 +264,7 @@ where
     fn update(&self, sample: T) {
         let revised_data = self.0.share_elided_ref();
         let mut guard = revised_data.data.inner.write();
-        **guard = sample;
+        guard.data = sample;
         revised_data.update_version(STEP_SIZE);
         let guard = L::atomic_downgrade(guard);
 

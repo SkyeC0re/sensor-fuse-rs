@@ -28,23 +28,7 @@ pub struct ExecData<T, E: CallbackExecute<T>> {
 }
 
 /// Executor is always mutably borrowed and through an exlusive locking mechanism.
-unsafe impl<T: Sync, E: CallbackExecute<T>> Sync for ExecData<T, E> {}
-
-impl<T, E: CallbackExecute<T>> Deref for ExecData<T, E> {
-    type Target = T;
-
-    #[inline(always)]
-    fn deref(&self) -> &Self::Target {
-        &self.data
-    }
-}
-
-impl<T, E: CallbackExecute<T>> DerefMut for ExecData<T, E> {
-    #[inline(always)]
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.data
-    }
-}
+unsafe impl<T, E: CallbackExecute<T>> Sync for ExecData<T, E> where T: Sync {}
 
 #[repr(transparent)]
 pub struct ExecLock<L, T, E>
@@ -61,32 +45,8 @@ where
     E: CallbackExecute<T>,
 {
     #[inline(always)]
-    pub const fn new(lock: L) -> Self {
+    pub(crate) const fn new(lock: L) -> Self {
         Self { inner: lock }
-    }
-}
-
-impl<L, T, E> Deref for ExecLock<L, T, E>
-where
-    L: DataWriteLock<Target = ExecData<T, E>>,
-    E: CallbackExecute<T>,
-{
-    type Target = L;
-
-    #[inline(always)]
-    fn deref(&self) -> &Self::Target {
-        &self.inner
-    }
-}
-
-impl<L, T, E> DerefMut for ExecLock<L, T, E>
-where
-    L: DataWriteLock<Target = ExecData<T, E>>,
-    E: CallbackExecute<T>,
-{
-    #[inline(always)]
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.inner
     }
 }
 
@@ -108,16 +68,12 @@ where
 {
     #[inline]
     fn read(&self) -> Self::ReadGuard<'_> {
-        ExecGuard {
-            inner: self.inner.read(),
-        }
+        ExecGuard::new(self.inner.read())
     }
 
     #[inline]
     fn try_read(&self) -> Option<Self::ReadGuard<'_>> {
-        self.inner
-            .try_read()
-            .map(|guard| ExecGuard { inner: guard })
+        self.inner.try_read().map(|guard| ExecGuard::new(guard))
     }
 }
 
@@ -132,16 +88,12 @@ where
 
     #[inline]
     fn write(&self) -> Self::WriteGuard<'_> {
-        ExecGuardMut {
-            inner: self.inner.write(),
-        }
+        ExecGuardMut::new(self.inner.write())
     }
 
     #[inline]
     fn try_write(&self) -> Option<Self::WriteGuard<'_>> {
-        self.inner
-            .try_write()
-            .map(|guard| ExecGuardMut { inner: guard })
+        self.inner.try_write().map(|guard| ExecGuardMut::new(guard))
     }
 }
 
