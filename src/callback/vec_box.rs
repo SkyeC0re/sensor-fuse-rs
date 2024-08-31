@@ -1,4 +1,4 @@
-use std::task::Waker;
+use core::task::Waker;
 
 use super::{CallbackExecute, CallbackRegister, WakerRegister};
 

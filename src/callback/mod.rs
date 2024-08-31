@@ -1,4 +1,6 @@
-use std::{
+pub mod vec_box;
+
+use core::{
     cell::UnsafeCell,
     ops::{Deref, DerefMut},
     task::Waker,
@@ -6,15 +8,13 @@ use std::{
 
 use crate::lock::{DataReadLock, DataWriteLock, ReadGuardSpecifier};
 
-pub mod vec_box;
-
 pub trait CallbackExecute<T> {
     /// Wake all pending tasks and execute all registered callbacks. All callbacks that returned `false` are dropped.
     fn callback(&mut self, value: &T);
 }
 
 pub trait CallbackRegister<T, F: FnMut(&T) -> bool> {
-    /// Register a function on the callback manager's execution queue.
+    /// Register a function on the callback manager's execution set.
     fn register(&mut self, f: F);
 }
 

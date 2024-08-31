@@ -13,6 +13,74 @@ use super::{
     AbstractSensorWriter, AbstractSensorWriterExec,
 };
 
+impl<T> ReadGuardSpecifier for parking_lot::RwLock<T> {
+    type Target = T;
+    type ReadGuard<'read> = parking_lot::RwLockReadGuard<'read, T> where T: 'read;
+}
+
+impl<T> DataReadLock for parking_lot::RwLock<T> {
+    #[inline(always)]
+    fn read(&self) -> Self::ReadGuard<'_> {
+        self.read()
+    }
+
+    #[inline(always)]
+    fn try_read(&self) -> Option<Self::ReadGuard<'_>> {
+        self.try_read()
+    }
+}
+
+impl<T> DataWriteLock for parking_lot::RwLock<T> {
+    type WriteGuard<'write> = parking_lot::RwLockWriteGuard<'write, T> where T: 'write;
+
+    #[inline(always)]
+    fn write(&self) -> Self::WriteGuard<'_> {
+        self.write()
+    }
+
+    #[inline(always)]
+    fn try_write(&self) -> Option<Self::WriteGuard<'_>> {
+        self.try_write()
+    }
+
+    #[inline(always)]
+    fn atomic_downgrade(
+        write_guard: Self::WriteGuard<'_>,
+    ) -> impl std::ops::Deref<Target = Self::Target> {
+        parking_lot::RwLockWriteGuard::downgrade(write_guard)
+    }
+}
+
+impl<T> DataWriteLock for parking_lot::Mutex<T> {
+    type WriteGuard<'write> = parking_lot::MutexGuard<'write, T> where T: 'write;
+    #[inline(always)]
+    fn write(&self) -> Self::WriteGuard<'_> {
+        self.lock()
+    }
+
+    #[inline(always)]
+    fn try_write(&self) -> Option<Self::WriteGuard<'_>> {
+        self.try_lock()
+    }
+}
+
+impl<T> ReadGuardSpecifier for parking_lot::Mutex<T> {
+    type Target = T;
+    type ReadGuard<'read> = parking_lot::MutexGuard<'read, T> where T: 'read;
+}
+
+impl<T> DataReadLock for parking_lot::Mutex<T> {
+    #[inline(always)]
+    fn read(&self) -> Self::ReadGuard<'_> {
+        self.lock()
+    }
+
+    #[inline(always)]
+    fn try_read(&self) -> Option<Self::ReadGuard<'_>> {
+        self.try_lock()
+    }
+}
+
 pub type RwSensorData<T> = RevisedData<parking_lot::RwLock<T>>;
 pub type RwSensor<'a, T> = AbstractSensorObserver<'a, parking_lot::RwLock<T>>;
 pub type RwSensorWriter<T> = AbstractSensorWriter<parking_lot::RwLock<T>>;
@@ -198,73 +266,5 @@ impl<T> From<T> for ArcMutexSensorWriterExec<T> {
     #[inline(always)]
     fn from(value: T) -> Self {
         Self::new(value)
-    }
-}
-
-impl<T> ReadGuardSpecifier for parking_lot::RwLock<T> {
-    type Target = T;
-    type ReadGuard<'read> = parking_lot::RwLockReadGuard<'read, T> where T: 'read;
-}
-
-impl<T> DataReadLock for parking_lot::RwLock<T> {
-    #[inline(always)]
-    fn read(&self) -> Self::ReadGuard<'_> {
-        self.read()
-    }
-
-    #[inline(always)]
-    fn try_read(&self) -> Option<Self::ReadGuard<'_>> {
-        self.try_read()
-    }
-}
-
-impl<T> DataWriteLock for parking_lot::RwLock<T> {
-    type WriteGuard<'write> = parking_lot::RwLockWriteGuard<'write, T> where T: 'write;
-
-    #[inline(always)]
-    fn write(&self) -> Self::WriteGuard<'_> {
-        self.write()
-    }
-
-    #[inline(always)]
-    fn try_write(&self) -> Option<Self::WriteGuard<'_>> {
-        self.try_write()
-    }
-
-    #[inline(always)]
-    fn atomic_downgrade(
-        write_guard: Self::WriteGuard<'_>,
-    ) -> impl std::ops::Deref<Target = Self::Target> {
-        parking_lot::RwLockWriteGuard::downgrade(write_guard)
-    }
-}
-
-impl<T> DataWriteLock for parking_lot::Mutex<T> {
-    type WriteGuard<'write> = parking_lot::MutexGuard<'write, T> where T: 'write;
-    #[inline(always)]
-    fn write(&self) -> Self::WriteGuard<'_> {
-        self.lock()
-    }
-
-    #[inline(always)]
-    fn try_write(&self) -> Option<Self::WriteGuard<'_>> {
-        self.try_lock()
-    }
-}
-
-impl<T> ReadGuardSpecifier for parking_lot::Mutex<T> {
-    type Target = T;
-    type ReadGuard<'read> = parking_lot::MutexGuard<'read, T> where T: 'read;
-}
-
-impl<T> DataReadLock for parking_lot::Mutex<T> {
-    #[inline(always)]
-    fn read(&self) -> Self::ReadGuard<'_> {
-        self.lock()
-    }
-
-    #[inline(always)]
-    fn try_read(&self) -> Option<Self::ReadGuard<'_>> {
-        self.try_lock()
     }
 }
