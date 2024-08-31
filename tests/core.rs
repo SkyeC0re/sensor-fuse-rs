@@ -1,11 +1,12 @@
 use async_std::future::timeout;
 use futures::executor::block_on;
 use paste::paste;
-use sensor_fuse::callback::{CallbackExecute, CallbackRegister, ExecData, ExecLock, WakerRegister};
+use sensor_fuse::callback::{CallbackExecute, ExecData, ExecLock, ExecRegister};
 use sensor_fuse::lock::{self, DataWriteLock};
 use sensor_fuse::{prelude::*, RevisedData};
 use sensor_fuse::{Lockshare, SensorObserver};
 use std::ops::Deref;
+use std::task::Waker;
 use std::time::Duration;
 use std::{sync::Arc, thread};
 use tokio::sync::watch;
@@ -379,7 +380,7 @@ where
 fn test_async_waiting<W, L, E>()
 where
     L: DataWriteLock<Target = ExecData<usize, E>>,
-    E: WakerRegister + CallbackExecute<usize>,
+    for<'a> E: ExecRegister<&'a Waker> + CallbackExecute<usize>,
     W: SensorWrite<usize>
         + 'static
         + Send
@@ -431,11 +432,11 @@ where
 fn test_callbacks<W, L, E>()
 where
     L: DataWriteLock<Target = ExecData<usize, E>>,
-    E: CallbackRegister<usize, Box<dyn Send + FnMut(&usize) -> bool>> + CallbackExecute<usize>,
+    E: ExecRegister<Box<dyn Send + FnMut(&usize) -> bool>> + CallbackExecute<usize>,
     W: SensorWrite<usize>
         + From<usize>
         + SensorWrite<usize, Lock = ExecLock<L, usize, E>>
-        + RegisterFunction<usize, Box<dyn Send + FnMut(&usize) -> bool>>,
+        + RegisterFunction<Box<dyn Send + FnMut(&usize) -> bool>>,
 {
     let sensor_writer = W::from(1);
     let writer_callback_state = Arc::new(parking_lot::Mutex::new(1));

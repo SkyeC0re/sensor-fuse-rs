@@ -13,22 +13,37 @@ pub trait CallbackExecute<T> {
     fn callback(&mut self, value: &T);
 }
 
-pub trait CallbackRegister<T, F: FnMut(&T) -> bool> {
-    /// Register a function on the callback manager's execution set.
+impl<T> CallbackExecute<T> for () {
+    #[inline(always)]
+    fn callback(&mut self, _: &T) {}
+}
+
+pub trait ExecRegister<F> {
+    /// Register an executable unit on the callback manager's execution set. In most cases this will usually be a function.
     fn register(&mut self, f: F);
 }
 
-pub trait WakerRegister {
-    fn register_waker(&mut self, w: &Waker);
-}
+// pub trait WakerRegister {
+//     fn register_waker(&mut self, w: &Waker);
+// }
 
 pub struct ExecData<T, E: CallbackExecute<T>> {
-    pub(crate) exec_manager: UnsafeCell<E>,
     pub(crate) data: T,
+    pub(crate) exec_manager: UnsafeCell<E>,
 }
 
 /// Executor is always mutably borrowed and through an exlusive locking mechanism.
 unsafe impl<T, E: CallbackExecute<T>> Sync for ExecData<T, E> where T: Sync {}
+
+impl<T, E: CallbackExecute<T>> ExecData<T, E> {
+    #[inline(always)]
+    pub(crate) const fn new(data: T, exec_manager: E) -> Self {
+        Self {
+            exec_manager: UnsafeCell::new(exec_manager),
+            data,
+        }
+    }
+}
 
 #[repr(transparent)]
 pub struct ExecLock<L, T, E>
