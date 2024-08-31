@@ -240,6 +240,12 @@ where
     sensor_writer.update(2);
     assert!(observer.has_changed());
 
+    observer.mark_seen();
+    assert!(!observer.inner.has_changed());
+
+    observer.mark_unseen();
+    assert!(observer.inner.has_changed());
+
     let cached = *observer.pull();
     assert_eq!(cached, 3);
     let new = *observer.pull_updated();
@@ -258,6 +264,12 @@ where
 
     sensor_writer.update(2);
     assert!(observer.has_changed());
+
+    observer.mark_seen();
+    assert!(!observer.inner.has_changed());
+
+    observer.mark_unseen();
+    assert!(observer.inner.has_changed());
 
     let cached = *observer.pull();
     assert_eq!(cached, 1);
@@ -291,6 +303,14 @@ where
 
     sensor_writer_2.update(3);
     assert!(observer.has_changed());
+
+    observer.mark_seen();
+    assert!(!observer.a.has_changed());
+    assert!(!observer.b.has_changed());
+
+    observer.mark_unseen();
+    assert!(observer.a.has_changed());
+    assert!(observer.b.has_changed());
 
     let cached = *observer.pull();
     assert_eq!(cached, 6);
@@ -326,6 +346,14 @@ where
 
     sensor_writer_2.update(3);
     assert!(observer.has_changed());
+
+    observer.mark_seen();
+    assert!(!observer.a.has_changed());
+    assert!(!observer.b.has_changed());
+
+    observer.mark_unseen();
+    assert!(observer.a.has_changed());
+    assert!(observer.b.has_changed());
 
     let cached = *observer.pull();
     assert_eq!(cached, 4);
@@ -490,14 +518,18 @@ test_core!(pl_rwl_exec, lock::parking_lot::RwSensorWriterExec<_>);
 test_core_exec!(pl_rwl_exec, lock::parking_lot::RwSensorWriterExec<_>);
 
 test_core!(pl_arc_rwl_exec, lock::parking_lot::ArcRwSensorWriterExec<_>);
-
 test_core_with_owned_observer!(pl_arc_rwl_exec, lock::parking_lot::ArcMutexSensorWriter<_>);
 test_core_exec!(pl_arc_rwl_exec, lock::parking_lot::ArcRwSensorWriterExec<_>);
 
 test_core!(pl_mtx_exec, lock::parking_lot::MutexSensorWriterExec<_>);
 test_core_exec!(pl_mtx_exec, lock::parking_lot::MutexSensorWriterExec<_>);
 
-// test_core_exec!(
-//     pl_arc_mtx_exec,
-//     Arc<lock::parking_lot::MutexSensorDataExec<_>>
-// );
+test_core!(
+    pl_arc_mtx_exec,
+    lock::parking_lot::ArcMutexSensorWriterExec<_>
+);
+test_core_with_owned_observer!(pl_arc_mtx_exec, lock::parking_lot::ArcMutexSensorWriter<_>);
+test_core_exec!(
+    pl_arc_mtx_exec,
+    lock::parking_lot::ArcMutexSensorWriterExec<_>
+);
