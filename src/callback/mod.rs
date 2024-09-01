@@ -3,7 +3,6 @@ pub mod vec_box;
 use core::{
     cell::UnsafeCell,
     ops::{Deref, DerefMut},
-    task::Waker,
 };
 
 use crate::lock::{DataReadLock, DataWriteLock, ReadGuardSpecifier};
@@ -22,10 +21,6 @@ pub trait ExecRegister<F> {
     /// Register an executable unit on the callback manager's execution set. In most cases this will usually be a function.
     fn register(&mut self, f: F);
 }
-
-// pub trait WakerRegister {
-//     fn register_waker(&mut self, w: &Waker);
-// }
 
 pub struct ExecData<T, E: CallbackExecute<T>> {
     pub(crate) data: T,

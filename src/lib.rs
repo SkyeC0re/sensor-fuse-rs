@@ -24,7 +24,7 @@ use crate::{
 
 /*** Revised Data ***/
 
-// All credit to [Tokio's Watch Channel](https://docs.rs/tokio/latest/tokio/sync/watch/index.html). If its not broken don't fix it.
+// All credit to [Tokio's Watch Channel](https://docs.rs/tokio/latest/tokio/sync/watch/index.html). If it's not broken don't fix it.
 const CLOSED_BIT: usize = 1;
 const STEP_SIZE: usize = 2;
 
@@ -198,7 +198,8 @@ where
         unsafe { (*guard.exec_manager.get()).callback(&guard.data) };
     }
 
-    #[allow(refining_impl_trait)]
+    /// Spawn an observer by immutably borrowing the sensor writer's data. By definition this observer's scope will be limited
+    /// by the scope of the writer.
     #[inline(always)]
     pub fn spawn_referenced_observer(
         &self,
@@ -210,7 +211,8 @@ where
         }
     }
 
-    #[allow(refining_impl_trait)]
+    /// Spawn an observer by leveraging the sensor writer's sharing strategy. May allow the observer
+    /// to outlive the sensor writer for an appropriate sharing strategy (such as if the writer wraps its data in an `Arc`).
     #[inline(always)]
     pub fn spawn_observer(&self) -> SensorObserver<<&'_ S as Lockshare>::Shared, L, T, E> {
         let inner = self.0.share_lock();
@@ -226,19 +228,20 @@ where
 pub trait SensorObserve {
     type Lock: ReadGuardSpecifier;
 
-    /// Returns the latest value obtainable by the sensor. The sesnor's internal cache is guaranteed to
-    /// be updated after this call if the sensor is cached.
-    fn pull_updated(&mut self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_>;
-    /// Returns the current cached value of the sensor. This is guaranteed to be the latest value if the sensor
-    /// is not cached.
+    /// Returns the latest value obtainable by the sensor. The sensor's internal cache is guaranteed to
+    /// be updated after this call if the sensor is cached. After a call to this function, the obtained
+    /// sensor value will be marked as seen.
     fn pull(&mut self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_>;
+    /// Returns the current cached value of the sensor. This is guaranteed to be the latest value if the sensor
+    /// is not cached. A call to this function will however **not** mark the value as seen, even if the value is not cached.
+    fn borrow(&mut self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_>;
     /// Mark the current sensor data as seen.
     fn mark_seen(&mut self);
     /// Mark the current sensor data as unseen.
     fn mark_unseen(&mut self);
     /// Returns true if the sensor data has been marked as unseen.
     fn has_changed(&self) -> bool;
-    /// Returns true if `pull` may produce stale results.
+    /// Returns true if `borrow` may produce stale results.
     fn is_cached(&self) -> bool;
     /// Returns true if all upstream writers has been dropped and no more updates can occur.
     fn is_closed(&self) -> bool;
@@ -321,12 +324,12 @@ where
     type Lock = ExecLock<L, T, E>;
 
     #[inline(always)]
-    fn pull(&mut self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_> {
+    fn borrow(&mut self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_> {
         self.inner.data.read()
     }
 
     #[inline(always)]
-    fn pull_updated(&mut self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_> {
+    fn pull(&mut self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_> {
         self.mark_seen();
         self.inner.data.read()
     }
@@ -391,13 +394,13 @@ where
     type Lock = OwnedFalseLock<T>;
 
     #[inline]
-    fn pull_updated(&mut self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_> {
-        OwnedData((self.map)(&self.inner.pull_updated()))
+    fn pull(&mut self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_> {
+        OwnedData((self.map)(&self.inner.pull()))
     }
 
     #[inline(always)]
-    fn pull(&mut self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_> {
-        OwnedData((self.map)(&self.inner.pull()))
+    fn borrow(&mut self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_> {
+        OwnedData((self.map)(&self.inner.borrow()))
     }
 
     #[inline(always)]
@@ -443,7 +446,7 @@ where
 {
     #[inline(always)]
     pub fn map_with(mut a: A, mut f: F) -> Self {
-        let cached = FalseReadLock(f(&mut a.pull()));
+        let cached = FalseReadLock(f(&mut a.borrow()));
         Self {
             inner: a,
             cached,
@@ -460,13 +463,13 @@ where
     type Lock = FalseReadLock<T>;
 
     #[inline]
-    fn pull_updated(&mut self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_> {
-        *self.cached = (self.map)(&self.inner.pull_updated());
+    fn pull(&mut self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_> {
+        *self.cached = (self.map)(&self.inner.pull());
         &self.cached
     }
 
     #[inline(always)]
-    fn pull(&mut self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_> {
+    fn borrow(&mut self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_> {
         &self.cached
     }
 
@@ -539,13 +542,13 @@ where
     type Lock = OwnedFalseLock<T>;
 
     #[inline(always)]
-    fn pull_updated(&mut self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_> {
-        OwnedData((self.fuse)(&self.a.pull_updated(), &self.b.pull_updated()))
+    fn pull(&mut self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_> {
+        OwnedData((self.fuse)(&self.a.pull(), &self.b.pull()))
     }
 
     #[inline(always)]
-    fn pull(&mut self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_> {
-        OwnedData((self.fuse)(&self.a.pull(), &self.b.pull()))
+    fn borrow(&mut self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_> {
+        OwnedData((self.fuse)(&self.a.borrow(), &self.b.borrow()))
     }
 
     #[inline(always)]
@@ -599,7 +602,7 @@ where
 {
     #[inline(always)]
     pub fn fuse_with(mut a: A, mut b: B, mut f: F) -> Self {
-        let cache = FalseReadLock(f(&a.pull(), &b.pull()));
+        let cache = FalseReadLock(f(&a.borrow(), &b.borrow()));
         Self {
             a,
             b,
@@ -621,13 +624,13 @@ where
     type Lock = FalseReadLock<T>;
 
     #[inline(always)]
-    fn pull_updated(&mut self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_> {
-        *self.cache = (self.fuse)(&self.a.pull_updated(), &self.b.pull_updated());
+    fn pull(&mut self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_> {
+        *self.cache = (self.fuse)(&self.a.pull(), &self.b.pull());
         &self.cache
     }
 
     #[inline(always)]
-    fn pull(&mut self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_> {
+    fn borrow(&mut self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_> {
         &self.cache
     }
 
@@ -726,7 +729,7 @@ where
     }
 }
 
-pub struct WaitForFuture<'a, R: 'a, L: 'a, T: 'a, E: 'a, F>(
+pub struct WaitForFuture<'a, R, L, T, E, F>(
     *mut SensorObserver<R, L, T, E>,
     F,
     PhantomData<&'a ()>,
@@ -755,7 +758,7 @@ where
         if !self.0.is_null() {
             let mut observer = unsafe { &mut *self.0 };
             let changed = observer.has_changed();
-            let guard = observer.pull_updated();
+            let guard = observer.pull();
             if changed && (self.1)(&guard) {
                 self.0 = null_mut();
                 return Poll::Ready(guard);

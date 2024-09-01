@@ -101,7 +101,7 @@ where
     *sensor_writer.write() = 1;
     for observer in &mut observers {
         assert!(!observer.has_changed());
-        assert_eq!(*observer.pull(), 1);
+        assert_eq!(*observer.borrow(), 1);
     }
 
     sensor_writer.mark_all_unseen();
@@ -112,13 +112,13 @@ where
     sensor_writer.update(2);
     for observer in &mut observers {
         assert!(observer.has_changed());
-        assert_eq!(*observer.pull(), 2);
+        assert_eq!(*observer.borrow(), 2);
     }
 
     sensor_writer.modify_with(|x| *x += 1);
     for observer in &mut observers {
         assert!(observer.has_changed());
-        assert_eq!(*observer.pull_updated(), 3);
+        assert_eq!(*observer.pull(), 3);
     }
 
     assert_eq!(*sensor_writer.read(), 3);
@@ -156,7 +156,7 @@ where
                     panic!("Value change not registered.");
                 }
 
-                if *sensor_observer.pull_updated() != i {
+                if *sensor_observer.pull() != i {
                     *guard = None;
                     drop(guard);
                     writer_start.notify_one();
@@ -218,7 +218,7 @@ where
                 if !sensor_observer.has_changed() {
                     continue;
                 }
-                let new_value = *sensor_observer.pull();
+                let new_value = *sensor_observer.borrow();
                 assert!(last_seen_value <= new_value);
                 if new_value == num_updates {
                     break;
@@ -248,7 +248,7 @@ where
     let mut observer = sensor_writer.spawn_observer().map(|x| x + 1);
 
     assert!(!observer.is_cached());
-    assert_eq!(*observer.pull(), 1);
+    assert_eq!(*observer.borrow(), 1);
 
     sensor_writer.update(2);
     assert!(observer.has_changed());
@@ -259,9 +259,9 @@ where
     observer.mark_unseen();
     assert!(observer.inner.has_changed());
 
-    let cached = *observer.pull();
+    let cached = *observer.borrow();
     assert_eq!(cached, 3);
-    let new = *observer.pull_updated();
+    let new = *observer.pull();
     assert_eq!(new, 3);
 }
 
@@ -276,7 +276,7 @@ where
     let mut observer = sensor_writer.spawn_observer().map_cached(|x| x + 1);
 
     assert!(observer.is_cached());
-    assert_eq!(*observer.pull(), 1);
+    assert_eq!(*observer.borrow(), 1);
 
     sensor_writer.update(2);
     assert!(observer.has_changed());
@@ -287,9 +287,9 @@ where
     observer.mark_unseen();
     assert!(observer.inner.has_changed());
 
-    let cached = *observer.pull();
+    let cached = *observer.borrow();
     assert_eq!(cached, 1);
-    let new = *observer.pull_updated();
+    let new = *observer.pull();
     assert_eq!(new, 3);
 }
 
@@ -308,14 +308,14 @@ where
         .fuse(sensor_writer_2.spawn_observer(), |x, y| x * y);
 
     assert!(!observer.is_cached());
-    assert_eq!(*observer.pull(), 2);
+    assert_eq!(*observer.borrow(), 2);
 
     sensor_writer_1.update(2);
     assert!(observer.has_changed());
 
-    let cached = *observer.pull();
+    let cached = *observer.borrow();
     assert_eq!(cached, 4);
-    let new = *observer.pull_updated();
+    let new = *observer.pull();
     assert_eq!(new, 4);
 
     assert!(!observer.has_changed());
@@ -331,9 +331,9 @@ where
     assert!(observer.a.has_changed());
     assert!(observer.b.has_changed());
 
-    let cached = *observer.pull();
+    let cached = *observer.borrow();
     assert_eq!(cached, 6);
-    let new = *observer.pull_updated();
+    let new = *observer.pull();
     assert_eq!(new, 6);
 
     assert!(!observer.has_changed());
@@ -354,14 +354,14 @@ where
         .fuse_cached(sensor_writer_2.spawn_observer(), |x, y| x * y);
 
     assert!(observer.is_cached());
-    assert_eq!(*observer.pull(), 2);
+    assert_eq!(*observer.borrow(), 2);
 
     sensor_writer_1.update(2);
     assert!(observer.has_changed());
 
-    let cached = *observer.pull();
+    let cached = *observer.borrow();
     assert_eq!(cached, 2);
-    let new = *observer.pull_updated();
+    let new = *observer.pull();
     assert_eq!(new, 4);
 
     assert!(!observer.has_changed());
@@ -377,9 +377,9 @@ where
     assert!(observer.a.has_changed());
     assert!(observer.b.has_changed());
 
-    let cached = *observer.pull();
+    let cached = *observer.borrow();
     assert_eq!(cached, 4);
-    let new = *observer.pull_updated();
+    let new = *observer.pull();
     assert_eq!(new, 6);
 
     assert!(!observer.has_changed());
@@ -397,7 +397,7 @@ where
     let mut observer = sensor_writer.spawn_observer();
     drop(sensor_writer);
     assert!(observer.is_closed());
-    assert_eq!(*observer.pull(), 1);
+    assert_eq!(*observer.borrow(), 1);
 }
 
 fn test_async_waiting<S, L, E>()
@@ -433,7 +433,7 @@ where
     .expect("Timeout occured waiting for first update.");
 
     assert!(observer.has_changed());
-    assert_eq!(*observer.pull_updated(), 5);
+    assert_eq!(*observer.pull(), 5);
 
     sync_send.send_replace(());
     block_on(timeout(
@@ -443,7 +443,7 @@ where
     .expect("Timeout occured waiting for second update.");
 
     assert!(!observer.has_changed());
-    assert_eq!(*observer.pull(), 6);
+    assert_eq!(*observer.borrow(), 6);
 
     handle.join().unwrap();
 }
