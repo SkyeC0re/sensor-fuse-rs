@@ -1,10 +1,12 @@
 use async_std::future::timeout;
 use futures::executor::block_on;
 use paste::paste;
-use sensor_fuse::callback::{CallbackExecute, ExecData, ExecLock, ExecRegister};
-use sensor_fuse::lock::{self, DataWriteLock};
-use sensor_fuse::Lockshare;
-use sensor_fuse::{prelude::*, RevisedData, SensorWriter};
+use sensor_fuse::{
+    callback::{CallbackExecute, ExecData, ExecLock, ExecRegister},
+    lock::{self, DataWriteLock},
+    Lockshare,
+    {prelude::*, RevisedData, SensorWriter},
+};
 use std::ops::Deref;
 use std::task::Waker;
 use std::time::Duration;
