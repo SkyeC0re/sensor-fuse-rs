@@ -118,32 +118,6 @@ where
     }
 }
 
-pub trait SensorWrite<T> {
-    type Lock: DataWriteLock<Target = T>;
-    type LockshareStrategy<'a>: Lockshare<'a, Lock = Self::Lock>
-    where
-        Self: 'a;
-
-    /// Acquire a read lock on the underlying data.
-    fn read(&self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_>;
-    /// Acquire a write lock on the underlying data.
-    fn write(&self) -> <Self::Lock as DataWriteLock>::WriteGuard<'_>;
-    /// Update the sensor value and notify observers.
-    fn update(&self, sample: T);
-    /// Modify the sensor value in place and notify observers.
-    fn modify_with(&self, f: impl FnOnce(&mut T));
-    /// Mark the current sensor value as unseen to all observers and notify them.
-    fn mark_all_unseen(&self);
-
-    /// Spawn an observer by immutably borrowing from the sensor writer.
-    fn spawn_referenced_observer(&self) -> SensorObserver<&RevisedData<Self::Lock>, Self::Lock>;
-
-    /// Spawn an observer using the appropriate cloning strategy for the sensor data.
-    fn spawn_observer(
-        &self,
-    ) -> SensorObserver<<Self::LockshareStrategy<'_> as Lockshare>::Shared, Self::Lock>;
-}
-
 /*** Sensor Writing ***/
 
 #[repr(transparent)]
@@ -167,30 +141,27 @@ where
     }
 }
 
-impl<S, L, T, E> SensorWrite<T> for SensorWriter<S, L, T, E>
+impl<S, L, T, E> SensorWriter<S, L, T, E>
 where
     for<'a> &'a S: Lockshare<'a, Lock = ExecLock<L, T, E>>,
     L: DataWriteLock<Target = ExecData<T, E>>,
     E: CallbackExecute<T>,
 {
-    type Lock = ExecLock<L, T, E>;
-    type LockshareStrategy<'a> = &'a S
-    where
-        Self: 'a;
-
+    /// Acquire a read lock on the underlying data.
     #[inline(always)]
-    fn read(&self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_> {
+    pub fn read(&self) -> <ExecLock<L, T, E> as ReadGuardSpecifier>::ReadGuard<'_> {
         self.0.share_elided_ref().data.read()
     }
 
+    /// Acquire a write lock on the underlying data.
     #[inline(always)]
-    fn write(&self) -> <Self::Lock as DataWriteLock>::WriteGuard<'_> {
+    pub fn write(&self) -> <ExecLock<L, T, E> as DataWriteLock>::WriteGuard<'_> {
         self.0.share_elided_ref().data.write()
     }
 
     /// Update the sensor value, notify observers and execute all registered callbacks.
     #[inline]
-    fn update(&self, sample: T) {
+    pub fn update(&self, sample: T) {
         let revised_data = self.0.share_elided_ref();
         let mut guard = revised_data.data.inner.write();
         guard.data = sample;
@@ -203,7 +174,7 @@ where
 
     /// Modify the sensor value in place, notify observers and execute all registered callbacks.
     #[inline]
-    fn modify_with(&self, f: impl FnOnce(&mut T)) {
+    pub fn modify_with(&self, f: impl FnOnce(&mut T)) {
         let revised_data = self.0.share_elided_ref();
         let mut guard = revised_data.data.inner.write();
         f(&mut guard.data);
@@ -218,7 +189,7 @@ where
 
     /// Mark the current sensor value as unseen to all observers, notify them and execute all registered callbacks.
     #[inline]
-    fn mark_all_unseen(&self) {
+    pub fn mark_all_unseen(&self) {
         let revised_data = self.0.share_elided_ref();
         let guard = L::atomic_downgrade(revised_data.data.inner.write());
         revised_data.update_version(STEP_SIZE);
@@ -229,9 +200,9 @@ where
 
     #[allow(refining_impl_trait)]
     #[inline(always)]
-    fn spawn_referenced_observer(
+    pub fn spawn_referenced_observer(
         &self,
-    ) -> SensorObserver<&'_ RevisedData<ExecLock<L, T, E>>, ExecLock<L, T, E>> {
+    ) -> SensorObserver<&'_ RevisedData<ExecLock<L, T, E>>, L, T, E> {
         let inner = self.0.share_elided_ref();
         SensorObserver {
             inner,
@@ -241,7 +212,7 @@ where
 
     #[allow(refining_impl_trait)]
     #[inline(always)]
-    fn spawn_observer(&self) -> SensorObserver<<&'_ S as Lockshare>::Shared, ExecLock<L, T, E>> {
+    pub fn spawn_observer(&self) -> SensorObserver<<&'_ S as Lockshare>::Shared, L, T, E> {
         let inner = self.0.share_lock();
         SensorObserver {
             version: inner.version(),
@@ -317,17 +288,21 @@ pub trait SensorObserve {
     }
 }
 
-pub struct SensorObserver<R, L>
+pub struct SensorObserver<R, L, T, E>
 where
-    R: Deref<Target = RevisedData<L>>,
+    E: CallbackExecute<T>,
+    L: DataWriteLock<Target = ExecData<T, E>>,
+    R: Deref<Target = RevisedData<ExecLock<L, T, E>>>,
 {
     inner: R,
     version: usize,
 }
 
-impl<R, L> Clone for SensorObserver<R, L>
+impl<R, L, T, E> Clone for SensorObserver<R, L, T, E>
 where
-    R: Deref<Target = RevisedData<L>> + Clone,
+    E: CallbackExecute<T>,
+    L: DataWriteLock<Target = ExecData<T, E>>,
+    R: Deref<Target = RevisedData<ExecLock<L, T, E>>> + Clone,
 {
     fn clone(&self) -> Self {
         Self {
@@ -337,12 +312,13 @@ where
     }
 }
 
-impl<T, L, R> SensorObserve for SensorObserver<R, L>
+impl<R, L, T, E> SensorObserve for SensorObserver<R, L, T, E>
 where
-    L: DataReadLock<Target = T>,
-    R: Deref<Target = RevisedData<L>>,
+    E: CallbackExecute<T>,
+    L: DataWriteLock<Target = ExecData<T, E>>,
+    R: Deref<Target = RevisedData<ExecLock<L, T, E>>>,
 {
-    type Lock = L;
+    type Lock = ExecLock<L, T, E>;
 
     #[inline(always)]
     fn pull(&mut self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_> {
@@ -707,7 +683,7 @@ where
 }
 
 #[repr(transparent)]
-pub struct WaitUntilChangedFuture<'a, R, L, T, E>(Option<&'a SensorObserver<R, ExecLock<L, T, E>>>)
+pub struct WaitUntilChangedFuture<'a, R, L, T, E>(Option<&'a SensorObserver<R, L, T, E>>)
 where
     L: DataWriteLock<Target = ExecData<T, E>>,
     R: Deref<Target = RevisedData<ExecLock<L, T, E>>>,
@@ -751,7 +727,7 @@ where
 }
 
 pub struct WaitForFuture<'a, R: 'a, L: 'a, T: 'a, E: 'a, F>(
-    *mut SensorObserver<R, ExecLock<L, T, E>>,
+    *mut SensorObserver<R, L, T, E>,
     F,
     PhantomData<&'a ()>,
 )
@@ -805,7 +781,7 @@ where
     }
 }
 
-impl<R, L, T, E> SensorObserver<R, ExecLock<L, T, E>>
+impl<R, L, T, E> SensorObserver<R, L, T, E>
 where
     L: DataWriteLock<Target = ExecData<T, E>>,
     R: Deref<Target = RevisedData<ExecLock<L, T, E>>>,
@@ -825,12 +801,10 @@ where
         WaitForFuture(self, f, PhantomData)
     }
 }
-impl<R, L, T, E, F> RegisterFunction<F> for SensorObserver<R, ExecLock<L, T, E>>
+impl<R, L, T, E, F> RegisterFunction<F> for SensorObserver<R, L, T, E>
 where
     L: DataWriteLock<Target = ExecData<T, E>>,
-
     for<'b> E: ExecRegister<F> + CallbackExecute<T>,
-
     R: Deref<Target = RevisedData<ExecLock<L, T, E>>>,
 {
     fn register(&self, f: F) {

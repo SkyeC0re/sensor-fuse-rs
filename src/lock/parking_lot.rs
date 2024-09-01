@@ -80,7 +80,7 @@ impl<T> DataReadLock for parking_lot::Mutex<T> {
     }
 }
 
-pub type RwSensorData<T> = RevisedData<parking_lot::RwLock<T>>;
+pub type RwSensorData<T> = RevisedData<ExecLock<parking_lot::RwLock<ExecData<T, ()>>, T, ()>>;
 pub type RwSensor<'a, T> =
     AbstractSensorObserverExec<'a, parking_lot::RwLock<ExecData<T, ()>>, T, ()>;
 pub type RwSensorWriter<T> = AbstractSensorWriterExec<parking_lot::RwLock<ExecData<T, ()>>, T, ()>;
@@ -100,6 +100,8 @@ impl<T> From<T> for RwSensorWriter<T> {
     }
 }
 
+pub type RwSensorDataExec<T> =
+    RevisedData<ExecLock<parking_lot::RwLock<ExecData<T, VecBoxManager<T>>>, T, VecBoxManager<T>>>;
 pub type RwSensorExec<'a, T> = AbstractSensorObserverExec<
     'a,
     parking_lot::RwLock<ExecData<T, VecBoxManager<T>>>,
@@ -127,9 +129,9 @@ impl<T> From<T> for RwSensorWriterExec<T> {
     }
 }
 
+pub type MutexSensorData<T> = RevisedData<ExecLock<parking_lot::Mutex<ExecData<T, ()>>, T, ()>>;
 pub type MutexSensor<'a, T> =
     AbstractSensorObserverExec<'a, parking_lot::Mutex<ExecData<T, ()>>, T, ()>;
-
 pub type MutexSensorWriter<T> =
     AbstractSensorWriterExec<parking_lot::Mutex<ExecData<T, ()>>, T, ()>;
 
@@ -148,6 +150,8 @@ impl<T> From<T> for MutexSensorWriter<T> {
     }
 }
 
+pub type MutexSensorDataExec<T> =
+    RevisedData<ExecLock<parking_lot::Mutex<ExecData<T, VecBoxManager<T>>>, T, VecBoxManager<T>>>;
 pub type MutexSensorExec<'a, T> = AbstractSensorObserverExec<
     'a,
     parking_lot::Mutex<ExecData<T, VecBoxManager<T>>>,
@@ -179,6 +183,8 @@ impl<T> From<T> for MutexSensorWriterExec<T> {
     }
 }
 
+pub type ArcRwSensorData<T> =
+    Arc<RevisedData<ExecLock<parking_lot::RwLock<ExecData<T, ()>>, T, ()>>>;
 pub type ArcRwSensor<T> =
     AbstractArcSensorObserverExec<parking_lot::RwLock<ExecData<T, ()>>, T, ()>;
 pub type ArcRwSensorWriter<T> =
@@ -199,6 +205,9 @@ impl<T> From<T> for ArcRwSensorWriter<T> {
     }
 }
 
+pub type ArcRwSensorDataExec<T> = Arc<
+    RevisedData<ExecLock<parking_lot::RwLock<ExecData<T, VecBoxManager<T>>>, T, VecBoxManager<T>>>,
+>;
 pub type ArcRwSensorExec<T> = AbstractArcSensorObserverExec<
     parking_lot::RwLock<ExecData<T, VecBoxManager<T>>>,
     T,
@@ -225,6 +234,8 @@ impl<T> From<T> for ArcRwSensorWriterExec<T> {
     }
 }
 
+pub type ArcMutexSensorData<T> =
+    Arc<RevisedData<ExecLock<parking_lot::Mutex<ExecData<T, ()>>, T, ()>>>;
 pub type ArcMutexSensor<T> =
     AbstractArcSensorObserverExec<parking_lot::Mutex<ExecData<T, ()>>, T, ()>;
 pub type ArcMutexSensorWriter<T> =
@@ -246,6 +257,9 @@ impl<T> From<T> for ArcMutexSensorWriter<T> {
     }
 }
 
+pub type ArcMutexSensorDataExec<T> = Arc<
+    RevisedData<ExecLock<parking_lot::Mutex<ExecData<T, VecBoxManager<T>>>, T, VecBoxManager<T>>>,
+>;
 pub type ArcMutexSensorExec<T> = AbstractArcSensorObserverExec<
     parking_lot::Mutex<ExecData<T, VecBoxManager<T>>>,
     T,

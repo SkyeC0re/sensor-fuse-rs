@@ -11,16 +11,17 @@ use derived_deref::{Deref, DerefMut};
 
 use crate::{callback::ExecLock, RevisedData, SensorObserver, SensorWriter};
 
-pub type AbstractSensorObserver<'a, L> = SensorObserver<&'a RevisedData<L>, L>;
+// pub type AbstractSensorObserver<'a, L, T, E> =
+//     SensorObserver<&'a RevisedData<ExecLock<L, T, E>>, L, T, E>;
 
-pub type AbstractArcSensorObserver<L> = SensorObserver<Arc<RevisedData<L>>, L>;
+// pub type AbstractArcSensorObserver<L, T, E> = SensorObserver<Arc<RevisedData<ExecLock<L, >>, L>;
 
 pub type AbstractSensorObserverExec<'a, L, T, E> =
-    SensorObserver<&'a RevisedData<ExecLock<L, T, E>>, ExecLock<L, T, E>>;
+    SensorObserver<&'a RevisedData<ExecLock<L, T, E>>, L, T, E>;
 pub type AbstractSensorWriterExec<L, T, E> = SensorWriter<RevisedData<ExecLock<L, T, E>>, L, T, E>;
 
 pub type AbstractArcSensorObserverExec<L, T, E> =
-    SensorObserver<Arc<RevisedData<ExecLock<L, T, E>>>, ExecLock<L, T, E>>;
+    SensorObserver<Arc<RevisedData<ExecLock<L, T, E>>>, L, T, E>;
 pub type AbstractArcSensorWriterExec<L, T, E> =
     SensorWriter<Arc<RevisedData<ExecLock<L, T, E>>>, L, T, E>;
 
