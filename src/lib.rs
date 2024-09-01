@@ -1,19 +1,47 @@
+//! # Sensor-Fuse
+//! An unopinionated no-std compatible observer/callback framework for the opinionated user.
+//!
+//! Designed as generalization to [Tokio's watch channel](https://docs.rs/tokio/latest/tokio/sync/watch/index.html), Sensor-Fuse aims
+//! to provide a modular framework for implementing observer or observer + callback patterns. From the perspective of this crate sensor data can
+//! be defined as the following:
+//! - The raw data.
+//! - A callback executor which does some work whenever the raw data is updated.
+//! - An atomic version counter.
+//! - A locking strategy that allows atomic access to the raw data and callback executor.
+//! - An optional heap pointer that wraps all of the above.
+//!
+//! Given this definition, Tokio's watch channel only allows for the generalization of the raw data type, however
+//! Sensor-Fuse additionally allows for the generalization of the callback executor, the locking strategy and optional heap pointer as well. In fact
+//! Tokio's watch channel within this framework is roughly equivalent to selecting `std::sync::RwLock` as the locking strategy,
+//! and the standard `VecBox` executor (the core requirement here being that the executor must be able to accept `Waker`'s) with
+//! an `Arc` pointer wrapping everything.
+//!
+
+#![warn(bad_style)]
+#![warn(missing_docs)]
+#![warn(trivial_casts)]
+#![warn(trivial_numeric_casts)]
+#![warn(unused)]
+#![warn(unused_extern_crates)]
+#![warn(unused_import_braces)]
+#![warn(unused_qualifications)]
+#![warn(unused_results)]
+
 pub mod callback;
 pub mod lock;
 pub mod prelude;
 
 use core::{
-    ops::Deref,
-    sync::atomic::{AtomicUsize, Ordering},
-};
-use std::{
     future::Future,
     marker::PhantomData,
+    ops::Deref,
     ops::DerefMut,
     ptr::null_mut,
-    sync::Arc,
+    sync::atomic::{AtomicUsize, Ordering},
     task::{Poll, Waker},
 };
+#[cfg(feature = "std")]
+use std::sync::Arc;
 
 use crate::{
     callback::{CallbackExecute, ExecData, ExecGuard, ExecLock, ExecRegister},
@@ -100,6 +128,7 @@ where
     }
 }
 
+#[cfg(feature = "std")]
 impl<'a, L> Lockshare<'a> for &'a Arc<RevisedData<L>>
 where
     L: DataWriteLock,

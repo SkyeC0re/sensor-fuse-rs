@@ -1,14 +1,8 @@
-use std::sync::Arc;
-
 use crate::{
-    callback::vec_box::VecBoxManager, DataReadLock, DataWriteLock, ExecData, ExecLock,
-    ReadGuardSpecifier, RevisedData, SensorWriter,
+    DataReadLock, DataWriteLock, ExecData, ExecLock, ReadGuardSpecifier, RevisedData, SensorWriter,
 };
 
-use super::{
-    AbstractArcSensorObserver, AbstractArcSensorWriter, AbstractSensorObserver,
-    AbstractSensorWriter,
-};
+use super::{AbstractSensorObserver, AbstractSensorWriter};
 
 impl<T> ReadGuardSpecifier for std::sync::RwLock<T> {
     type Target = T;
@@ -90,32 +84,6 @@ impl<T> From<T> for RwSensorWriter<T> {
     }
 }
 
-pub type RwSensorDataExec<T> =
-    RevisedData<ExecLock<std::sync::RwLock<ExecData<T, VecBoxManager<T>>>, T, VecBoxManager<T>>>;
-pub type RwSensorExec<'a, T> = AbstractSensorObserver<
-    'a,
-    std::sync::RwLock<ExecData<T, VecBoxManager<T>>>,
-    T,
-    VecBoxManager<T>,
->;
-pub type RwSensorWriterExec<T> =
-    AbstractSensorWriter<std::sync::RwLock<ExecData<T, VecBoxManager<T>>>, T, VecBoxManager<T>>;
-impl<T> RwSensorWriterExec<T> {
-    #[inline(always)]
-    pub const fn new(init: T) -> Self {
-        SensorWriter(RevisedData::new(ExecLock::new(std::sync::RwLock::new(
-            ExecData::new(init, VecBoxManager::new()),
-        ))))
-    }
-}
-
-impl<T> From<T> for RwSensorWriterExec<T> {
-    #[inline(always)]
-    fn from(value: T) -> Self {
-        Self::new(value)
-    }
-}
-
 pub type MutexSensorData<T> = RevisedData<ExecLock<std::sync::Mutex<ExecData<T, ()>>, T, ()>>;
 pub type MutexSensor<'a, T> = AbstractSensorObserver<'a, std::sync::Mutex<ExecData<T, ()>>, T, ()>;
 pub type MutexSensorWriter<T> = AbstractSensorWriter<std::sync::Mutex<ExecData<T, ()>>, T, ()>;
@@ -135,119 +103,175 @@ impl<T> From<T> for MutexSensorWriter<T> {
     }
 }
 
-pub type MutexSensorDataExec<T> =
-    RevisedData<ExecLock<std::sync::Mutex<ExecData<T, VecBoxManager<T>>>, T, VecBoxManager<T>>>;
-pub type MutexSensorExec<'a, T> = AbstractSensorObserver<
-    'a,
-    std::sync::Mutex<ExecData<T, VecBoxManager<T>>>,
-    T,
-    VecBoxManager<T>,
->;
+#[cfg(feature = "std")]
+pub use std_req::*;
+#[cfg(feature = "std")]
+mod std_req {
+    use std::sync::Arc;
 
-pub type MutexSensorWriterExec<T> =
-    AbstractSensorWriter<std::sync::Mutex<ExecData<T, VecBoxManager<T>>>, T, VecBoxManager<T>>;
-impl<T> MutexSensorWriterExec<T> {
-    #[inline(always)]
-    pub const fn new(init: T) -> Self {
-        SensorWriter(RevisedData::new(ExecLock::new(std::sync::Mutex::new(
-            ExecData::new(init, VecBoxManager::new()),
-        ))))
+    use crate::{
+        callback::{vec_box::VecBoxManager, ExecData, ExecLock},
+        lock::{
+            AbstractArcSensorObserver, AbstractArcSensorWriter, AbstractSensorObserver,
+            AbstractSensorWriter,
+        },
+        RevisedData, SensorWriter,
+    };
+
+    pub type RwSensorDataExec<T> = RevisedData<
+        ExecLock<std::sync::RwLock<ExecData<T, VecBoxManager<T>>>, T, VecBoxManager<T>>,
+    >;
+    pub type RwSensorExec<'a, T> = AbstractSensorObserver<
+        'a,
+        std::sync::RwLock<ExecData<T, VecBoxManager<T>>>,
+        T,
+        VecBoxManager<T>,
+    >;
+    pub type RwSensorWriterExec<T> =
+        AbstractSensorWriter<std::sync::RwLock<ExecData<T, VecBoxManager<T>>>, T, VecBoxManager<T>>;
+    impl<T> RwSensorWriterExec<T> {
+        #[inline(always)]
+        pub const fn new(init: T) -> Self {
+            SensorWriter(RevisedData::new(ExecLock::new(std::sync::RwLock::new(
+                ExecData::new(init, VecBoxManager::new()),
+            ))))
+        }
     }
-}
 
-impl<T> From<T> for MutexSensorWriterExec<T> {
-    #[inline(always)]
-    fn from(value: T) -> Self {
-        Self::new(value)
+    impl<T> From<T> for RwSensorWriterExec<T> {
+        #[inline(always)]
+        fn from(value: T) -> Self {
+            Self::new(value)
+        }
     }
-}
 
-pub type ArcRwSensorData<T> = Arc<RevisedData<ExecLock<std::sync::RwLock<ExecData<T, ()>>, T, ()>>>;
-pub type ArcRwSensor<T> = AbstractArcSensorObserver<std::sync::RwLock<ExecData<T, ()>>, T, ()>;
-pub type ArcRwSensorWriter<T> = AbstractArcSensorWriter<std::sync::RwLock<ExecData<T, ()>>, T, ()>;
+    pub type MutexSensorDataExec<T> =
+        RevisedData<ExecLock<std::sync::Mutex<ExecData<T, VecBoxManager<T>>>, T, VecBoxManager<T>>>;
+    pub type MutexSensorExec<'a, T> = AbstractSensorObserver<
+        'a,
+        std::sync::Mutex<ExecData<T, VecBoxManager<T>>>,
+        T,
+        VecBoxManager<T>,
+    >;
 
-impl<T> ArcRwSensorWriter<T> {
-    #[inline(always)]
-    pub fn new(init: T) -> Self {
-        SensorWriter(Arc::new(RevisedData::new(ExecLock::new(
-            std::sync::RwLock::new(ExecData::new(init, ())),
-        ))))
+    pub type MutexSensorWriterExec<T> =
+        AbstractSensorWriter<std::sync::Mutex<ExecData<T, VecBoxManager<T>>>, T, VecBoxManager<T>>;
+    impl<T> MutexSensorWriterExec<T> {
+        #[inline(always)]
+        pub const fn new(init: T) -> Self {
+            SensorWriter(RevisedData::new(ExecLock::new(std::sync::Mutex::new(
+                ExecData::new(init, VecBoxManager::new()),
+            ))))
+        }
     }
-}
-impl<T> From<T> for ArcRwSensorWriter<T> {
-    #[inline(always)]
-    fn from(value: T) -> Self {
-        Self::new(value)
+
+    impl<T> From<T> for MutexSensorWriterExec<T> {
+        #[inline(always)]
+        fn from(value: T) -> Self {
+            Self::new(value)
+        }
     }
-}
 
-pub type ArcRwSensorDataExec<T> = Arc<
-    RevisedData<ExecLock<std::sync::RwLock<ExecData<T, VecBoxManager<T>>>, T, VecBoxManager<T>>>,
->;
-pub type ArcRwSensorExec<T> = AbstractArcSensorObserver<
-    std::sync::RwLock<ExecData<T, VecBoxManager<T>>>,
-    T,
-    VecBoxManager<T>,
->;
-pub type ArcRwSensorWriterExec<T> =
-    AbstractArcSensorWriter<std::sync::RwLock<ExecData<T, VecBoxManager<T>>>, T, VecBoxManager<T>>;
-
-impl<T> ArcRwSensorWriterExec<T> {
-    #[inline(always)]
-    pub fn new(init: T) -> Self {
-        SensorWriter(Arc::new(RevisedData::new(ExecLock::new(
-            std::sync::RwLock::new(ExecData::new(init, VecBoxManager::new())),
-        ))))
+    pub type ArcRwSensorData<T> =
+        Arc<RevisedData<ExecLock<std::sync::RwLock<ExecData<T, ()>>, T, ()>>>;
+    pub type ArcRwSensor<T> = AbstractArcSensorObserver<std::sync::RwLock<ExecData<T, ()>>, T, ()>;
+    pub type ArcRwSensorWriter<T> =
+        AbstractArcSensorWriter<std::sync::RwLock<ExecData<T, ()>>, T, ()>;
+    impl<T> ArcRwSensorWriter<T> {
+        #[inline(always)]
+        pub fn new(init: T) -> Self {
+            SensorWriter(Arc::new(RevisedData::new(ExecLock::new(
+                std::sync::RwLock::new(ExecData::new(init, ())),
+            ))))
+        }
     }
-}
-impl<T> From<T> for ArcRwSensorWriterExec<T> {
-    #[inline(always)]
-    fn from(value: T) -> Self {
-        Self::new(value)
+    impl<T> From<T> for ArcRwSensorWriter<T> {
+        #[inline(always)]
+        fn from(value: T) -> Self {
+            Self::new(value)
+        }
     }
-}
 
-pub type ArcMutexSensorData<T> =
-    Arc<RevisedData<ExecLock<std::sync::Mutex<ExecData<T, ()>>, T, ()>>>;
-pub type ArcMutexSensor<T> = AbstractArcSensorObserver<std::sync::Mutex<ExecData<T, ()>>, T, ()>;
-pub type ArcMutexSensorWriter<T> =
-    AbstractArcSensorWriter<std::sync::Mutex<ExecData<T, ()>>, T, ()>;
+    pub type ArcRwSensorDataExec<T> = Arc<
+        RevisedData<
+            ExecLock<std::sync::RwLock<ExecData<T, VecBoxManager<T>>>, T, VecBoxManager<T>>,
+        >,
+    >;
+    pub type ArcRwSensorExec<T> = AbstractArcSensorObserver<
+        std::sync::RwLock<ExecData<T, VecBoxManager<T>>>,
+        T,
+        VecBoxManager<T>,
+    >;
+    pub type ArcRwSensorWriterExec<T> = AbstractArcSensorWriter<
+        std::sync::RwLock<ExecData<T, VecBoxManager<T>>>,
+        T,
+        VecBoxManager<T>,
+    >;
 
-impl<T> ArcMutexSensorWriter<T> {
-    #[inline(always)]
-    pub fn new(init: T) -> Self {
-        SensorWriter(Arc::new(RevisedData::new(ExecLock::new(
-            std::sync::Mutex::new(ExecData::new(init, ())),
-        ))))
+    impl<T> ArcRwSensorWriterExec<T> {
+        #[inline(always)]
+        pub fn new(init: T) -> Self {
+            SensorWriter(Arc::new(RevisedData::new(ExecLock::new(
+                std::sync::RwLock::new(ExecData::new(init, VecBoxManager::new())),
+            ))))
+        }
     }
-}
-
-impl<T> From<T> for ArcMutexSensorWriter<T> {
-    #[inline(always)]
-    fn from(value: T) -> Self {
-        Self::new(value)
+    impl<T> From<T> for ArcRwSensorWriterExec<T> {
+        #[inline(always)]
+        fn from(value: T) -> Self {
+            Self::new(value)
+        }
     }
-}
 
-pub type ArcMutexSensorDataExec<T> = Arc<
-    RevisedData<ExecLock<std::sync::Mutex<ExecData<T, VecBoxManager<T>>>, T, VecBoxManager<T>>>,
->;
-pub type ArcMutexSensorExec<T> =
-    AbstractArcSensorObserver<std::sync::Mutex<ExecData<T, VecBoxManager<T>>>, T, VecBoxManager<T>>;
-pub type ArcMutexSensorWriterExec<T> =
-    AbstractArcSensorWriter<std::sync::Mutex<ExecData<T, VecBoxManager<T>>>, T, VecBoxManager<T>>;
-impl<T> ArcMutexSensorWriterExec<T> {
-    #[inline(always)]
-    pub fn new(init: T) -> Self {
-        SensorWriter(Arc::new(RevisedData::new(ExecLock::new(
-            std::sync::Mutex::new(ExecData::new(init, VecBoxManager::new())),
-        ))))
+    pub type ArcMutexSensorData<T> =
+        Arc<RevisedData<ExecLock<std::sync::Mutex<ExecData<T, ()>>, T, ()>>>;
+    pub type ArcMutexSensor<T> =
+        AbstractArcSensorObserver<std::sync::Mutex<ExecData<T, ()>>, T, ()>;
+    pub type ArcMutexSensorWriter<T> =
+        AbstractArcSensorWriter<std::sync::Mutex<ExecData<T, ()>>, T, ()>;
+
+    impl<T> ArcMutexSensorWriter<T> {
+        #[inline(always)]
+        pub fn new(init: T) -> Self {
+            SensorWriter(Arc::new(RevisedData::new(ExecLock::new(
+                std::sync::Mutex::new(ExecData::new(init, ())),
+            ))))
+        }
     }
-}
 
-impl<T> From<T> for ArcMutexSensorWriterExec<T> {
-    #[inline(always)]
-    fn from(value: T) -> Self {
-        Self::new(value)
+    impl<T> From<T> for ArcMutexSensorWriter<T> {
+        #[inline(always)]
+        fn from(value: T) -> Self {
+            Self::new(value)
+        }
+    }
+
+    pub type ArcMutexSensorDataExec<T> = Arc<
+        RevisedData<ExecLock<std::sync::Mutex<ExecData<T, VecBoxManager<T>>>, T, VecBoxManager<T>>>,
+    >;
+    pub type ArcMutexSensorExec<T> = AbstractArcSensorObserver<
+        std::sync::Mutex<ExecData<T, VecBoxManager<T>>>,
+        T,
+        VecBoxManager<T>,
+    >;
+    pub type ArcMutexSensorWriterExec<T> = AbstractArcSensorWriter<
+        std::sync::Mutex<ExecData<T, VecBoxManager<T>>>,
+        T,
+        VecBoxManager<T>,
+    >;
+    impl<T> ArcMutexSensorWriterExec<T> {
+        #[inline(always)]
+        pub fn new(init: T) -> Self {
+            SensorWriter(Arc::new(RevisedData::new(ExecLock::new(
+                std::sync::Mutex::new(ExecData::new(init, VecBoxManager::new())),
+            ))))
+        }
+    }
+
+    impl<T> From<T> for ArcMutexSensorWriterExec<T> {
+        #[inline(always)]
+        fn from(value: T) -> Self {
+            Self::new(value)
+        }
     }
 }
