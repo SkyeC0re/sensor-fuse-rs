@@ -522,6 +522,8 @@ where
     assert_eq!(*observer_callback_state.as_ref().lock(), 0);
 }
 
+/*** parking_lot locks ***/
+
 test_core!(pl_rwl, lock::parking_lot::RwSensorData<_>);
 
 test_core!(pl_arc_rwl, lock::parking_lot::ArcRwSensorData<_>);
@@ -557,3 +559,29 @@ test_core_exec!(
     pl_arc_mtx_exec,
     lock::parking_lot::ArcMutexSensorDataExec<_>
 );
+
+/*** std_sync locks ***/
+
+test_core!(ss_rwl, lock::std_sync::RwSensorData<_>);
+
+test_core!(ss_arc_rwl, lock::std_sync::ArcRwSensorData<_>);
+test_core_with_owned_observer!(ss_arc_rwl, lock::std_sync::ArcRwSensorData<_>);
+
+test_core!(ss_mtx, lock::std_sync::MutexSensorData<_>);
+
+test_core!(ss_arc_mtx, lock::std_sync::ArcMutexSensorData<_>);
+test_core_with_owned_observer!(ss_arc_mtx, lock::std_sync::ArcMutexSensorData<_>);
+
+test_core!(ss_rwl_exec, lock::std_sync::RwSensorDataExec<_>);
+test_core_exec!(ss_rwl_exec, lock::std_sync::RwSensorDataExec<_>);
+
+test_core!(ss_arc_rwl_exec, lock::std_sync::ArcRwSensorDataExec<_>);
+test_core_with_owned_observer!(ss_arc_rwl_exec, lock::std_sync::ArcMutexSensorDataExec<_>);
+test_core_exec!(ss_arc_rwl_exec, lock::std_sync::ArcRwSensorDataExec<_>);
+
+test_core!(ss_mtx_exec, lock::std_sync::MutexSensorDataExec<_>);
+test_core_exec!(ss_mtx_exec, lock::std_sync::MutexSensorDataExec<_>);
+
+test_core!(ss_arc_mtx_exec, lock::std_sync::ArcMutexSensorDataExec<_>);
+test_core_with_owned_observer!(ss_arc_mtx_exec, lock::std_sync::ArcMutexSensorDataExec<_>);
+test_core_exec!(ss_arc_mtx_exec, lock::std_sync::ArcMutexSensorDataExec<_>);

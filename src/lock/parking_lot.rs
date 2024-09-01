@@ -1,4 +1,4 @@
-use std::{cell::UnsafeCell, sync::Arc};
+use std::sync::Arc;
 
 use parking_lot;
 
@@ -168,10 +168,7 @@ impl<T> MutexSensorWriterExec<T> {
     #[inline(always)]
     pub const fn new(init: T) -> Self {
         SensorWriter(RevisedData::new(ExecLock::new(parking_lot::Mutex::new(
-            ExecData {
-                exec_manager: UnsafeCell::new(VecBoxManager::new()),
-                data: init,
-            },
+            ExecData::new(init, VecBoxManager::new()),
         ))))
     }
 }
