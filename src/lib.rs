@@ -11,10 +11,31 @@
 //! - An optional heap pointer that wraps all of the above.
 //!
 //! Given this definition, Tokio's watch channel only allows for the generalization of the raw data type, however
-//! Sensor-Fuse additionally allows for the generalization of the callback executor, the locking strategy and optional heap pointer as well. In fact
-//! Tokio's watch channel within this framework is roughly equivalent to selecting `std::sync::RwLock` as the locking strategy,
-//! and the standard `VecBox` executor (the core requirement here being that the executor must be able to accept `Waker`'s) with
+//! Sensor-Fuse additionally allows for the generalization of the callback executor, the locking strategy and optional heap pointer as well.
+//! In fact, Tokio's watch channel within this framework is roughly equivalent to selecting `std::sync::RwLock` as the locking strategy,
+//! and the standard `VecBox` executor (the core requirement here being that the executor must be able to accept `Waker`s) with
 //! an `Arc` pointer wrapping everything.
+//!
+//! ```
+//! extern crate sensor_fuse;
+//! use sensor_fuse::{prelude::*, lock::std_sync::RwSensorWriterExec};
+//!
+//! let writer = RwSensorWriterExec::new(3);
+//! writer.register(|x: &i32 | {
+//!     println!("{}", x);
+//!     // The standard executor uses a boolean return value to determine whether or not to keep the
+//!     // function in its execution set. To keep the function forever, we just unconditionally return true.
+//!     true
+//! });
+//!
+//! let mut observer = writer.spawn_observer();
+//! assert_eq!(*observer.pull(), 3);
+//!
+//! // Prints "5".
+//! writer.update(5);
+//!
+//! assert_eq!(*observer.pull(), 5);
+//! ```
 //!
 
 #![warn(bad_style)]

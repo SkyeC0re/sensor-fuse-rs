@@ -485,7 +485,6 @@ where
     }));
 
     sensor_writer.update(2);
-    println!("{}", writer_callback_state.as_ref().lock());
     assert_eq!(*writer_callback_state.as_ref().lock(), 2);
     assert_eq!(*observer_callback_state.as_ref().lock(), 2);
 
