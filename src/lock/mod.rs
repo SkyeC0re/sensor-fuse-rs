@@ -1,5 +1,5 @@
-pub mod parking_lot;
-pub mod std_sync;
+// pub mod parking_lot;
+// pub mod std_sync;
 
 use core::{
     marker::PhantomData,
@@ -9,18 +9,18 @@ use derived_deref::{Deref, DerefMut};
 #[cfg(feature = "std")]
 use std::sync::Arc;
 
-use crate::{callback::ExecLock, RevisedData, SensorObserver, SensorWriter};
+use crate::{RevisedData, SensorObserver, SensorWriter};
 
-pub type AbstractSensorObserver<'a, L, T, E> =
-    SensorObserver<&'a RevisedData<ExecLock<L, T, E>>, L, T, E>;
-pub type AbstractSensorWriter<L, T, E> = SensorWriter<RevisedData<ExecLock<L, T, E>>, L, T, E>;
+// pub type AbstractSensorObserver<'a, L, T, E> =
+//     SensorObserver<&'a RevisedData<ExecLock<L, T, E>>, L, T, E>;
+// pub type AbstractSensorWriter<L, T, E> = SensorWriter<RevisedData<ExecLock<L, T, E>>, L, T, E>;
 
-#[cfg(feature = "std")]
-pub type AbstractArcSensorObserver<L, T, E> =
-    SensorObserver<Arc<RevisedData<ExecLock<L, T, E>>>, L, T, E>;
-#[cfg(feature = "std")]
-pub type AbstractArcSensorWriter<L, T, E> =
-    SensorWriter<Arc<RevisedData<ExecLock<L, T, E>>>, L, T, E>;
+// #[cfg(feature = "std")]
+// pub type AbstractArcSensorObserver<L, T, E> =
+//     SensorObserver<Arc<RevisedData<ExecLock<L, T, E>>>, L, T, E>;
+// #[cfg(feature = "std")]
+// pub type AbstractArcSensorWriter<L, T, E> =
+//     SensorWriter<Arc<RevisedData<ExecLock<L, T, E>>>, L, T, E>;
 
 pub trait ReadGuardSpecifier {
     type Target;

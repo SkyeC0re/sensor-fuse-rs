@@ -2,9 +2,9 @@ use async_std::future::timeout;
 use futures::executor::block_on;
 use paste::paste;
 use sensor_fuse::{
-    callback::{CallbackExecute, ExecData, ExecLock, ExecRegister},
+    callback::{ExecData, ExecLock, ExecManager, ExecRegister},
     lock::{self, DataWriteLock},
-    Lockshare,
+    ShareStrategy,
     {prelude::*, RevisedData, SensorWriter},
 };
 use std::ops::Deref;
@@ -83,11 +83,11 @@ macro_rules! test_core_exec {
 
 fn test_basic_sensor_observation<S, L, E>()
 where
-    for<'a> &'a S: Lockshare<'a, Lock = ExecLock<L, usize, E>>,
+    for<'a> &'a S: ShareStrategy<'a, Lock = ExecLock<L, usize, E>>,
     L: DataWriteLock<Target = ExecData<usize, E>>,
-    E: CallbackExecute<usize>,
+    E: ExecManager<usize>,
     SensorWriter<S, L, usize, E>: From<usize>,
-    for<'a> <&'a S as Lockshare<'a>>::Shared: Clone,
+    for<'a> <&'a S as ShareStrategy<'a>>::Shared: Clone,
 {
     let sensor_writer = SensorWriter::<S, L, usize, E>::from(0);
 
@@ -128,9 +128,9 @@ where
 
 fn test_basic_sensor_observation_parallel_synced<S, L, E>(num_threads: usize, num_updates: usize)
 where
-    for<'a> &'a S: Lockshare<'a, Lock = ExecLock<L, usize, E>>,
+    for<'a> &'a S: ShareStrategy<'a, Lock = ExecLock<L, usize, E>>,
     L: DataWriteLock<Target = ExecData<usize, E>>,
-    E: CallbackExecute<usize>,
+    E: ExecManager<usize>,
     SensorWriter<S, L, usize, E>: From<usize> + Send + Sync + 'static,
 {
     let sync = Arc::new((
@@ -202,9 +202,9 @@ where
 
 fn test_basic_sensor_observation_parallel_unsynced<S, L, E>(num_threads: usize, num_updates: usize)
 where
-    for<'a> &'a S: Lockshare<'a, Lock = ExecLock<L, usize, E>>,
+    for<'a> &'a S: ShareStrategy<'a, Lock = ExecLock<L, usize, E>>,
     L: DataWriteLock<Target = ExecData<usize, E>>,
-    E: CallbackExecute<usize>,
+    E: ExecManager<usize>,
     SensorWriter<S, L, usize, E>: From<usize> + Send + Sync + 'static,
 {
     let sensor_writer = Arc::new(SensorWriter::<S, L, usize, E>::from(0));
@@ -241,9 +241,9 @@ where
 
 fn test_mapped_sensor<S, L, E>()
 where
-    for<'a> &'a S: Lockshare<'a, Lock = ExecLock<L, usize, E>>,
+    for<'a> &'a S: ShareStrategy<'a, Lock = ExecLock<L, usize, E>>,
     L: DataWriteLock<Target = ExecData<usize, E>>,
-    E: CallbackExecute<usize>,
+    E: ExecManager<usize>,
     SensorWriter<S, L, usize, E>: From<usize>,
 {
     let sensor_writer = SensorWriter::<S, L, usize, E>::from(0);
@@ -269,9 +269,9 @@ where
 
 fn test_mapped_sensor_cached<S, L, E>()
 where
-    for<'a> &'a S: Lockshare<'a, Lock = ExecLock<L, usize, E>>,
+    for<'a> &'a S: ShareStrategy<'a, Lock = ExecLock<L, usize, E>>,
     L: DataWriteLock<Target = ExecData<usize, E>>,
-    E: CallbackExecute<usize>,
+    E: ExecManager<usize>,
     SensorWriter<S, L, usize, E>: From<usize>,
 {
     let sensor_writer = SensorWriter::<S, L, usize, E>::from(0);
@@ -297,9 +297,9 @@ where
 
 fn test_fused_sensor<S, L, E>()
 where
-    for<'a> &'a S: Lockshare<'a, Lock = ExecLock<L, usize, E>>,
+    for<'a> &'a S: ShareStrategy<'a, Lock = ExecLock<L, usize, E>>,
     L: DataWriteLock<Target = ExecData<usize, E>>,
-    E: CallbackExecute<usize>,
+    E: ExecManager<usize>,
     SensorWriter<S, L, usize, E>: From<usize>,
 {
     let sensor_writer_1 = SensorWriter::<S, L, usize, E>::from(1);
@@ -343,9 +343,9 @@ where
 
 fn test_fused_sensor_cached<S, L, E>()
 where
-    for<'a> &'a S: Lockshare<'a, Lock = ExecLock<L, usize, E>>,
+    for<'a> &'a S: ShareStrategy<'a, Lock = ExecLock<L, usize, E>>,
     L: DataWriteLock<Target = ExecData<usize, E>>,
-    E: CallbackExecute<usize>,
+    E: ExecManager<usize>,
     SensorWriter<S, L, usize, E>: From<usize>,
 {
     let sensor_writer_1 = Arc::new(SensorWriter::<S, L, usize, E>::from(1));
@@ -390,9 +390,9 @@ where
 fn test_closed<S, R, L, E>()
 where
     R: Deref<Target = RevisedData<ExecLock<L, usize, E>>>,
-    for<'a> &'a S: Lockshare<'a, Lock = ExecLock<L, usize, E>, Shared = R>,
+    for<'a> &'a S: ShareStrategy<'a, Lock = ExecLock<L, usize, E>, Shared = R>,
     L: DataWriteLock<Target = ExecData<usize, E>>,
-    E: CallbackExecute<usize>,
+    E: ExecManager<usize>,
     SensorWriter<S, L, usize, E>: From<usize>,
 {
     let sensor_writer = SensorWriter::<S, L, usize, E>::from(1);
@@ -404,9 +404,9 @@ where
 
 fn test_async_waiting<S, L, E>()
 where
-    for<'a> &'a S: Lockshare<'a, Lock = ExecLock<L, usize, E>>,
+    for<'a> &'a S: ShareStrategy<'a, Lock = ExecLock<L, usize, E>>,
     L: DataWriteLock<Target = ExecData<usize, E>>,
-    for<'a> E: ExecRegister<&'a Waker> + CallbackExecute<usize>,
+    for<'a> E: ExecRegister<&'a Waker> + ExecManager<usize>,
     SensorWriter<S, L, usize, E>: 'static + Send + Sync + From<usize>,
 {
     let sync_send = watch::Sender::new(());
@@ -452,9 +452,9 @@ where
 
 fn test_callbacks<S, L, E>()
 where
-    for<'a> &'a S: Lockshare<'a, Lock = ExecLock<L, usize, E>>,
+    for<'a> &'a S: ShareStrategy<'a, Lock = ExecLock<L, usize, E>>,
     L: DataWriteLock<Target = ExecData<usize, E>>,
-    E: ExecRegister<Box<dyn Send + FnMut(&usize) -> bool>> + CallbackExecute<usize>,
+    E: ExecRegister<Box<dyn Send + FnMut(&usize) -> bool>> + ExecManager<usize>,
     SensorWriter<S, L, usize, E>: 'static + Send + Sync + From<usize>,
 {
     let sensor_writer = SensorWriter::<S, L, usize, E>::from(1);

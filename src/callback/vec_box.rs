@@ -1,6 +1,6 @@
 use core::task::Waker;
 
-use super::{CallbackExecute, ExecRegister};
+use super::{ExecManager, ExecRegister};
 
 pub struct VecBoxManager<T> {
     callbacks: Vec<Box<dyn Send + FnMut(&T) -> bool>>,
@@ -25,8 +25,8 @@ impl<T> VecBoxManager<T> {
     }
 }
 
-impl<T> CallbackExecute<T> for VecBoxManager<T> {
-    fn callback(&mut self, value: &T) {
+impl<T> ExecManager<T> for VecBoxManager<T> {
+    fn execute(&mut self, value: &T) {
         for waker in self.wakers.drain(..) {
             waker.wake();
         }

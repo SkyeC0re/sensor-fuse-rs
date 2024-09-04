@@ -1,184 +1,95 @@
-#[cfg(feature = "std")]
-pub mod vec_box;
+// #[cfg(feature = "std")]
+// pub mod vec_box;
 
 use core::{
     cell::UnsafeCell,
     ops::{Deref, DerefMut},
 };
+use std::marker::PhantomData;
+
+use derived_deref::{Deref, DerefMut};
 
 use crate::lock::{DataReadLock, DataWriteLock, ReadGuardSpecifier};
 
-pub trait CallbackExecute<T> {
-    /// Wake all pending tasks and execute all registered callbacks. All callbacks that returned `false` are dropped.
-    fn callback(&mut self, value: &T);
+trait Sealed {}
+
+pub trait ExecutionStrategy<T>: Sealed {
+    fn execute(&self, value: &T);
 }
 
-impl<T> CallbackExecute<T> for () {
-    #[inline(always)]
-    fn callback(&mut self, _: &T) {}
+pub trait RegistrationStrategy<T, F>: ExecutionStrategy<T> {
+    fn register(&self, f: F);
 }
 
-pub trait ExecRegister<F> {
-    /// Register an executable unit on the callback manager's execution set. In most cases this will usually be a function.
-    fn register(&mut self, f: F);
-}
+#[repr(transparent)]
+pub struct AccessStrategyImmut<T, E: ExecManager<T>>(E, PhantomData<T>);
 
-pub struct ExecData<T, E: CallbackExecute<T>> {
-    pub(crate) data: T,
-    pub(crate) exec_manager: UnsafeCell<E>,
-}
-
-/// Executor is always mutably borrowed and through an exlusive locking mechanism.
-unsafe impl<T, E: CallbackExecute<T>> Sync for ExecData<T, E> where T: Sync {}
-
-impl<T, E: CallbackExecute<T>> ExecData<T, E> {
-    #[inline(always)]
-    pub(crate) const fn new(data: T, exec_manager: E) -> Self {
-        Self {
-            exec_manager: UnsafeCell::new(exec_manager),
-            data,
-        }
+impl<T, E> Sealed for AccessStrategyImmut<T, E> where E: ExecManager<T> {}
+impl<T, E> ExecutionStrategy<T> for AccessStrategyImmut<T, E>
+where
+    E: ExecManager<T>,
+{
+    fn execute(&self, value: &T) {
+        self.0.execute(value)
     }
 }
 
 #[repr(transparent)]
-pub struct ExecLock<L, T, E>
+pub struct AccessStrategyMut<T, E: ExecManagerMut<T>>(UnsafeCell<E>, PhantomData<T>);
+
+impl<T, E> Sealed for AccessStrategyMut<T, E> where E: ExecManagerMut<T> {}
+impl<T, E> ExecutionStrategy<T> for AccessStrategyMut<T, E>
 where
-    L: DataWriteLock<Target = ExecData<T, E>>,
-    E: CallbackExecute<T>,
+    E: ExecManagerMut<T>,
 {
-    pub(crate) inner: L,
+    fn execute(&self, value: &T) {
+        unsafe {
+            (*self.0.get()).execute(value);
+        }
+    }
 }
 
-impl<L, T, E> ExecLock<L, T, E>
-where
-    L: DataWriteLock<Target = ExecData<T, E>>,
-    E: CallbackExecute<T>,
-{
+pub trait ExecManagerMut<T> {
+    /// Execute all executables registered on the executor manager.
+    fn execute(&mut self, value: &T);
+}
+
+impl<T> ExecManagerMut<T> for () {
     #[inline(always)]
-    pub(crate) const fn new(lock: L) -> Self {
-        Self { inner: lock }
+    fn execute(&mut self, _: &T) {}
+}
+
+pub trait ExecRegisterMut<F> {
+    /// Register an executable unit on the callback manager's execution set. In most cases this will usually be a function.
+    fn register(&mut self, f: F);
+}
+
+impl<T, F, E> RegistrationStrategy<T, F> for AccessStrategyMut<T, E>
+where
+    E: ExecManagerMut<T> + ExecRegisterMut<F>,
+{
+    fn register(&self, f: F) {
+        unsafe {
+            (*self.0.get()).register(f);
+        }
     }
 }
 
-impl<L, T, E> ReadGuardSpecifier for ExecLock<L, T, E>
-where
-    L: DataWriteLock<Target = ExecData<T, E>>,
-    E: CallbackExecute<T>,
-{
-    type Target = T;
-
-    type ReadGuard<'read> = ExecGuard<L::ReadGuard<'read>, T, E>   where
-        Self: 'read;
+pub trait ExecManager<T> {
+    /// Execute all executables registered on the executor manager.
+    fn execute(&self, value: &T);
 }
 
-impl<L, T, E> DataReadLock for ExecLock<L, T, E>
-where
-    L: DataWriteLock<Target = ExecData<T, E>>,
-    E: CallbackExecute<T>,
-{
-    #[inline]
-    fn read(&self) -> Self::ReadGuard<'_> {
-        ExecGuard::new(self.inner.read())
-    }
-
-    #[inline]
-    fn try_read(&self) -> Option<Self::ReadGuard<'_>> {
-        self.inner.try_read().map(|guard| ExecGuard::new(guard))
-    }
+pub trait ExecRegister<F> {
+    /// Register an executable unit on the callback manager's execution set. In most cases this will usually be a function.
+    fn register(&self, f: F);
 }
 
-impl<L, T, E> DataWriteLock for ExecLock<L, T, E>
+impl<T, F, E> RegistrationStrategy<T, F> for AccessStrategyImmut<T, E>
 where
-    L: DataWriteLock<Target = ExecData<T, E>>,
-    E: CallbackExecute<T>,
+    E: ExecManager<T> + ExecRegister<F>,
 {
-    type WriteGuard<'write> = ExecGuardMut<L::WriteGuard<'write>, T, E>
-    where
-        Self: 'write;
-
-    #[inline]
-    fn write(&self) -> Self::WriteGuard<'_> {
-        ExecGuardMut::new(self.inner.write())
-    }
-
-    #[inline]
-    fn try_write(&self) -> Option<Self::WriteGuard<'_>> {
-        self.inner.try_write().map(|guard| ExecGuardMut::new(guard))
-    }
-}
-
-pub struct ExecGuard<G, T, E>
-where
-    G: Deref<Target = ExecData<T, E>>,
-    E: CallbackExecute<T>,
-{
-    pub(crate) inner: G,
-}
-
-impl<G, T, E> ExecGuard<G, T, E>
-where
-    G: Deref<Target = ExecData<T, E>>,
-    E: CallbackExecute<T>,
-{
-    #[inline(always)]
-    pub const fn new(guard: G) -> Self {
-        Self { inner: guard }
-    }
-}
-
-impl<G, T, E> Deref for ExecGuard<G, T, E>
-where
-    G: Deref<Target = ExecData<T, E>>,
-    E: CallbackExecute<T>,
-{
-    type Target = T;
-
-    #[inline(always)]
-    fn deref(&self) -> &Self::Target {
-        &self.inner.data
-    }
-}
-
-pub struct ExecGuardMut<G, T, E>
-where
-    G: Deref<Target = ExecData<T, E>>,
-    E: CallbackExecute<T>,
-{
-    pub(crate) inner: G,
-}
-
-impl<G, T, E> ExecGuardMut<G, T, E>
-where
-    G: Deref<Target = ExecData<T, E>>,
-    E: CallbackExecute<T>,
-{
-    #[inline(always)]
-    pub const fn new(guard: G) -> Self {
-        Self { inner: guard }
-    }
-}
-
-impl<G, T, E> Deref for ExecGuardMut<G, T, E>
-where
-    G: DerefMut<Target = ExecData<T, E>>,
-    E: CallbackExecute<T>,
-{
-    type Target = T;
-
-    #[inline(always)]
-    fn deref(&self) -> &Self::Target {
-        &self.inner.data
-    }
-}
-
-impl<G, T, E> DerefMut for ExecGuardMut<G, T, E>
-where
-    G: DerefMut<Target = ExecData<T, E>>,
-    E: CallbackExecute<T>,
-{
-    #[inline(always)]
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.inner.data
+    fn register(&self, f: F) {
+        self.0.register(f);
     }
 }
