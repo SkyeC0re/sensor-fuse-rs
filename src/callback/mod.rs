@@ -17,8 +17,8 @@ pub trait ExecutionStrategy<T>: Sealed {
     fn execute(&self, value: &T);
 }
 
-pub trait RegistrationStrategy<T, F>: ExecutionStrategy<T> {
-    fn register(&self, f: F);
+pub trait RegistrationStrategy<F>: Sealed {
+    fn register<L: DataWriteLock>(data: &(L, Self), f: F);
 }
 
 #[repr(transparent)]
@@ -46,6 +46,8 @@ where
 
 #[repr(transparent)]
 pub struct AccessStrategyMut<T, E: ExecManagerMut<T>>(UnsafeCell<E>, PhantomData<T>);
+
+unsafe impl<T, E> Sync for AccessStrategyMut<T, E> where E: ExecManagerMut<T> {}
 
 impl<T, E> AccessStrategyMut<T, E>
 where
@@ -84,14 +86,18 @@ pub trait ExecRegisterMut<F> {
     fn register(&mut self, f: F);
 }
 
-impl<T, F, E> RegistrationStrategy<T, F> for AccessStrategyMut<T, E>
+impl<T, F, E> RegistrationStrategy<F> for AccessStrategyMut<T, E>
 where
     E: ExecManagerMut<T> + ExecRegisterMut<F>,
 {
-    fn register(&self, f: F) {
+    #[inline]
+    fn register<L: DataWriteLock>(data: &(L, Self), f: F) {
+        // Piggyback off of the data's semaphore.
+        let guard = L::atomic_downgrade(data.0.write());
         unsafe {
-            (*self.0.get()).register(f);
+            (*data.1 .0.get()).register(f);
         }
+        drop(guard);
     }
 }
 
@@ -105,11 +111,12 @@ pub trait ExecRegister<F> {
     fn register(&self, f: F);
 }
 
-impl<T, F, E> RegistrationStrategy<T, F> for AccessStrategyImmut<T, E>
+impl<T, F, E> RegistrationStrategy<F> for AccessStrategyImmut<T, E>
 where
     E: ExecManager<T> + ExecRegister<F>,
 {
-    fn register(&self, f: F) {
-        self.0.register(f);
+    #[inline(always)]
+    fn register<L: DataWriteLock>(data: &(L, Self), f: F) {
+        data.1 .0.register(f);
     }
 }

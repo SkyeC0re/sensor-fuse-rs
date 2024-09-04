@@ -18,7 +18,7 @@
 //!
 //! ```
 //! extern crate sensor_fuse;
-//! use sensor_fuse::{prelude::*, lock::std_sync::RwSensorWriterExec};
+//! use sensor_fuse::{prelude::*, lock::parking_lot::RwSensorWriterExec};
 //!
 //! let writer = RwSensorWriterExec::new(3);
 //! writer.register(|x: &i32 | {
@@ -735,58 +735,42 @@ pub trait RegisterFunction<F> {
     fn register(&self, f: F);
 }
 
-impl<T, S, L, E, F> RegisterFunction<F> for SensorWriter<T, S, L, AccessStrategyMut<T, E>>
+// impl<T, S, L, E, F> RegisterFunction<F> for SensorWriter<T, S, L, AccessStrategyMut<T, E>>
+// where
+//     L: DataWriteLock<Target = T>,
+//     E: ExecManagerMut<T> + ExecRegisterMut<F>,
+//     for<'a> &'a S: ShareStrategy<'a, Target = (L, AccessStrategyMut<T, E>)>,
+// {
+//     fn register(&self, f: F) {
+//         let revised_data = self.0.share_elided_ref();
+//         let guard = revised_data.data.0.write();
+//         let guard = L::atomic_downgrade(guard);
+//         revised_data.1.register(f);
+//         drop(guard);
+//     }
+// }
+
+impl<T, S, L, E, F> RegisterFunction<F> for SensorWriter<T, S, L, E>
 where
     L: DataWriteLock<Target = T>,
-    E: ExecManagerMut<T> + ExecRegisterMut<F>,
-    for<'a> &'a S: ShareStrategy<'a, Target = (L, AccessStrategyMut<T, E>)>,
+    E: ExecutionStrategy<T> + RegistrationStrategy<F>,
+    for<'a> &'a S: ShareStrategy<'a, Target = (L, E)>,
 {
     fn register(&self, f: F) {
-        let revised_data = self.0.share_elided_ref();
-        let guard = revised_data.data.0.write();
-        let guard = L::atomic_downgrade(guard);
-        revised_data.1.register(f);
-        drop(guard);
+        E::register(self.0.share_elided_ref(), f);
     }
 }
 
-impl<T, S, L, E, F> RegisterFunction<F> for SensorWriter<T, S, L, AccessStrategyImmut<T, E>>
+impl<T, R, L, E, F> RegisterFunction<F> for SensorObserver<T, R, L, E>
 where
     L: DataWriteLock<Target = T>,
-    E: ExecManager<T> + ExecRegister<F>,
-    for<'a> &'a S: ShareStrategy<'a, Target = (L, AccessStrategyImmut<T, E>)>,
+    R: Deref<Target = RevisedData<(L, E)>>,
+    E: ExecutionStrategy<T> + RegistrationStrategy<F>,
 {
     fn register(&self, f: F) {
-        self.0.share_elided_ref().1.register(f);
+        E::register(self.inner.share_elided_ref(), f);
     }
 }
-
-impl<T, R, L, E, F> RegisterFunction<F> for SensorObserver<T, R, L, AccessStrategyMut<T, E>>
-where
-    L: DataWriteLock<Target = T>,
-    R: Deref<Target = RevisedData<(L, AccessStrategyMut<T, E>)>>,
-    E: ExecManagerMut<T> + ExecRegisterMut<F>,
-{
-    fn register(&self, f: F) {
-        let revised_data = self.inner.share_elided_ref();
-        let guard = revised_data.data.0.write();
-        let guard = L::atomic_downgrade(guard);
-        revised_data.1.register(f);
-        drop(guard);
-    }
-}
-
-impl<T, R, L, E, F> RegisterFunction<F> for SensorObserver<T, R, L, AccessStrategyImmut<T, E>>
-where
-    L: DataWriteLock<Target = T>,
-    R: Deref<Target = RevisedData<(L, AccessStrategyImmut<T, E>)>>,
-    E: ExecManager<T> + ExecRegister<F>,
-{
-    fn register(&self, f: F) {
-        self.inner.share_elided_ref().1.register(f);
-    }
-}
-
 #[repr(transparent)]
 pub struct WaitUntilChangedFuture<'a, T, R, L, E>(Option<&'a SensorObserver<T, R, L, E>>)
 where
@@ -878,8 +862,7 @@ impl<T, R, L, E> SensorObserver<T, R, L, E>
 where
     L: DataWriteLock<Target = T>,
     R: Deref<Target = RevisedData<(L, E)>>,
-    E: ExecutionStrategy<T>,
-    for<'b> SensorObserver<T, R, L, E>: RegisterFunction<&'b Waker>,
+    for<'a> E: ExecutionStrategy<T> + RegistrationStrategy<&'a Waker>,
 {
     /// Asyncronously wait until the sensor value is updated. This call will **not** update the observer's version,
     /// as such an additional call to `pull` or `pull_updated` is required.

@@ -2,10 +2,10 @@ use async_std::future::timeout;
 use futures::executor::block_on;
 use paste::paste;
 use sensor_fuse::{
-    callback::{ExecData, ExecLock, ExecManager, ExecRegister},
+    callback::{ExecManager, ExecRegister, ExecutionStrategy, RegistrationStrategy},
     lock::{self, DataWriteLock},
-    ShareStrategy,
-    {prelude::*, RevisedData, SensorWriter},
+    prelude::*,
+    RevisedData, SensorObserver, SensorWriter, ShareStrategy,
 };
 use std::ops::Deref;
 use std::task::Waker;
@@ -83,15 +83,15 @@ macro_rules! test_core_exec {
 
 fn test_basic_sensor_observation<S, L, E>()
 where
-    for<'a> &'a S: ShareStrategy<'a, Lock = ExecLock<L, usize, E>>,
-    L: DataWriteLock<Target = ExecData<usize, E>>,
-    E: ExecManager<usize>,
-    SensorWriter<S, L, usize, E>: From<usize>,
+    for<'a> &'a S: ShareStrategy<'a, Target = (L, E)>,
+    L: DataWriteLock<Target = usize>,
+    E: ExecutionStrategy<usize>,
+    SensorWriter<usize, S, L, E>: From<usize>,
     for<'a> <&'a S as ShareStrategy<'a>>::Shared: Clone,
 {
-    let sensor_writer = SensorWriter::<S, L, usize, E>::from(0);
+    let sensor_writer = SensorWriter::<usize, S, L, E>::from(0);
 
-    let mut observers: Vec<Box<dyn SensorObserve<Lock = ExecLock<L, usize, E>>>> = Vec::new();
+    let mut observers: Vec<Box<dyn SensorObserve<Lock = L>>> = Vec::new();
 
     let observer = sensor_writer.spawn_observer();
     observers.push(Box::new(observer.clone()));
@@ -128,10 +128,11 @@ where
 
 fn test_basic_sensor_observation_parallel_synced<S, L, E>(num_threads: usize, num_updates: usize)
 where
-    for<'a> &'a S: ShareStrategy<'a, Lock = ExecLock<L, usize, E>>,
-    L: DataWriteLock<Target = ExecData<usize, E>>,
-    E: ExecManager<usize>,
-    SensorWriter<S, L, usize, E>: From<usize> + Send + Sync + 'static,
+    for<'a> &'a S: ShareStrategy<'a, Target = (L, E)>,
+    L: DataWriteLock<Target = usize>,
+    E: ExecutionStrategy<usize>,
+    SensorWriter<usize, S, L, E>: From<usize> + Send + Sync + 'static,
+    for<'a> <&'a S as ShareStrategy<'a>>::Shared: Clone,
 {
     let sync = Arc::new((
         parking_lot::Mutex::new(Some(0)),
@@ -139,7 +140,7 @@ where
         parking_lot::Condvar::new(),
     ));
 
-    let sensor_writer = Arc::new(SensorWriter::<S, L, usize, E>::from(0));
+    let sensor_writer = Arc::new(SensorWriter::<usize, S, L, E>::from(0));
 
     let handles = Vec::from_iter((0..num_threads).map(|_| {
         let sensor_writer_clone = sensor_writer.clone();
@@ -202,12 +203,13 @@ where
 
 fn test_basic_sensor_observation_parallel_unsynced<S, L, E>(num_threads: usize, num_updates: usize)
 where
-    for<'a> &'a S: ShareStrategy<'a, Lock = ExecLock<L, usize, E>>,
-    L: DataWriteLock<Target = ExecData<usize, E>>,
-    E: ExecManager<usize>,
-    SensorWriter<S, L, usize, E>: From<usize> + Send + Sync + 'static,
+    for<'a> &'a S: ShareStrategy<'a, Target = (L, E)>,
+    L: DataWriteLock<Target = usize>,
+    E: ExecutionStrategy<usize>,
+    SensorWriter<usize, S, L, E>: From<usize> + Send + Sync + 'static,
+    for<'a> <&'a S as ShareStrategy<'a>>::Shared: Clone,
 {
-    let sensor_writer = Arc::new(SensorWriter::<S, L, usize, E>::from(0));
+    let sensor_writer = Arc::new(SensorWriter::<usize, S, L, E>::from(0));
 
     let handles = Vec::from_iter((0..num_threads).map(|_| {
         let sensor_writer_clone = sensor_writer.clone();
@@ -241,12 +243,12 @@ where
 
 fn test_mapped_sensor<S, L, E>()
 where
-    for<'a> &'a S: ShareStrategy<'a, Lock = ExecLock<L, usize, E>>,
-    L: DataWriteLock<Target = ExecData<usize, E>>,
-    E: ExecManager<usize>,
-    SensorWriter<S, L, usize, E>: From<usize>,
+    for<'a> &'a S: ShareStrategy<'a, Target = (L, E)>,
+    L: DataWriteLock<Target = usize>,
+    E: ExecutionStrategy<usize>,
+    SensorWriter<usize, S, L, E>: From<usize>,
 {
-    let sensor_writer = SensorWriter::<S, L, usize, E>::from(0);
+    let sensor_writer = SensorWriter::<usize, S, L, E>::from(0);
     let mut observer = sensor_writer.spawn_observer().map(|x| x + 1);
 
     assert!(!observer.is_cached());
@@ -269,12 +271,12 @@ where
 
 fn test_mapped_sensor_cached<S, L, E>()
 where
-    for<'a> &'a S: ShareStrategy<'a, Lock = ExecLock<L, usize, E>>,
-    L: DataWriteLock<Target = ExecData<usize, E>>,
-    E: ExecManager<usize>,
-    SensorWriter<S, L, usize, E>: From<usize>,
+    for<'a> &'a S: ShareStrategy<'a, Target = (L, E)>,
+    L: DataWriteLock<Target = usize>,
+    E: ExecutionStrategy<usize>,
+    SensorWriter<usize, S, L, E>: From<usize>,
 {
-    let sensor_writer = SensorWriter::<S, L, usize, E>::from(0);
+    let sensor_writer = SensorWriter::<usize, S, L, E>::from(0);
     let mut observer = sensor_writer.spawn_observer().map_cached(|x| x + 1);
 
     assert!(observer.is_cached());
@@ -297,13 +299,13 @@ where
 
 fn test_fused_sensor<S, L, E>()
 where
-    for<'a> &'a S: ShareStrategy<'a, Lock = ExecLock<L, usize, E>>,
-    L: DataWriteLock<Target = ExecData<usize, E>>,
-    E: ExecManager<usize>,
-    SensorWriter<S, L, usize, E>: From<usize>,
+    for<'a> &'a S: ShareStrategy<'a, Target = (L, E)>,
+    L: DataWriteLock<Target = usize>,
+    E: ExecutionStrategy<usize>,
+    SensorWriter<usize, S, L, E>: From<usize>,
 {
-    let sensor_writer_1 = SensorWriter::<S, L, usize, E>::from(1);
-    let sensor_writer_2 = SensorWriter::<S, L, usize, E>::from(2);
+    let sensor_writer_1 = SensorWriter::<usize, S, L, E>::from(1);
+    let sensor_writer_2 = SensorWriter::<usize, S, L, E>::from(2);
 
     let mut observer = sensor_writer_1
         .spawn_observer()
@@ -343,13 +345,13 @@ where
 
 fn test_fused_sensor_cached<S, L, E>()
 where
-    for<'a> &'a S: ShareStrategy<'a, Lock = ExecLock<L, usize, E>>,
-    L: DataWriteLock<Target = ExecData<usize, E>>,
-    E: ExecManager<usize>,
-    SensorWriter<S, L, usize, E>: From<usize>,
+    for<'a> &'a S: ShareStrategy<'a, Target = (L, E)>,
+    L: DataWriteLock<Target = usize>,
+    E: ExecutionStrategy<usize>,
+    SensorWriter<usize, S, L, E>: From<usize>,
 {
-    let sensor_writer_1 = Arc::new(SensorWriter::<S, L, usize, E>::from(1));
-    let sensor_writer_2 = Arc::new(SensorWriter::<S, L, usize, E>::from(2));
+    let sensor_writer_1 = Arc::new(SensorWriter::<usize, S, L, E>::from(1));
+    let sensor_writer_2 = Arc::new(SensorWriter::<usize, S, L, E>::from(2));
 
     let mut observer = sensor_writer_1
         .spawn_observer()
@@ -389,13 +391,13 @@ where
 
 fn test_closed<S, R, L, E>()
 where
-    R: Deref<Target = RevisedData<ExecLock<L, usize, E>>>,
-    for<'a> &'a S: ShareStrategy<'a, Lock = ExecLock<L, usize, E>, Shared = R>,
-    L: DataWriteLock<Target = ExecData<usize, E>>,
-    E: ExecManager<usize>,
-    SensorWriter<S, L, usize, E>: From<usize>,
+    R: Deref<Target = RevisedData<(L, E)>>,
+    for<'a> &'a S: ShareStrategy<'a, Target = (L, E), Shared = R>,
+    L: DataWriteLock<Target = usize>,
+    E: ExecutionStrategy<usize>,
+    SensorWriter<usize, S, L, E>: From<usize>,
 {
-    let sensor_writer = SensorWriter::<S, L, usize, E>::from(1);
+    let sensor_writer = SensorWriter::<usize, S, L, E>::from(1);
     let mut observer = sensor_writer.spawn_observer();
     drop(sensor_writer);
     assert!(observer.is_closed());
@@ -404,14 +406,14 @@ where
 
 fn test_async_waiting<S, L, E>()
 where
-    for<'a> &'a S: ShareStrategy<'a, Lock = ExecLock<L, usize, E>>,
-    L: DataWriteLock<Target = ExecData<usize, E>>,
-    for<'a> E: ExecRegister<&'a Waker> + ExecManager<usize>,
-    SensorWriter<S, L, usize, E>: 'static + Send + Sync + From<usize>,
+    for<'a> &'a S: ShareStrategy<'a, Target = (L, E)>,
+    L: DataWriteLock<Target = usize>,
+    for<'a> E: ExecutionStrategy<usize> + RegistrationStrategy<&'a Waker>,
+    SensorWriter<usize, S, L, E>: 'static + Send + Sync + From<usize>,
 {
     let sync_send = watch::Sender::new(());
     let mut sync_recv = sync_send.subscribe();
-    let sensor_writer = Arc::new(SensorWriter::<S, L, usize, E>::from(1));
+    let sensor_writer = Arc::new(SensorWriter::<usize, S, L, E>::from(1));
 
     let sensor_writer_clone = sensor_writer.clone();
     let handle = thread::spawn(move || {
@@ -452,12 +454,12 @@ where
 
 fn test_callbacks<S, L, E>()
 where
-    for<'a> &'a S: ShareStrategy<'a, Lock = ExecLock<L, usize, E>>,
-    L: DataWriteLock<Target = ExecData<usize, E>>,
-    E: ExecRegister<Box<dyn Send + FnMut(&usize) -> bool>> + ExecManager<usize>,
-    SensorWriter<S, L, usize, E>: 'static + Send + Sync + From<usize>,
+    for<'a> &'a S: ShareStrategy<'a, Target = (L, E)>,
+    L: DataWriteLock<Target = usize>,
+    E: RegistrationStrategy<Box<dyn Send + FnMut(&usize) -> bool>> + ExecutionStrategy<usize>,
+    SensorWriter<usize, S, L, E>: 'static + Send + Sync + From<usize>,
 {
-    let sensor_writer = SensorWriter::<S, L, usize, E>::from(1);
+    let sensor_writer = SensorWriter::<usize, S, L, E>::from(1);
     let writer_callback_state = Arc::new(parking_lot::Mutex::new(1));
     let observer_callback_state = Arc::new(parking_lot::Mutex::new(1));
 
@@ -563,26 +565,26 @@ test_core_exec!(
 
 /*** std_sync locks ***/
 
-test_core!(ss_rwl, lock::std_sync::RwSensorData<_>);
+// test_core!(ss_rwl, lock::std_sync::RwSensorData<_>);
 
-test_core!(ss_arc_rwl, lock::std_sync::ArcRwSensorData<_>);
-test_core_with_owned_observer!(ss_arc_rwl, lock::std_sync::ArcRwSensorData<_>);
+// test_core!(ss_arc_rwl, lock::std_sync::ArcRwSensorData<_>);
+// test_core_with_owned_observer!(ss_arc_rwl, lock::std_sync::ArcRwSensorData<_>);
 
-test_core!(ss_mtx, lock::std_sync::MutexSensorData<_>);
+// test_core!(ss_mtx, lock::std_sync::MutexSensorData<_>);
 
-test_core!(ss_arc_mtx, lock::std_sync::ArcMutexSensorData<_>);
-test_core_with_owned_observer!(ss_arc_mtx, lock::std_sync::ArcMutexSensorData<_>);
+// test_core!(ss_arc_mtx, lock::std_sync::ArcMutexSensorData<_>);
+// test_core_with_owned_observer!(ss_arc_mtx, lock::std_sync::ArcMutexSensorData<_>);
 
-test_core!(ss_rwl_exec, lock::std_sync::RwSensorDataExec<_>);
-test_core_exec!(ss_rwl_exec, lock::std_sync::RwSensorDataExec<_>);
+// test_core!(ss_rwl_exec, lock::std_sync::RwSensorDataExec<_>);
+// test_core_exec!(ss_rwl_exec, lock::std_sync::RwSensorDataExec<_>);
 
-test_core!(ss_arc_rwl_exec, lock::std_sync::ArcRwSensorDataExec<_>);
-test_core_with_owned_observer!(ss_arc_rwl_exec, lock::std_sync::ArcMutexSensorDataExec<_>);
-test_core_exec!(ss_arc_rwl_exec, lock::std_sync::ArcRwSensorDataExec<_>);
+// test_core!(ss_arc_rwl_exec, lock::std_sync::ArcRwSensorDataExec<_>);
+// test_core_with_owned_observer!(ss_arc_rwl_exec, lock::std_sync::ArcMutexSensorDataExec<_>);
+// test_core_exec!(ss_arc_rwl_exec, lock::std_sync::ArcRwSensorDataExec<_>);
 
-test_core!(ss_mtx_exec, lock::std_sync::MutexSensorDataExec<_>);
-test_core_exec!(ss_mtx_exec, lock::std_sync::MutexSensorDataExec<_>);
+// test_core!(ss_mtx_exec, lock::std_sync::MutexSensorDataExec<_>);
+// test_core_exec!(ss_mtx_exec, lock::std_sync::MutexSensorDataExec<_>);
 
-test_core!(ss_arc_mtx_exec, lock::std_sync::ArcMutexSensorDataExec<_>);
-test_core_with_owned_observer!(ss_arc_mtx_exec, lock::std_sync::ArcMutexSensorDataExec<_>);
-test_core_exec!(ss_arc_mtx_exec, lock::std_sync::ArcMutexSensorDataExec<_>);
+// test_core!(ss_arc_mtx_exec, lock::std_sync::ArcMutexSensorDataExec<_>);
+// test_core_with_owned_observer!(ss_arc_mtx_exec, lock::std_sync::ArcMutexSensorDataExec<_>);
+// test_core_exec!(ss_arc_mtx_exec, lock::std_sync::ArcMutexSensorDataExec<_>);

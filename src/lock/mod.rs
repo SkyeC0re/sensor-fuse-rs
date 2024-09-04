@@ -15,9 +15,9 @@ pub type AbstractSensorObserver<'a, T, L, E> = SensorObserver<T, &'a RevisedData
 pub type AbstractSensorWriter<T, L, E> = SensorWriter<T, RevisedData<(L, E)>, L, E>;
 
 #[cfg(feature = "std")]
-pub type AbstractArcSensorObserver<L, T, E> = SensorObserver<T, Arc<RevisedData<(L, E)>>, L, E>;
+pub type AbstractArcSensorObserver<T, L, E> = SensorObserver<T, Arc<RevisedData<(L, E)>>, L, E>;
 #[cfg(feature = "std")]
-pub type AbstractArcSensorWriter<L, T, E> = SensorWriter<T, Arc<RevisedData<(L, E)>>, L, E>;
+pub type AbstractArcSensorWriter<T, L, E> = SensorWriter<T, Arc<RevisedData<(L, E)>>, L, E>;
 
 pub trait ReadGuardSpecifier {
     type Target;
