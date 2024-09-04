@@ -1,5 +1,5 @@
-// #[cfg(feature = "std")]
-// pub mod vec_box;
+#[cfg(feature = "std")]
+pub mod vec_box;
 
 use core::{
     cell::UnsafeCell,
@@ -24,6 +24,16 @@ pub trait RegistrationStrategy<T, F>: ExecutionStrategy<T> {
 #[repr(transparent)]
 pub struct AccessStrategyImmut<T, E: ExecManager<T>>(E, PhantomData<T>);
 
+impl<T, E> AccessStrategyImmut<T, E>
+where
+    E: ExecManager<T>,
+{
+    #[inline(always)]
+    pub const fn new(exec_manager: E) -> Self {
+        Self(exec_manager, PhantomData)
+    }
+}
+
 impl<T, E> Sealed for AccessStrategyImmut<T, E> where E: ExecManager<T> {}
 impl<T, E> ExecutionStrategy<T> for AccessStrategyImmut<T, E>
 where
@@ -36,6 +46,16 @@ where
 
 #[repr(transparent)]
 pub struct AccessStrategyMut<T, E: ExecManagerMut<T>>(UnsafeCell<E>, PhantomData<T>);
+
+impl<T, E> AccessStrategyMut<T, E>
+where
+    E: ExecManagerMut<T>,
+{
+    #[inline(always)]
+    pub const fn new(exec_manager: E) -> Self {
+        Self(UnsafeCell::new(exec_manager), PhantomData)
+    }
+}
 
 impl<T, E> Sealed for AccessStrategyMut<T, E> where E: ExecManagerMut<T> {}
 impl<T, E> ExecutionStrategy<T> for AccessStrategyMut<T, E>
@@ -54,9 +74,9 @@ pub trait ExecManagerMut<T> {
     fn execute(&mut self, value: &T);
 }
 
-impl<T> ExecManagerMut<T> for () {
+impl<T> ExecManager<T> for () {
     #[inline(always)]
-    fn execute(&mut self, _: &T) {}
+    fn execute(&self, _: &T) {}
 }
 
 pub trait ExecRegisterMut<F> {

@@ -182,6 +182,18 @@ where
     E: ExecutionStrategy<T>,
     for<'a> &'a S: ShareStrategy<'a, Target = (L, E)>;
 
+impl<T, S, L, E> SensorWriter<T, S, L, E>
+where
+    L: DataWriteLock<Target = T>,
+    E: ExecutionStrategy<T>,
+    for<'a> &'a S: ShareStrategy<'a, Target = (L, E)>,
+{
+    #[inline(always)]
+    pub const fn new_with_shared(shared: S) -> Self {
+        Self(shared)
+    }
+}
+
 impl<T, S, L, E> Drop for SensorWriter<T, S, L, E>
 where
     L: DataWriteLock<Target = T>,

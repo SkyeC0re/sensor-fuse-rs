@@ -1,7 +1,8 @@
 use parking_lot;
 
 use crate::{
-    DataReadLock, DataWriteLock, ExecData, ExecLock, ReadGuardSpecifier, RevisedData, SensorWriter,
+    callback::AccessStrategyImmut, DataReadLock, DataWriteLock, ReadGuardSpecifier, RevisedData,
+    SensorWriter,
 };
 
 use super::{AbstractSensorObserver, AbstractSensorWriter};
@@ -74,16 +75,19 @@ impl<T> DataReadLock for parking_lot::Mutex<T> {
     }
 }
 
-pub type RwSensorData<T> = RevisedData<ExecLock<parking_lot::RwLock<ExecData<T, ()>>, T, ()>>;
-pub type RwSensor<'a, T> = AbstractSensorObserver<'a, parking_lot::RwLock<ExecData<T, ()>>, T, ()>;
-pub type RwSensorWriter<T> = AbstractSensorWriter<parking_lot::RwLock<ExecData<T, ()>>, T, ()>;
+pub type RwSensorData<T> = RevisedData<(parking_lot::RwLock<T>, AccessStrategyImmut<T, ()>)>;
+pub type RwSensor<'a, T> =
+    AbstractSensorObserver<'a, T, parking_lot::RwLock<T>, AccessStrategyImmut<T, ()>>;
+pub type RwSensorWriter<T> =
+    AbstractSensorWriter<T, parking_lot::RwLock<T>, AccessStrategyImmut<T, ()>>;
 
 impl<T> RwSensorWriter<T> {
     #[inline(always)]
     pub const fn new(init: T) -> Self {
-        SensorWriter(RevisedData::new(ExecLock::new(parking_lot::RwLock::new(
-            ExecData::new(init, ()),
-        ))))
+        SensorWriter::new_with_shared(RevisedData::new((
+            parking_lot::RwLock::new(init),
+            AccessStrategyImmut::new(()),
+        )))
     }
 }
 impl<T> From<T> for RwSensorWriter<T> {
@@ -93,16 +97,19 @@ impl<T> From<T> for RwSensorWriter<T> {
     }
 }
 
-pub type MutexSensorData<T> = RevisedData<ExecLock<parking_lot::Mutex<ExecData<T, ()>>, T, ()>>;
+pub type MutexSensorData<T> = RevisedData<(parking_lot::Mutex<T>, AccessStrategyImmut<T, ()>)>;
 pub type MutexSensor<'a, T> =
-    AbstractSensorObserver<'a, parking_lot::Mutex<ExecData<T, ()>>, T, ()>;
-pub type MutexSensorWriter<T> = AbstractSensorWriter<parking_lot::Mutex<ExecData<T, ()>>, T, ()>;
+    AbstractSensorObserver<'a, T, parking_lot::Mutex<T>, AccessStrategyImmut<T, ()>>;
+pub type MutexSensorWriter<T> =
+    AbstractSensorWriter<T, parking_lot::Mutex<T>, AccessStrategyImmut<T, ()>>;
 
 impl<T> MutexSensorWriter<T> {
-    pub fn new(init: T) -> Self {
-        SensorWriter(RevisedData::new(ExecLock::new(parking_lot::Mutex::new(
-            ExecData::new(init, ()),
-        ))))
+    #[inline(always)]
+    pub const fn new(init: T) -> Self {
+        SensorWriter::new_with_shared(RevisedData::new((
+            parking_lot::Mutex::new(init),
+            AccessStrategyImmut::new(()),
+        )))
     }
 }
 
@@ -120,7 +127,7 @@ mod std_req {
     use std::sync::Arc;
 
     use crate::{
-        callback::{vec_box::VecBoxManager, ExecData, ExecLock},
+        callback::{vec_box::VecBoxManager, AccessStrategyMut},
         lock::{
             AbstractArcSensorObserver, AbstractArcSensorWriter, AbstractSensorObserver,
             AbstractSensorWriter,
@@ -128,26 +135,25 @@ mod std_req {
         RevisedData, SensorWriter,
     };
 
-    pub type RwSensorDataExec<T> = RevisedData<
-        ExecLock<parking_lot::RwLock<ExecData<T, VecBoxManager<T>>>, T, VecBoxManager<T>>,
-    >;
+    pub type RwSensorDataExec<T> = RevisedData<(
+        parking_lot::RwLock<T>,
+        AccessStrategyMut<T, VecBoxManager<T>>,
+    )>;
     pub type RwSensorExec<'a, T> = AbstractSensorObserver<
         'a,
-        parking_lot::RwLock<ExecData<T, VecBoxManager<T>>>,
         T,
-        VecBoxManager<T>,
+        parking_lot::RwLock<T>,
+        AccessStrategyMut<T, VecBoxManager<T>>,
     >;
-    pub type RwSensorWriterExec<T> = AbstractSensorWriter<
-        parking_lot::RwLock<ExecData<T, VecBoxManager<T>>>,
-        T,
-        VecBoxManager<T>,
-    >;
+    pub type RwSensorWriterExec<T> =
+        AbstractSensorWriter<T, parking_lot::RwLock<T>, AccessStrategyMut<T, VecBoxManager<T>>>;
     impl<T> RwSensorWriterExec<T> {
         #[inline(always)]
         pub const fn new(init: T) -> Self {
-            SensorWriter(RevisedData::new(ExecLock::new(parking_lot::RwLock::new(
-                ExecData::new(init, VecBoxManager::new()),
-            ))))
+            SensorWriter(RevisedData::new((
+                parking_lot::RwLock::new(init),
+                AccessStrategyMut::new(VecBoxManager::new()),
+            )))
         }
     }
 
@@ -158,27 +164,25 @@ mod std_req {
         }
     }
 
-    pub type MutexSensorDataExec<T> = RevisedData<
-        ExecLock<parking_lot::Mutex<ExecData<T, VecBoxManager<T>>>, T, VecBoxManager<T>>,
-    >;
+    pub type MutexSensorDataExec<T> = RevisedData<(
+        parking_lot::Mutex<T>,
+        AccessStrategyMut<T, VecBoxManager<T>>,
+    )>;
     pub type MutexSensorExec<'a, T> = AbstractSensorObserver<
         'a,
-        parking_lot::Mutex<ExecData<T, VecBoxManager<T>>>,
         T,
-        VecBoxManager<T>,
+        parking_lot::Mutex<T>,
+        AccessStrategyMut<T, VecBoxManager<T>>,
     >;
-
-    pub type MutexSensorWriterExec<T> = AbstractSensorWriter<
-        parking_lot::Mutex<ExecData<T, VecBoxManager<T>>>,
-        T,
-        VecBoxManager<T>,
-    >;
+    pub type MutexSensorWriterExec<T> =
+        AbstractSensorWriter<T, parking_lot::Mutex<T>, AccessStrategyMut<T, VecBoxManager<T>>>;
     impl<T> MutexSensorWriterExec<T> {
         #[inline(always)]
         pub const fn new(init: T) -> Self {
-            SensorWriter(RevisedData::new(ExecLock::new(parking_lot::Mutex::new(
-                ExecData::new(init, VecBoxManager::new()),
-            ))))
+            SensorWriter(RevisedData::new((
+                parking_lot::Mutex::new(init),
+                AccessStrategyMut::new(VecBoxManager::new()),
+            )))
         }
     }
 

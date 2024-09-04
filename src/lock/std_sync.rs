@@ -110,7 +110,7 @@ mod std_req {
     use std::sync::Arc;
 
     use crate::{
-        callback::{vec_box::VecBoxManager, ExecData, ExecLock},
+        callback::vec_box::VecBoxManager,
         lock::{
             AbstractArcSensorObserver, AbstractArcSensorWriter, AbstractSensorObserver,
             AbstractSensorWriter,

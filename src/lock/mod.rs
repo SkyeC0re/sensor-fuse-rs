@@ -1,4 +1,4 @@
-// pub mod parking_lot;
+pub mod parking_lot;
 // pub mod std_sync;
 
 use core::{
@@ -11,16 +11,13 @@ use std::sync::Arc;
 
 use crate::{RevisedData, SensorObserver, SensorWriter};
 
-// pub type AbstractSensorObserver<'a, L, T, E> =
-//     SensorObserver<&'a RevisedData<ExecLock<L, T, E>>, L, T, E>;
-// pub type AbstractSensorWriter<L, T, E> = SensorWriter<RevisedData<ExecLock<L, T, E>>, L, T, E>;
+pub type AbstractSensorObserver<'a, T, L, E> = SensorObserver<T, &'a RevisedData<(L, E)>, L, E>;
+pub type AbstractSensorWriter<T, L, E> = SensorWriter<T, RevisedData<(L, E)>, L, E>;
 
-// #[cfg(feature = "std")]
-// pub type AbstractArcSensorObserver<L, T, E> =
-//     SensorObserver<Arc<RevisedData<ExecLock<L, T, E>>>, L, T, E>;
-// #[cfg(feature = "std")]
-// pub type AbstractArcSensorWriter<L, T, E> =
-//     SensorWriter<Arc<RevisedData<ExecLock<L, T, E>>>, L, T, E>;
+#[cfg(feature = "std")]
+pub type AbstractArcSensorObserver<L, T, E> = SensorObserver<T, Arc<RevisedData<(L, E)>>, L, E>;
+#[cfg(feature = "std")]
+pub type AbstractArcSensorWriter<L, T, E> = SensorWriter<T, Arc<RevisedData<(L, E)>>, L, E>;
 
 pub trait ReadGuardSpecifier {
     type Target;

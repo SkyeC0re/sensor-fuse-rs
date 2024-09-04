@@ -1,6 +1,6 @@
 use core::task::Waker;
 
-use super::{ExecManager, ExecRegister};
+use super::{ExecManager, ExecManagerMut, ExecRegister, ExecRegisterMut};
 
 pub struct VecBoxManager<T> {
     callbacks: Vec<Box<dyn Send + FnMut(&T) -> bool>>,
@@ -25,7 +25,7 @@ impl<T> VecBoxManager<T> {
     }
 }
 
-impl<T> ExecManager<T> for VecBoxManager<T> {
+impl<T> ExecManagerMut<T> for VecBoxManager<T> {
     fn execute(&mut self, value: &T) {
         for waker in self.wakers.drain(..) {
             waker.wake();
@@ -50,13 +50,13 @@ impl<T> ExecManager<T> for VecBoxManager<T> {
     }
 }
 
-impl<T, F: 'static + Send + FnMut(&T) -> bool> ExecRegister<F> for VecBoxManager<T> {
+impl<T, F: 'static + Send + FnMut(&T) -> bool> ExecRegisterMut<F> for VecBoxManager<T> {
     fn register(&mut self, f: F) {
         self.callbacks.push(Box::new(f));
     }
 }
 
-impl<T> ExecRegister<&Waker> for VecBoxManager<T> {
+impl<T> ExecRegisterMut<&Waker> for VecBoxManager<T> {
     fn register(&mut self, w: &Waker) {
         self.wakers.push(w.clone());
     }
