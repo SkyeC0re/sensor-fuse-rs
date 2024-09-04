@@ -1,15 +1,9 @@
-#[cfg(feature = "std")]
+#[cfg(feature = "alloc")]
 pub mod vec_box;
 
-use core::{
-    cell::UnsafeCell,
-    ops::{Deref, DerefMut},
-};
-use std::marker::PhantomData;
+use core::{cell::UnsafeCell, marker::PhantomData};
 
-use derived_deref::{Deref, DerefMut};
-
-use crate::lock::{DataReadLock, DataWriteLock, ReadGuardSpecifier};
+use crate::lock::DataWriteLock;
 
 trait Sealed {}
 

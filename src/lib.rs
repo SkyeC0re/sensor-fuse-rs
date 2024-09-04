@@ -43,7 +43,6 @@
 //! value updates as opposed to executable registrations and as such can be bundled under the same locking mechanism as the sensor's
 //! raw data. This allows the executor to be mutably borrowed for each sensor value update, removing the need to lock the executor
 //! separately on every sensor value update. The cost, however associated with this is that registering an executable
-
 #![warn(bad_style)]
 #![warn(missing_docs)]
 #![warn(trivial_casts)]
@@ -54,29 +53,28 @@
 #![warn(unused_qualifications)]
 #![warn(unused_results)]
 
+#[cfg(feature = "alloc")]
+extern crate alloc;
+
 pub mod callback;
 pub mod lock;
 pub mod prelude;
 
+#[cfg(feature = "alloc")]
+use alloc::sync::Arc;
+
 use core::{
     future::Future,
     marker::PhantomData,
-    ops::Deref,
-    ops::DerefMut,
+    ops::{Deref, DerefMut},
+    pin::Pin,
     ptr::null_mut,
     sync::atomic::{AtomicUsize, Ordering},
-    task::{Poll, Waker},
-};
-#[cfg(feature = "std")]
-use std::sync::Arc;
-
-use callback::{
-    AccessStrategyImmut, AccessStrategyMut, ExecManagerMut, ExecRegisterMut, ExecutionStrategy,
-    RegistrationStrategy,
+    task::{Context, Poll, Waker},
 };
 
 use crate::{
-    callback::{ExecManager, ExecRegister},
+    callback::{ExecutionStrategy, RegistrationStrategy},
     lock::{
         DataReadLock, DataWriteLock, FalseReadLock, OwnedData, OwnedFalseLock, ReadGuardSpecifier,
     },
@@ -88,8 +86,9 @@ use crate::{
 const CLOSED_BIT: usize = 1;
 const STEP_SIZE: usize = 2;
 
+/// Data structure for storing data with an atomic version tag.
 pub struct RevisedData<T> {
-    pub data: T,
+    data: T,
     version: AtomicUsize,
 }
 
@@ -110,8 +109,9 @@ impl<T> DerefMut for RevisedData<T> {
 }
 
 impl<T> RevisedData<T> {
+    /// Initialize using the given initial data.
     #[inline(always)]
-    pub const fn new(data: T) -> Self {
+    const fn new(data: T) -> Self {
         Self {
             data,
             version: AtomicUsize::new(0),
@@ -119,27 +119,28 @@ impl<T> RevisedData<T> {
     }
 
     #[inline(always)]
-    pub fn update_version(&self, step_size: usize) {
-        self.version
-            .fetch_add(step_size, core::sync::atomic::Ordering::Release);
+    fn update_version(&self, step_size: usize) {
+        let _ = self.version.fetch_add(step_size, Ordering::Release);
     }
 
     #[inline(always)]
-    pub fn version(&self) -> usize {
-        self.version.load(core::sync::atomic::Ordering::Acquire)
+    fn version(&self) -> usize {
+        self.version.load(Ordering::Acquire)
     }
 }
 
 /// Trait for sharing a (most likely heap pointer) wrapped `struct@RevisedData` with a locking strategy.
 pub trait ShareStrategy<'a> {
+    /// The shared data.
     type Target;
+    /// The wrapping container for the shared data.
     type Shared: Deref<Target = RevisedData<Self::Target>>;
 
     /// Share the revised data for the largest possible lifetime.
-    fn share_lock(self) -> Self::Shared;
+    fn share_data(self) -> Self::Shared;
 
-    /// There is probably a better way than this to get an elided reference
-    /// to the revised data.
+    /// Create an immutable borrow to the underlying data, elided by the lifetime of
+    /// wrapping container.
     fn share_elided_ref(self) -> &'a RevisedData<Self::Target>;
 }
 
@@ -147,7 +148,7 @@ impl<'a, T> ShareStrategy<'a> for &'a RevisedData<T> {
     type Target = T;
     type Shared = Self;
     #[inline(always)]
-    fn share_lock(self) -> Self {
+    fn share_data(self) -> Self {
         self
     }
 
@@ -157,13 +158,13 @@ impl<'a, T> ShareStrategy<'a> for &'a RevisedData<T> {
     }
 }
 
-#[cfg(feature = "std")]
+#[cfg(feature = "alloc")]
 impl<'a, T> ShareStrategy<'a> for &'a Arc<RevisedData<T>> {
     type Target = T;
     type Shared = Arc<RevisedData<T>>;
 
     #[inline(always)]
-    fn share_lock(self) -> Self::Shared {
+    fn share_data(self) -> Self::Shared {
         self.clone()
     }
 
@@ -175,6 +176,7 @@ impl<'a, T> ShareStrategy<'a> for &'a Arc<RevisedData<T>> {
 
 /*** Sensor Writing ***/
 
+/// The generalized sensor writer.
 #[repr(transparent)]
 pub struct SensorWriter<T, S, L, E = ()>(S)
 where
@@ -188,8 +190,9 @@ where
     E: ExecutionStrategy<T>,
     for<'a> &'a S: ShareStrategy<'a, Target = (L, E)>,
 {
+    /// Create a new sensor writer by wrapping the appropriate shared data.
     #[inline(always)]
-    pub const fn new_with_shared(shared: S) -> Self {
+    pub const fn new_from_shared(shared: S) -> Self {
         Self(shared)
     }
 }
@@ -202,7 +205,8 @@ where
 {
     fn drop(&mut self) {
         let x = &self.0;
-        x.share_elided_ref()
+        let _ = x
+            .share_elided_ref()
             .version
             .fetch_or(CLOSED_BIT, Ordering::Release);
     }
@@ -279,7 +283,7 @@ where
     /// to outlive the sensor writer for an appropriate sharing strategy (such as if the writer wraps its data in an `Arc`).
     #[inline(always)]
     pub fn spawn_observer(&self) -> SensorObserver<T, <&'_ S as ShareStrategy>::Shared, L, E> {
-        let inner = self.0.share_lock();
+        let inner = self.0.share_data();
         SensorObserver {
             version: inner.version(),
             inner,
@@ -290,7 +294,9 @@ where
 
 /*** Sensor Observation ***/
 
+/// General observer functionality.
 pub trait SensorObserve {
+    /// The underlying locking mechanism associated with this observer.
     type Lock: ReadGuardSpecifier;
 
     /// Returns the latest value obtainable by the sensor. The sensor's internal cache is guaranteed to
@@ -311,6 +317,7 @@ pub trait SensorObserve {
     /// Returns true if all upstream writers has been dropped and no more updates can occur.
     fn is_closed(&self) -> bool;
 
+    /// Fuse this observer with another using the given fusion function into a cacheless observer.
     #[inline(always)]
     fn fuse<B, T, F>(self, other: B, f: F) -> FusedSensorObserver<Self, B, T, F>
     where
@@ -324,6 +331,7 @@ pub trait SensorObserve {
         FusedSensorObserver::fuse_with(self, other, f)
     }
 
+    /// Fuse this observer with another using the given fusion function into a cached observer.
     #[inline(always)]
     fn fuse_cached<B, T, F>(self, other: B, f: F) -> FusedSensorObserverCached<Self, B, T, F>
     where
@@ -337,6 +345,7 @@ pub trait SensorObserve {
         FusedSensorObserverCached::fuse_with(self, other, f)
     }
 
+    /// Map this observer into another using the given mapping function into a cacheless observer.
     #[inline(always)]
     fn map<T, F>(self, f: F) -> MappedSensorObserver<Self, T, F>
     where
@@ -346,6 +355,7 @@ pub trait SensorObserve {
         MappedSensorObserver::map_with(self, f)
     }
 
+    /// Map this observer into another using the given mapping function into a cached observer.
     #[inline(always)]
     fn map_cached<T, F>(self, f: F) -> MappedSensorObserverCached<Self, T, F>
     where
@@ -356,6 +366,7 @@ pub trait SensorObserve {
     }
 }
 
+/// The generalized sensor observer.
 pub struct SensorObserver<T, R, L, E = L>
 where
     E: ExecutionStrategy<T>,
@@ -364,7 +375,6 @@ where
 {
     inner: R,
     version: usize,
-    // _types: PhantomData<(L, E)>,
 }
 
 impl<T, R, L, E> Clone for SensorObserver<T, R, L, E>
@@ -377,7 +387,6 @@ where
         Self {
             inner: self.inner.clone(),
             version: self.version,
-            // _types: PhantomData,
         }
     }
 }
@@ -428,11 +437,13 @@ where
 
 /*** Mapped and Fused Observers ***/
 
+/// A cacheless mapped sensor observer.
 pub struct MappedSensorObserver<
     A: SensorObserve,
     T,
     F: FnMut(&<A::Lock as ReadGuardSpecifier>::Target) -> T,
 > {
+    /// The original pre-mapped observer.
     pub inner: A,
     _false_cache: OwnedFalseLock<T>,
     map: F,
@@ -443,8 +454,9 @@ where
     A: SensorObserve,
     F: FnMut(&<A::Lock as ReadGuardSpecifier>::Target) -> T,
 {
+    /// Create a new cacheless mapped observer given another observer and an appropriate mapping function.
     #[inline(always)]
-    pub fn map_with(a: A, f: F) -> Self {
+    pub const fn map_with(a: A, f: F) -> Self {
         Self {
             inner: a,
             _false_cache: OwnedFalseLock::new(),
@@ -496,11 +508,13 @@ where
     }
 }
 
+/// A cached mapped sensor observer.
 pub struct MappedSensorObserverCached<
     A: SensorObserve,
     T,
     F: FnMut(&<A::Lock as ReadGuardSpecifier>::Target) -> T,
 > {
+    /// The original pre-mapped observer.
     pub inner: A,
     cached: FalseReadLock<T>,
     map: F,
@@ -511,6 +525,7 @@ where
     A: SensorObserve,
     F: FnMut(&<A::Lock as ReadGuardSpecifier>::Target) -> T,
 {
+    /// Create a new cached mapped observer given another observer and an appropriate mapping function.
     #[inline(always)]
     pub fn map_with(mut a: A, mut f: F) -> Self {
         let cached = FalseReadLock(f(&mut a.borrow()));
@@ -565,13 +580,17 @@ where
         self.inner.is_closed()
     }
 }
+
+/// A cacheless fused sensor observer.
 pub struct FusedSensorObserver<
     A: SensorObserve,
     B: SensorObserve,
     T,
     F: FnMut(&<A::Lock as ReadGuardSpecifier>::Target, &<B::Lock as ReadGuardSpecifier>::Target) -> T,
 > {
+    /// The first original pre-mapped observer.
     pub a: A,
+    /// The second original pre-mapped observer.
     pub b: B,
     _false_cache: OwnedFalseLock<T>,
     fuse: F,
@@ -586,6 +605,7 @@ where
         &<B::Lock as ReadGuardSpecifier>::Target,
     ) -> T,
 {
+    /// Create a new cacheless fused observer given two other independent observers and an appropriate fusing function.
     #[inline(always)]
     pub fn fuse_with(a: A, b: B, f: F) -> Self {
         Self {
@@ -646,13 +666,16 @@ where
     }
 }
 
+/// A cached fused sensor observer.
 pub struct FusedSensorObserverCached<
     A: SensorObserve,
     B: SensorObserve,
     T,
     F: FnMut(&<A::Lock as ReadGuardSpecifier>::Target, &<B::Lock as ReadGuardSpecifier>::Target) -> T,
 > {
+    /// The first original pre-mapped observer.
     pub a: A,
+    /// The second original pre-mapped observer.
     pub b: B,
     cache: FalseReadLock<T>,
     fuse: F,
@@ -667,6 +690,7 @@ where
         &<B::Lock as ReadGuardSpecifier>::Target,
     ) -> T,
 {
+    /// Create a new cacheled fused observer given two other independent observers and an appropriate fusing function.
     #[inline(always)]
     pub fn fuse_with(mut a: A, mut b: B, mut f: F) -> Self {
         let cache = FalseReadLock(f(&a.borrow(), &b.borrow()));
@@ -729,26 +753,13 @@ where
     }
 }
 
-/*** Callbacks and Async ***/
+/*** Executables and Async ***/
 
+/// Allows registration of an executable.
 pub trait RegisterFunction<F> {
+    /// Register an executable.
     fn register(&self, f: F);
 }
-
-// impl<T, S, L, E, F> RegisterFunction<F> for SensorWriter<T, S, L, AccessStrategyMut<T, E>>
-// where
-//     L: DataWriteLock<Target = T>,
-//     E: ExecManagerMut<T> + ExecRegisterMut<F>,
-//     for<'a> &'a S: ShareStrategy<'a, Target = (L, AccessStrategyMut<T, E>)>,
-// {
-//     fn register(&self, f: F) {
-//         let revised_data = self.0.share_elided_ref();
-//         let guard = revised_data.data.0.write();
-//         let guard = L::atomic_downgrade(guard);
-//         revised_data.1.register(f);
-//         drop(guard);
-//     }
-// }
 
 impl<T, S, L, E, F> RegisterFunction<F> for SensorWriter<T, S, L, E>
 where
@@ -771,6 +782,8 @@ where
         E::register(self.inner.share_elided_ref(), f);
     }
 }
+
+/// A future that resolves when the sensor value gets updated.
 #[repr(transparent)]
 pub struct WaitUntilChangedFuture<'a, T, R, L, E>(Option<&'a SensorObserver<T, R, L, E>>)
 where
@@ -788,10 +801,7 @@ where
 {
     type Output = ();
 
-    fn poll(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> Poll<Self::Output> {
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         if let Some(value) = self.0.take() {
             if value.has_changed() {
                 Poll::Ready(())
@@ -809,6 +819,7 @@ where
     }
 }
 
+/// A future that resolves when the sensor value gets updated with a value that matches a certain condition.
 pub struct WaitForFuture<'a, T, R, L, E, F>(
     *mut SensorObserver<T, R, L, E>,
     F,
@@ -830,10 +841,7 @@ where
 {
     type Output = L::ReadGuard<'a>;
 
-    fn poll(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> Poll<Self::Output> {
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         // Safe code does not seem to want to compile without a guard reaquisition. Possibly inexperience,
         // but also possibly a quirk of `Option`'s `None` variant still storing type information.
         if !self.0.is_null() {

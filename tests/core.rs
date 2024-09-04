@@ -2,10 +2,10 @@ use async_std::future::timeout;
 use futures::executor::block_on;
 use paste::paste;
 use sensor_fuse::{
-    callback::{ExecManager, ExecRegister, ExecutionStrategy, RegistrationStrategy},
+    callback::{ExecutionStrategy, RegistrationStrategy},
     lock::{self, DataWriteLock},
     prelude::*,
-    RevisedData, SensorObserver, SensorWriter, ShareStrategy,
+    RevisedData, SensorWriter, ShareStrategy,
 };
 use std::ops::Deref;
 use std::task::Waker;
@@ -565,26 +565,26 @@ test_core_exec!(
 
 /*** std_sync locks ***/
 
-// test_core!(ss_rwl, lock::std_sync::RwSensorData<_>);
+test_core!(ss_rwl, lock::std_sync::RwSensorData<_>);
 
-// test_core!(ss_arc_rwl, lock::std_sync::ArcRwSensorData<_>);
-// test_core_with_owned_observer!(ss_arc_rwl, lock::std_sync::ArcRwSensorData<_>);
+test_core!(ss_arc_rwl, lock::std_sync::ArcRwSensorData<_>);
+test_core_with_owned_observer!(ss_arc_rwl, lock::std_sync::ArcRwSensorData<_>);
 
-// test_core!(ss_mtx, lock::std_sync::MutexSensorData<_>);
+test_core!(ss_mtx, lock::std_sync::MutexSensorData<_>);
 
-// test_core!(ss_arc_mtx, lock::std_sync::ArcMutexSensorData<_>);
-// test_core_with_owned_observer!(ss_arc_mtx, lock::std_sync::ArcMutexSensorData<_>);
+test_core!(ss_arc_mtx, lock::std_sync::ArcMutexSensorData<_>);
+test_core_with_owned_observer!(ss_arc_mtx, lock::std_sync::ArcMutexSensorData<_>);
 
-// test_core!(ss_rwl_exec, lock::std_sync::RwSensorDataExec<_>);
-// test_core_exec!(ss_rwl_exec, lock::std_sync::RwSensorDataExec<_>);
+test_core!(ss_rwl_exec, lock::std_sync::RwSensorDataExec<_>);
+test_core_exec!(ss_rwl_exec, lock::std_sync::RwSensorDataExec<_>);
 
-// test_core!(ss_arc_rwl_exec, lock::std_sync::ArcRwSensorDataExec<_>);
-// test_core_with_owned_observer!(ss_arc_rwl_exec, lock::std_sync::ArcMutexSensorDataExec<_>);
-// test_core_exec!(ss_arc_rwl_exec, lock::std_sync::ArcRwSensorDataExec<_>);
+test_core!(ss_arc_rwl_exec, lock::std_sync::ArcRwSensorDataExec<_>);
+test_core_with_owned_observer!(ss_arc_rwl_exec, lock::std_sync::ArcMutexSensorDataExec<_>);
+test_core_exec!(ss_arc_rwl_exec, lock::std_sync::ArcRwSensorDataExec<_>);
 
-// test_core!(ss_mtx_exec, lock::std_sync::MutexSensorDataExec<_>);
-// test_core_exec!(ss_mtx_exec, lock::std_sync::MutexSensorDataExec<_>);
+test_core!(ss_mtx_exec, lock::std_sync::MutexSensorDataExec<_>);
+test_core_exec!(ss_mtx_exec, lock::std_sync::MutexSensorDataExec<_>);
 
-// test_core!(ss_arc_mtx_exec, lock::std_sync::ArcMutexSensorDataExec<_>);
-// test_core_with_owned_observer!(ss_arc_mtx_exec, lock::std_sync::ArcMutexSensorDataExec<_>);
-// test_core_exec!(ss_arc_mtx_exec, lock::std_sync::ArcMutexSensorDataExec<_>);
+test_core!(ss_arc_mtx_exec, lock::std_sync::ArcMutexSensorDataExec<_>);
+test_core_with_owned_observer!(ss_arc_mtx_exec, lock::std_sync::ArcMutexSensorDataExec<_>);
+test_core_exec!(ss_arc_mtx_exec, lock::std_sync::ArcMutexSensorDataExec<_>);

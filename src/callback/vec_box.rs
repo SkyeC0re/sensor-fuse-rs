@@ -1,6 +1,9 @@
-use core::task::Waker;
+extern crate alloc;
 
-use super::{ExecManager, ExecManagerMut, ExecRegister, ExecRegisterMut};
+use alloc::{boxed::Box, vec::Vec};
+use core::{ptr, task::Waker};
+
+use super::{ExecManagerMut, ExecRegisterMut};
 
 pub struct VecBoxManager<T> {
     callbacks: Vec<Box<dyn Send + FnMut(&T) -> bool>>,
@@ -41,7 +44,7 @@ impl<T> ExecManagerMut<T> for VecBoxManager<T> {
                     i += 1;
                 } else {
                     len -= 1;
-                    std::ptr::swap(func, ptr_slice.add(len));
+                    ptr::swap(func, ptr_slice.add(len));
                 }
             }
         }

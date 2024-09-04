@@ -1,3 +1,4 @@
+use core::ops::Deref;
 use parking_lot;
 
 use crate::{
@@ -38,9 +39,7 @@ impl<T> DataWriteLock for parking_lot::RwLock<T> {
     }
 
     #[inline(always)]
-    fn atomic_downgrade(
-        write_guard: Self::WriteGuard<'_>,
-    ) -> impl std::ops::Deref<Target = Self::Target> {
+    fn atomic_downgrade(write_guard: Self::WriteGuard<'_>) -> impl Deref<Target = Self::Target> {
         parking_lot::RwLockWriteGuard::downgrade(write_guard)
     }
 }
@@ -84,7 +83,7 @@ pub type RwSensorWriter<T> =
 impl<T> RwSensorWriter<T> {
     #[inline(always)]
     pub const fn new(init: T) -> Self {
-        SensorWriter::new_with_shared(RevisedData::new((
+        SensorWriter::new_from_shared(RevisedData::new((
             parking_lot::RwLock::new(init),
             AccessStrategyImmut::new(()),
         )))
@@ -106,7 +105,7 @@ pub type MutexSensorWriter<T> =
 impl<T> MutexSensorWriter<T> {
     #[inline(always)]
     pub const fn new(init: T) -> Self {
-        SensorWriter::new_with_shared(RevisedData::new((
+        SensorWriter::new_from_shared(RevisedData::new((
             parking_lot::Mutex::new(init),
             AccessStrategyImmut::new(()),
         )))
@@ -120,11 +119,12 @@ impl<T> From<T> for MutexSensorWriter<T> {
     }
 }
 
-#[cfg(feature = "std")]
-pub use std_req::*;
-#[cfg(feature = "std")]
-mod std_req {
-    use std::sync::Arc;
+#[cfg(feature = "alloc")]
+pub use alloc_req::*;
+#[cfg(feature = "alloc")]
+mod alloc_req {
+    extern crate alloc;
+    use alloc::sync::Arc;
 
     use crate::{
         callback::{vec_box::VecBoxManager, AccessStrategyImmut, AccessStrategyMut},
@@ -150,7 +150,7 @@ mod std_req {
     impl<T> RwSensorWriterExec<T> {
         #[inline(always)]
         pub const fn new(init: T) -> Self {
-            SensorWriter(RevisedData::new((
+            SensorWriter::new_from_shared(RevisedData::new((
                 parking_lot::RwLock::new(init),
                 AccessStrategyMut::new(VecBoxManager::new()),
             )))
@@ -179,7 +179,7 @@ mod std_req {
     impl<T> MutexSensorWriterExec<T> {
         #[inline(always)]
         pub const fn new(init: T) -> Self {
-            SensorWriter(RevisedData::new((
+            SensorWriter::new_from_shared(RevisedData::new((
                 parking_lot::Mutex::new(init),
                 AccessStrategyMut::new(VecBoxManager::new()),
             )))
@@ -202,7 +202,7 @@ mod std_req {
     impl<T> ArcRwSensorWriter<T> {
         #[inline(always)]
         pub fn new(init: T) -> Self {
-            SensorWriter(Arc::new(RevisedData::new((
+            SensorWriter::new_from_shared(Arc::new(RevisedData::new((
                 parking_lot::RwLock::new(init),
                 AccessStrategyImmut::new(()),
             ))))
@@ -225,7 +225,7 @@ mod std_req {
     impl<T> ArcMutexSensorWriter<T> {
         #[inline(always)]
         pub fn new(init: T) -> Self {
-            SensorWriter(Arc::new(RevisedData::new((
+            SensorWriter::new_from_shared(Arc::new(RevisedData::new((
                 parking_lot::Mutex::new(init),
                 AccessStrategyImmut::new(()),
             ))))
@@ -255,7 +255,7 @@ mod std_req {
     impl<T> ArcRwSensorWriterExec<T> {
         #[inline(always)]
         pub fn new(init: T) -> Self {
-            SensorWriter(Arc::new(RevisedData::new((
+            SensorWriter::new_from_shared(Arc::new(RevisedData::new((
                 parking_lot::RwLock::new(init),
                 AccessStrategyMut::new(VecBoxManager::new()),
             ))))
@@ -282,7 +282,7 @@ mod std_req {
     impl<T> ArcMutexSensorWriterExec<T> {
         #[inline(always)]
         pub fn new(init: T) -> Self {
-            SensorWriter(Arc::new(RevisedData::new((
+            SensorWriter::new_from_shared(Arc::new(RevisedData::new((
                 parking_lot::Mutex::new(init),
                 AccessStrategyMut::new(VecBoxManager::new()),
             ))))

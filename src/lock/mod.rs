@@ -1,22 +1,26 @@
-pub mod parking_lot;
-// pub mod std_sync;
+#[cfg(feature = "alloc")]
+extern crate alloc;
 
+pub mod parking_lot;
+#[cfg(feature = "std")]
+pub mod std_sync;
+
+#[cfg(feature = "alloc")]
+use alloc::sync::Arc;
 use core::{
     marker::PhantomData,
     ops::{Deref, DerefMut},
 };
 use derived_deref::{Deref, DerefMut};
-#[cfg(feature = "std")]
-use std::sync::Arc;
 
 use crate::{RevisedData, SensorObserver, SensorWriter};
 
 pub type AbstractSensorObserver<'a, T, L, E> = SensorObserver<T, &'a RevisedData<(L, E)>, L, E>;
 pub type AbstractSensorWriter<T, L, E> = SensorWriter<T, RevisedData<(L, E)>, L, E>;
 
-#[cfg(feature = "std")]
+#[cfg(feature = "alloc")]
 pub type AbstractArcSensorObserver<T, L, E> = SensorObserver<T, Arc<RevisedData<(L, E)>>, L, E>;
-#[cfg(feature = "std")]
+#[cfg(feature = "alloc")]
 pub type AbstractArcSensorWriter<T, L, E> = SensorWriter<T, Arc<RevisedData<(L, E)>>, L, E>;
 
 pub trait ReadGuardSpecifier {
@@ -77,7 +81,7 @@ pub struct OwnedFalseLock<T>(PhantomData<T>);
 
 impl<T> OwnedFalseLock<T> {
     #[inline(always)]
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self(PhantomData)
     }
 }
