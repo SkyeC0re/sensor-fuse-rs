@@ -1,5 +1,5 @@
 #[cfg(feature = "alloc")]
-pub mod vec_box;
+pub mod standard;
 
 use core::{cell::UnsafeCell, marker::PhantomData};
 

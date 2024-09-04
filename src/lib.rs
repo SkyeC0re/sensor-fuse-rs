@@ -56,7 +56,7 @@
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
-pub mod callback;
+pub mod executor;
 pub mod lock;
 pub mod prelude;
 
@@ -74,7 +74,7 @@ use core::{
 };
 
 use crate::{
-    callback::{ExecutionStrategy, RegistrationStrategy},
+    executor::{ExecutionStrategy, RegistrationStrategy},
     lock::{
         DataReadLock, DataWriteLock, FalseReadLock, OwnedData, OwnedFalseLock, ReadGuardSpecifier,
     },

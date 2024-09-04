@@ -2,24 +2,17 @@ extern crate alloc;
 
 use alloc::{boxed::Box, vec::Vec};
 use core::{ptr, task::Waker};
+use parking_lot::Mutex;
 
-use super::{ExecManagerMut, ExecRegisterMut};
+use super::{ExecManager, ExecManagerMut, ExecRegister, ExecRegisterMut};
 
-pub struct VecBoxManager<T> {
+pub struct ExecutorMut<T> {
     callbacks: Vec<Box<dyn Send + FnMut(&T) -> bool>>,
     wakers: Vec<Waker>,
 }
 
-impl<T> Default for VecBoxManager<T> {
-    fn default() -> Self {
-        Self {
-            callbacks: Default::default(),
-            wakers: Default::default(),
-        }
-    }
-}
-
-impl<T> VecBoxManager<T> {
+impl<T> ExecutorMut<T> {
+    #[inline]
     pub const fn new() -> Self {
         Self {
             callbacks: Vec::new(),
@@ -28,7 +21,7 @@ impl<T> VecBoxManager<T> {
     }
 }
 
-impl<T> ExecManagerMut<T> for VecBoxManager<T> {
+impl<T> ExecManagerMut<T> for ExecutorMut<T> {
     fn execute(&mut self, value: &T) {
         for waker in self.wakers.drain(..) {
             waker.wake();
@@ -53,14 +46,47 @@ impl<T> ExecManagerMut<T> for VecBoxManager<T> {
     }
 }
 
-impl<T, F: 'static + Send + FnMut(&T) -> bool> ExecRegisterMut<F> for VecBoxManager<T> {
+impl<T, F: 'static + Send + FnMut(&T) -> bool> ExecRegisterMut<F> for ExecutorMut<T> {
+    #[inline]
     fn register(&mut self, f: F) {
         self.callbacks.push(Box::new(f));
     }
 }
 
-impl<T> ExecRegisterMut<&Waker> for VecBoxManager<T> {
+impl<T> ExecRegisterMut<&Waker> for ExecutorMut<T> {
+    #[inline]
     fn register(&mut self, w: &Waker) {
         self.wakers.push(w.clone());
+    }
+}
+
+#[repr(transparent)]
+pub struct ExecutorImmut<T>(Mutex<ExecutorMut<T>>);
+
+impl<T> ExecutorImmut<T> {
+    #[inline]
+    pub const fn new() -> Self {
+        Self(Mutex::new(ExecutorMut::new()))
+    }
+}
+
+impl<T> ExecManager<T> for ExecutorImmut<T> {
+    #[inline]
+    fn execute(&self, value: &T) {
+        self.0.lock().execute(value);
+    }
+}
+
+impl<T, F: 'static + Send + FnMut(&T) -> bool> ExecRegister<F> for ExecutorImmut<T> {
+    #[inline]
+    fn register(&self, f: F) {
+        self.0.lock().register(f);
+    }
+}
+
+impl<T> ExecRegister<&Waker> for ExecutorImmut<T> {
+    #[inline]
+    fn register(&self, w: &Waker) {
+        self.0.lock().register(w);
     }
 }

@@ -2,7 +2,7 @@ use async_std::future::timeout;
 use futures::executor::block_on;
 use paste::paste;
 use sensor_fuse::{
-    callback::{ExecutionStrategy, RegistrationStrategy},
+    executor::{ExecutionStrategy, RegistrationStrategy},
     lock::{self, DataWriteLock},
     prelude::*,
     RevisedData, SensorWriter, ShareStrategy,
