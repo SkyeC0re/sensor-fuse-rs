@@ -2,8 +2,7 @@ use core::ops::Deref;
 use parking_lot;
 
 use crate::{
-    executor::AccessStrategyImmut, DataReadLock, DataWriteLock, ReadGuardSpecifier, RevisedData,
-    SensorWriter,
+    executor::AsImmut, DataReadLock, DataWriteLock, ReadGuardSpecifier, RevisedData, SensorWriter,
 };
 
 use super::{AbstractSensorObserver, AbstractSensorWriter};
@@ -74,18 +73,16 @@ impl<T> DataReadLock for parking_lot::Mutex<T> {
     }
 }
 
-pub type RwSensorData<T> = RevisedData<(parking_lot::RwLock<T>, AccessStrategyImmut<T, ()>)>;
-pub type RwSensor<'a, T> =
-    AbstractSensorObserver<'a, T, parking_lot::RwLock<T>, AccessStrategyImmut<T, ()>>;
-pub type RwSensorWriter<T> =
-    AbstractSensorWriter<T, parking_lot::RwLock<T>, AccessStrategyImmut<T, ()>>;
+pub type RwSensorData<T> = RevisedData<(parking_lot::RwLock<T>, AsImmut<T, ()>)>;
+pub type RwSensor<'a, T> = AbstractSensorObserver<'a, T, parking_lot::RwLock<T>, AsImmut<T, ()>>;
+pub type RwSensorWriter<T> = AbstractSensorWriter<T, parking_lot::RwLock<T>, AsImmut<T, ()>>;
 
 impl<T> RwSensorWriter<T> {
     #[inline(always)]
     pub const fn new(init: T) -> Self {
         SensorWriter::new_from_shared(RevisedData::new((
             parking_lot::RwLock::new(init),
-            AccessStrategyImmut::new(()),
+            AsImmut::new(()),
         )))
     }
 }
@@ -96,18 +93,16 @@ impl<T> From<T> for RwSensorWriter<T> {
     }
 }
 
-pub type MutexSensorData<T> = RevisedData<(parking_lot::Mutex<T>, AccessStrategyImmut<T, ()>)>;
-pub type MutexSensor<'a, T> =
-    AbstractSensorObserver<'a, T, parking_lot::Mutex<T>, AccessStrategyImmut<T, ()>>;
-pub type MutexSensorWriter<T> =
-    AbstractSensorWriter<T, parking_lot::Mutex<T>, AccessStrategyImmut<T, ()>>;
+pub type MutexSensorData<T> = RevisedData<(parking_lot::Mutex<T>, AsImmut<T, ()>)>;
+pub type MutexSensor<'a, T> = AbstractSensorObserver<'a, T, parking_lot::Mutex<T>, AsImmut<T, ()>>;
+pub type MutexSensorWriter<T> = AbstractSensorWriter<T, parking_lot::Mutex<T>, AsImmut<T, ()>>;
 
 impl<T> MutexSensorWriter<T> {
     #[inline(always)]
     pub const fn new(init: T) -> Self {
         SensorWriter::new_from_shared(RevisedData::new((
             parking_lot::Mutex::new(init),
-            AccessStrategyImmut::new(()),
+            AsImmut::new(()),
         )))
     }
 }
@@ -129,7 +124,7 @@ mod alloc_req {
     use crate::{
         executor::{
             standard::{ExecutorImmut, ExecutorMut},
-            AccessStrategyImmut, AccessStrategyMut,
+            AsImmut, AsMut,
         },
         lock::{
             AbstractArcSensorObserver, AbstractArcSensorWriter, AbstractSensorObserver,
@@ -138,24 +133,18 @@ mod alloc_req {
         RevisedData, SensorWriter,
     };
 
-    pub type RwSensorDataExec<T> = RevisedData<(
-        parking_lot::RwLock<T>,
-        AccessStrategyImmut<T, ExecutorImmut<T>>,
-    )>;
-    pub type RwSensorExec<'a, T> = AbstractSensorObserver<
-        'a,
-        T,
-        parking_lot::RwLock<T>,
-        AccessStrategyImmut<T, ExecutorImmut<T>>,
-    >;
+    pub type RwSensorDataExec<T> =
+        RevisedData<(parking_lot::RwLock<T>, AsImmut<T, ExecutorImmut<T>>)>;
+    pub type RwSensorExec<'a, T> =
+        AbstractSensorObserver<'a, T, parking_lot::RwLock<T>, AsImmut<T, ExecutorImmut<T>>>;
     pub type RwSensorWriterExec<T> =
-        AbstractSensorWriter<T, parking_lot::RwLock<T>, AccessStrategyImmut<T, ExecutorImmut<T>>>;
+        AbstractSensorWriter<T, parking_lot::RwLock<T>, AsImmut<T, ExecutorImmut<T>>>;
     impl<T> RwSensorWriterExec<T> {
         #[inline(always)]
         pub const fn new(init: T) -> Self {
             SensorWriter::new_from_shared(RevisedData::new((
                 parking_lot::RwLock::new(init),
-                AccessStrategyImmut::new(ExecutorImmut::new()),
+                AsImmut::new(ExecutorImmut::new()),
             )))
         }
     }
@@ -168,17 +157,17 @@ mod alloc_req {
     }
 
     pub type MutexSensorDataExec<T> =
-        RevisedData<(parking_lot::Mutex<T>, AccessStrategyMut<T, ExecutorMut<T>>)>;
+        RevisedData<(parking_lot::Mutex<T>, AsMut<T, ExecutorMut<T>>)>;
     pub type MutexSensorExec<'a, T> =
-        AbstractSensorObserver<'a, T, parking_lot::Mutex<T>, AccessStrategyMut<T, ExecutorMut<T>>>;
+        AbstractSensorObserver<'a, T, parking_lot::Mutex<T>, AsMut<T, ExecutorMut<T>>>;
     pub type MutexSensorWriterExec<T> =
-        AbstractSensorWriter<T, parking_lot::Mutex<T>, AccessStrategyMut<T, ExecutorMut<T>>>;
+        AbstractSensorWriter<T, parking_lot::Mutex<T>, AsMut<T, ExecutorMut<T>>>;
     impl<T> MutexSensorWriterExec<T> {
         #[inline(always)]
         pub const fn new(init: T) -> Self {
             SensorWriter::new_from_shared(RevisedData::new((
                 parking_lot::Mutex::new(init),
-                AccessStrategyMut::new(ExecutorMut::new()),
+                AsMut::new(ExecutorMut::new()),
             )))
         }
     }
@@ -190,18 +179,16 @@ mod alloc_req {
         }
     }
 
-    pub type ArcRwSensorData<T> =
-        Arc<RevisedData<(parking_lot::RwLock<T>, AccessStrategyImmut<T, ()>)>>;
-    pub type ArcRwSensor<T> =
-        AbstractArcSensorObserver<T, parking_lot::RwLock<T>, AccessStrategyImmut<T, ()>>;
+    pub type ArcRwSensorData<T> = Arc<RevisedData<(parking_lot::RwLock<T>, AsImmut<T, ()>)>>;
+    pub type ArcRwSensor<T> = AbstractArcSensorObserver<T, parking_lot::RwLock<T>, AsImmut<T, ()>>;
     pub type ArcRwSensorWriter<T> =
-        AbstractArcSensorWriter<T, parking_lot::RwLock<T>, AccessStrategyImmut<T, ()>>;
+        AbstractArcSensorWriter<T, parking_lot::RwLock<T>, AsImmut<T, ()>>;
     impl<T> ArcRwSensorWriter<T> {
         #[inline(always)]
         pub fn new(init: T) -> Self {
             SensorWriter::new_from_shared(Arc::new(RevisedData::new((
                 parking_lot::RwLock::new(init),
-                AccessStrategyImmut::new(()),
+                AsImmut::new(()),
             ))))
         }
     }
@@ -213,18 +200,17 @@ mod alloc_req {
         }
     }
 
-    pub type ArcMutexSensorData<T> =
-        Arc<RevisedData<(parking_lot::Mutex<T>, AccessStrategyImmut<T, ()>)>>;
+    pub type ArcMutexSensorData<T> = Arc<RevisedData<(parking_lot::Mutex<T>, AsImmut<T, ()>)>>;
     pub type ArcMutexSensor<T> =
-        AbstractArcSensorObserver<T, parking_lot::Mutex<T>, AccessStrategyImmut<T, ()>>;
+        AbstractArcSensorObserver<T, parking_lot::Mutex<T>, AsImmut<T, ()>>;
     pub type ArcMutexSensorWriter<T> =
-        AbstractArcSensorWriter<T, parking_lot::Mutex<T>, AccessStrategyImmut<T, ()>>;
+        AbstractArcSensorWriter<T, parking_lot::Mutex<T>, AsImmut<T, ()>>;
     impl<T> ArcMutexSensorWriter<T> {
         #[inline(always)]
         pub fn new(init: T) -> Self {
             SensorWriter::new_from_shared(Arc::new(RevisedData::new((
                 parking_lot::Mutex::new(init),
-                AccessStrategyImmut::new(()),
+                AsImmut::new(()),
             ))))
         }
     }
@@ -236,28 +222,18 @@ mod alloc_req {
         }
     }
 
-    pub type ArcRwSensorDataExec<T> = Arc<
-        RevisedData<(
-            parking_lot::RwLock<T>,
-            AccessStrategyImmut<T, ExecutorImmut<T>>,
-        )>,
-    >;
-    pub type ArcRwSensorExec<T> = AbstractArcSensorObserver<
-        T,
-        parking_lot::RwLock<T>,
-        AccessStrategyImmut<T, ExecutorImmut<T>>,
-    >;
-    pub type ArcRwSensorWriterExec<T> = AbstractArcSensorWriter<
-        T,
-        parking_lot::RwLock<T>,
-        AccessStrategyImmut<T, ExecutorImmut<T>>,
-    >;
+    pub type ArcRwSensorDataExec<T> =
+        Arc<RevisedData<(parking_lot::RwLock<T>, AsImmut<T, ExecutorImmut<T>>)>>;
+    pub type ArcRwSensorExec<T> =
+        AbstractArcSensorObserver<T, parking_lot::RwLock<T>, AsImmut<T, ExecutorImmut<T>>>;
+    pub type ArcRwSensorWriterExec<T> =
+        AbstractArcSensorWriter<T, parking_lot::RwLock<T>, AsImmut<T, ExecutorImmut<T>>>;
     impl<T> ArcRwSensorWriterExec<T> {
         #[inline(always)]
         pub fn new(init: T) -> Self {
             SensorWriter::new_from_shared(Arc::new(RevisedData::new((
                 parking_lot::RwLock::new(init),
-                AccessStrategyImmut::new(ExecutorImmut::new()),
+                AsImmut::new(ExecutorImmut::new()),
             ))))
         }
     }
@@ -270,17 +246,17 @@ mod alloc_req {
     }
 
     pub type ArcMutexSensorDataExec<T> =
-        Arc<RevisedData<(parking_lot::Mutex<T>, AccessStrategyMut<T, ExecutorMut<T>>)>>;
+        Arc<RevisedData<(parking_lot::Mutex<T>, AsMut<T, ExecutorMut<T>>)>>;
     pub type ArcMutexSensorExec<T> =
-        AbstractArcSensorObserver<T, parking_lot::Mutex<T>, AccessStrategyMut<T, ExecutorMut<T>>>;
+        AbstractArcSensorObserver<T, parking_lot::Mutex<T>, AsMut<T, ExecutorMut<T>>>;
     pub type ArcMutexSensorWriterExec<T> =
-        AbstractArcSensorWriter<T, parking_lot::Mutex<T>, AccessStrategyMut<T, ExecutorMut<T>>>;
+        AbstractArcSensorWriter<T, parking_lot::Mutex<T>, AsMut<T, ExecutorMut<T>>>;
     impl<T> ArcMutexSensorWriterExec<T> {
         #[inline(always)]
         pub fn new(init: T) -> Self {
             SensorWriter::new_from_shared(Arc::new(RevisedData::new((
                 parking_lot::Mutex::new(init),
-                AccessStrategyMut::new(ExecutorMut::new()),
+                AsMut::new(ExecutorMut::new()),
             ))))
         }
     }

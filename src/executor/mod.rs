@@ -5,31 +5,70 @@ use core::{cell::UnsafeCell, marker::PhantomData};
 
 use crate::lock::DataWriteLock;
 
-trait Sealed {}
+mod private {
+    pub trait Sealed {}
+}
 
-pub trait ExecutionStrategy<T>: Sealed {
+/// Defines whether or not an execution manager requires mutable access to execute. If so
+/// then the locking strategy for the raw sensor data will be used to ensure synchronized
+/// access to the executor.
+pub trait ExecutionStrategy<T>: private::Sealed {
+    /// Run the execution manager with the specified value.
     fn execute(&self, value: &T);
 }
 
-pub trait RegistrationStrategy<F>: Sealed {
+/// Defines whether or not an execution manager requires mutable access to register a specific executable type.
+pub trait RegistrationStrategy<F>: private::Sealed {
+    /// Register an executable on the execution manager.
     fn register<L: DataWriteLock>(data: &(L, Self), f: F);
 }
 
-#[repr(transparent)]
-pub struct AccessStrategyImmut<T, E: ExecManager<T>>(E, PhantomData<T>);
+/// An execution manager that only requires immutable access.
+pub trait ExecManager<T> {
+    /// Execute all executables registered on the executor manager.
+    fn execute(&self, value: &T);
+}
 
-impl<T, E> AccessStrategyImmut<T, E>
+/// Signifies that an execution manager may register an executable using immutable access.
+pub trait ExecRegister<F> {
+    /// Register an executable unit on the callback manager's execution set. In most cases this will usually be a function.
+    fn register(&self, f: F);
+}
+
+impl<T> ExecManager<T> for () {
+    #[inline(always)]
+    fn execute(&self, _: &T) {}
+}
+
+/// An execution manager that requires mutable access.
+pub trait ExecManagerMut<T> {
+    /// Execute all executables registered on the executor manager.
+    fn execute(&mut self, value: &T);
+}
+
+/// Signifies that an execution manager may register an executable using mutable access.
+pub trait ExecRegisterMut<F> {
+    /// Register an executable unit on the callback manager's execution set. In most cases this will usually be a function.
+    fn register(&mut self, f: F);
+}
+
+/// Wrapper to select the immutable execution strategy. See `trait@ExecutionStrategy`.
+#[repr(transparent)]
+pub struct AsImmut<T, E: ExecManager<T>>(E, PhantomData<T>);
+
+impl<T, E> AsImmut<T, E>
 where
     E: ExecManager<T>,
 {
+    /// Select the immutable execution strategy for an execution manager.
     #[inline(always)]
     pub const fn new(exec_manager: E) -> Self {
         Self(exec_manager, PhantomData)
     }
 }
 
-impl<T, E> Sealed for AccessStrategyImmut<T, E> where E: ExecManager<T> {}
-impl<T, E> ExecutionStrategy<T> for AccessStrategyImmut<T, E>
+impl<T, E> private::Sealed for AsImmut<T, E> where E: ExecManager<T> {}
+impl<T, E> ExecutionStrategy<T> for AsImmut<T, E>
 where
     E: ExecManager<T>,
 {
@@ -38,23 +77,35 @@ where
     }
 }
 
+impl<T, F, E> RegistrationStrategy<F> for AsImmut<T, E>
+where
+    E: ExecManager<T> + ExecRegister<F>,
+{
+    #[inline(always)]
+    fn register<L: DataWriteLock>(data: &(L, Self), f: F) {
+        data.1 .0.register(f);
+    }
+}
+
+/// Wrapper to select the mutable execution strategy. See `trait@ExecutionStrategy`.
 #[repr(transparent)]
-pub struct AccessStrategyMut<T, E: ExecManagerMut<T>>(UnsafeCell<E>, PhantomData<T>);
+pub struct AsMut<T, E: ExecManagerMut<T>>(UnsafeCell<E>, PhantomData<T>);
 
-unsafe impl<T, E> Sync for AccessStrategyMut<T, E> where E: ExecManagerMut<T> {}
+unsafe impl<T, E> Sync for AsMut<T, E> where E: ExecManagerMut<T> {}
 
-impl<T, E> AccessStrategyMut<T, E>
+impl<T, E> AsMut<T, E>
 where
     E: ExecManagerMut<T>,
 {
+    /// Select the mutable execution strategy for an execution manager.
     #[inline(always)]
     pub const fn new(exec_manager: E) -> Self {
         Self(UnsafeCell::new(exec_manager), PhantomData)
     }
 }
 
-impl<T, E> Sealed for AccessStrategyMut<T, E> where E: ExecManagerMut<T> {}
-impl<T, E> ExecutionStrategy<T> for AccessStrategyMut<T, E>
+impl<T, E> private::Sealed for AsMut<T, E> where E: ExecManagerMut<T> {}
+impl<T, E> ExecutionStrategy<T> for AsMut<T, E>
 where
     E: ExecManagerMut<T>,
 {
@@ -65,22 +116,7 @@ where
     }
 }
 
-pub trait ExecManagerMut<T> {
-    /// Execute all executables registered on the executor manager.
-    fn execute(&mut self, value: &T);
-}
-
-impl<T> ExecManager<T> for () {
-    #[inline(always)]
-    fn execute(&self, _: &T) {}
-}
-
-pub trait ExecRegisterMut<F> {
-    /// Register an executable unit on the callback manager's execution set. In most cases this will usually be a function.
-    fn register(&mut self, f: F);
-}
-
-impl<T, F, E> RegistrationStrategy<F> for AccessStrategyMut<T, E>
+impl<T, F, E> RegistrationStrategy<F> for AsMut<T, E>
 where
     E: ExecManagerMut<T> + ExecRegisterMut<F>,
 {
@@ -92,25 +128,5 @@ where
             (*data.1 .0.get()).register(f);
         }
         drop(guard);
-    }
-}
-
-pub trait ExecManager<T> {
-    /// Execute all executables registered on the executor manager.
-    fn execute(&self, value: &T);
-}
-
-pub trait ExecRegister<F> {
-    /// Register an executable unit on the callback manager's execution set. In most cases this will usually be a function.
-    fn register(&self, f: F);
-}
-
-impl<T, F, E> RegistrationStrategy<F> for AccessStrategyImmut<T, E>
-where
-    E: ExecManager<T> + ExecRegister<F>,
-{
-    #[inline(always)]
-    fn register<L: DataWriteLock>(data: &(L, Self), f: F) {
-        data.1 .0.register(f);
     }
 }
