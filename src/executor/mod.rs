@@ -24,15 +24,22 @@ pub trait RegistrationStrategy<F>: private::Sealed {
 }
 
 /// An execution manager that only requires immutable access.
-pub trait ExecManager<T> {
-    /// Execute all executables registered on the executor manager.
-    fn execute(&self, value: &T);
+pub trait ExecManager<L>
+where
+    L: DataWriteLock,
+{
+    /// Execute all executables registered on the executor manager. Although this presents the execution manager with a read guard,
+    /// this will be a
+    unsafe fn execute(&self, value: L::ReadGuard<'_>);
 }
 
 /// Signifies that an execution manager may register an executable using immutable access.
-pub trait ExecRegister<F> {
+pub trait ExecRegister<L, F>: ExecManager<L>
+where
+    L: DataWriteLock,
+{
     /// Register an executable unit on the callback manager's execution set. In most cases this will usually be a function.
-    fn register(&self, f: F);
+    fn register(&self, lock: &L, f: F);
 }
 
 impl<T> ExecManager<T> for () {

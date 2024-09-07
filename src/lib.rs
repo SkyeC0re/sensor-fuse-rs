@@ -37,12 +37,14 @@
 //! assert_eq!(*observer.pull(), 5);
 //! ```
 //!
+//! ## Execution Managers and Executables
+//!
+//!
+//!
 //! ## Execution Optimization
 //!
-//! The library is opinionated in one aspect. It assumes that the majority of accesses to the executor originates from sensor
-//! value updates as opposed to executable registrations and as such can be bundled under the same locking mechanism as the sensor's
-//! raw data. This allows the executor to be mutably borrowed for each sensor value update, removing the need to lock the executor
-//! separately on every sensor value update. The cost, however associated with this is that registering an executable
+//! The framework allows for two execution
+
 #![warn(bad_style)]
 #![warn(missing_docs)]
 #![warn(trivial_casts)]

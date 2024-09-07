@@ -40,6 +40,9 @@ pub trait DataWriteLock: DataReadLock {
     type WriteGuard<'write>: Deref<Target = Self::Target> + DerefMut
     where
         Self: 'write;
+    type ExclusiveReadGuard<'read>: Deref<Target = Self::Target>
+    where
+        Self: 'read;
 
     /// Provides mutable access to the current value inside the lock.
     fn write(&self) -> Self::WriteGuard<'_>;
@@ -47,13 +50,9 @@ pub trait DataWriteLock: DataReadLock {
     fn try_write(&self) -> Option<Self::WriteGuard<'_>>;
 
     /// Optional optimization for accessing the executor in callback enabled sensor writers and observers.
-    /// This method, if manually implemented, should return a read guard which was atomically downgraded from
-    /// the given write guard.
-    #[inline(always)]
-    #[allow(refining_impl_trait)]
-    fn atomic_downgrade(write_guard: Self::WriteGuard<'_>) -> impl Deref<Target = Self::Target> {
-        write_guard
-    }
+    /// This method should by default just return the write guard, but, if the lock allows for it,
+    /// should return a read guard which was atomically downgraded from the given write guard.
+    fn atomic_downgrade(write_guard: Self::WriteGuard<'_>) -> Self::ExclusiveReadGuard<'_>;
 }
 
 #[derive(Deref, DerefMut, Clone)]
