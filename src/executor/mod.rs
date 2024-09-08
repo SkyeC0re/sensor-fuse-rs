@@ -8,8 +8,8 @@ pub trait ExecManager<L>
 where
     L: DataWriteLock,
 {
-    /// Execute all executables registered on the executor manager by giving it access to an exclusive read guard. This will
-    /// either be a write guard or a read guard that was atomically downgraded from a write guard. As such the execution
+    /// Execute all executables registered on the executor manager by giving it access to an atomically downgraded write guard. This will
+    /// either just be the write guard or a read guard that was atomically downgraded from a write guard. As such the execution
     /// manager is given the guarantee that as long as it holds the guard, no other `execute` call will be initiated.
     fn execute(&self, value: L::DowngradedGuard<'_>);
 }

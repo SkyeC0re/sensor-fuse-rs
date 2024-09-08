@@ -275,7 +275,6 @@ where
         SensorObserver {
             inner,
             version: inner.version(),
-            // _types: PhantomData,
         }
     }
 
@@ -287,7 +286,6 @@ where
         SensorObserver {
             version: inner.version(),
             inner,
-            // _types: PhantomData,
         }
     }
 }

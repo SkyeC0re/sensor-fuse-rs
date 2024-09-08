@@ -2,8 +2,8 @@
 extern crate alloc;
 
 pub mod parking_lot;
-// #[cfg(feature = "std")]
-// pub mod std_sync;
+#[cfg(feature = "std")]
+pub mod std_sync;
 
 #[cfg(feature = "alloc")]
 use alloc::sync::Arc;
@@ -24,8 +24,10 @@ pub type AbstractArcSensorObserver<T, L, E> = SensorObserver<T, Arc<RevisedData<
 pub type AbstractArcSensorWriter<T, L, E> = SensorWriter<T, Arc<RevisedData<(L, E)>>, L, E>;
 
 pub trait ReadGuardSpecifier {
+    /// The underlying type that the guard is protecting.
     type Target;
 
+    /// A read guard with shared, immutable access to `type@Self::Target`.
     type ReadGuard<'read>: Deref<Target = Self::Target>
     where
         Self: 'read;
@@ -37,9 +39,15 @@ pub trait DataReadLock: ReadGuardSpecifier {
     fn try_read(&self) -> Option<Self::ReadGuard<'_>>;
 }
 pub trait DataWriteLock: DataReadLock {
+    /// A write guard with exclusive, mutable access to `type@Self::Target`.
     type WriteGuard<'write>: Deref<Target = Self::Target> + DerefMut
     where
         Self: 'write;
+    /// A "downgraded" write guard. Downgraded is used loosely here, as what this represents is
+    /// a guard that is mutually exclusive with other guards of this type and write guards, but not
+    /// read guards. Functionally this means that for any locking mechanism this will either be
+    /// a write guard (if the locking mechanism does not support atomic downgrades or shared access)
+    /// or a read guard that was atomically downgraded from a write guard.
     type DowngradedGuard<'read>: Deref<Target = Self::Target>
     where
         Self: 'read;

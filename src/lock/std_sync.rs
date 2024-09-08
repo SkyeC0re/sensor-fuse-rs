@@ -1,11 +1,8 @@
 use std::sync::Arc;
 
 use crate::{
-    executor::{
-        standard::{ExecutorImmut, ExecutorMut},
-        AsImmut, AsMut,
-    },
-    DataReadLock, DataWriteLock, ReadGuardSpecifier, RevisedData, SensorWriter,
+    executor::standard::ExecutorMut, DataReadLock, DataWriteLock, ReadGuardSpecifier, RevisedData,
+    SensorWriter,
 };
 
 use super::{
@@ -33,6 +30,10 @@ impl<T> DataReadLock for std::sync::RwLock<T> {
 impl<T> DataWriteLock for std::sync::RwLock<T> {
     type WriteGuard<'write> = std::sync::RwLockWriteGuard<'write, T> where T: 'write;
 
+    type DowngradedGuard<'read> = Self::WriteGuard<'read>
+    where
+        Self: 'read;
+
     #[inline(always)]
     fn write(&self) -> Self::WriteGuard<'_> {
         self.write().unwrap()
@@ -42,10 +43,19 @@ impl<T> DataWriteLock for std::sync::RwLock<T> {
     fn try_write(&self) -> Option<Self::WriteGuard<'_>> {
         self.try_write().ok()
     }
+
+    #[inline(always)]
+    fn atomic_downgrade(write_guard: Self::WriteGuard<'_>) -> Self::DowngradedGuard<'_> {
+        write_guard
+    }
 }
 
 impl<T> DataWriteLock for std::sync::Mutex<T> {
     type WriteGuard<'write> = std::sync::MutexGuard<'write, T> where T: 'write;
+    type DowngradedGuard<'read> = Self::WriteGuard<'read>
+    where
+        Self: 'read;
+
     #[inline(always)]
     fn write(&self) -> Self::WriteGuard<'_> {
         self.lock().unwrap()
@@ -54,6 +64,11 @@ impl<T> DataWriteLock for std::sync::Mutex<T> {
     #[inline(always)]
     fn try_write(&self) -> Option<Self::WriteGuard<'_>> {
         self.try_lock().ok()
+    }
+
+    #[inline(always)]
+    fn atomic_downgrade(write_guard: Self::WriteGuard<'_>) -> Self::DowngradedGuard<'_> {
+        write_guard
     }
 }
 
@@ -74,17 +89,14 @@ impl<T> DataReadLock for std::sync::Mutex<T> {
     }
 }
 
-pub type RwSensorData<T> = RevisedData<(std::sync::RwLock<T>, AsImmut<T, ()>)>;
-pub type RwSensor<'a, T> = AbstractSensorObserver<'a, T, std::sync::RwLock<T>, AsImmut<T, ()>>;
-pub type RwSensorWriter<T> = AbstractSensorWriter<T, std::sync::RwLock<T>, AsImmut<T, ()>>;
+pub type RwSensorData<T> = RevisedData<(std::sync::RwLock<T>, ())>;
+pub type RwSensor<'a, T> = AbstractSensorObserver<'a, T, std::sync::RwLock<T>, ()>;
+pub type RwSensorWriter<T> = AbstractSensorWriter<T, std::sync::RwLock<T>, ()>;
 
 impl<T> RwSensorWriter<T> {
     #[inline(always)]
     pub const fn new(init: T) -> Self {
-        SensorWriter::new_from_shared(RevisedData::new((
-            std::sync::RwLock::new(init),
-            AsImmut::new(()),
-        )))
+        SensorWriter::new_from_shared(RevisedData::new((std::sync::RwLock::new(init), ())))
     }
 }
 impl<T> From<T> for RwSensorWriter<T> {
@@ -94,17 +106,14 @@ impl<T> From<T> for RwSensorWriter<T> {
     }
 }
 
-pub type MutexSensorData<T> = RevisedData<(std::sync::Mutex<T>, AsImmut<T, ()>)>;
-pub type MutexSensor<'a, T> = AbstractSensorObserver<'a, T, std::sync::Mutex<T>, AsImmut<T, ()>>;
-pub type MutexSensorWriter<T> = AbstractSensorWriter<T, std::sync::Mutex<T>, AsImmut<T, ()>>;
+pub type MutexSensorData<T> = RevisedData<(std::sync::Mutex<T>, ())>;
+pub type MutexSensor<'a, T> = AbstractSensorObserver<'a, T, std::sync::Mutex<T>, ()>;
+pub type MutexSensorWriter<T> = AbstractSensorWriter<T, std::sync::Mutex<T>, ()>;
 
 impl<T> MutexSensorWriter<T> {
     #[inline(always)]
     pub const fn new(init: T) -> Self {
-        SensorWriter::new_from_shared(RevisedData::new((
-            std::sync::Mutex::new(init),
-            AsImmut::new(()),
-        )))
+        SensorWriter::new_from_shared(RevisedData::new((std::sync::Mutex::new(init), ())))
     }
 }
 
@@ -114,17 +123,15 @@ impl<T> From<T> for MutexSensorWriter<T> {
         Self::new(value)
     }
 }
-pub type RwSensorDataExec<T> = RevisedData<(std::sync::RwLock<T>, AsImmut<T, ExecutorImmut<T>>)>;
-pub type RwSensorExec<'a, T> =
-    AbstractSensorObserver<'a, T, std::sync::RwLock<T>, AsImmut<T, ExecutorImmut<T>>>;
-pub type RwSensorWriterExec<T> =
-    AbstractSensorWriter<T, std::sync::RwLock<T>, AsImmut<T, ExecutorImmut<T>>>;
+pub type RwSensorDataExec<T> = RevisedData<(std::sync::RwLock<T>, ExecutorMut<T>)>;
+pub type RwSensorExec<'a, T> = AbstractSensorObserver<'a, T, std::sync::RwLock<T>, ExecutorMut<T>>;
+pub type RwSensorWriterExec<T> = AbstractSensorWriter<T, std::sync::RwLock<T>, ExecutorMut<T>>;
 impl<T> RwSensorWriterExec<T> {
     #[inline(always)]
     pub const fn new(init: T) -> Self {
         SensorWriter::new_from_shared(RevisedData::new((
             std::sync::RwLock::new(init),
-            AsImmut::new(ExecutorImmut::new()),
+            ExecutorMut::new(),
         )))
     }
 }
@@ -136,17 +143,16 @@ impl<T> From<T> for RwSensorWriterExec<T> {
     }
 }
 
-pub type MutexSensorDataExec<T> = RevisedData<(std::sync::Mutex<T>, AsMut<T, ExecutorMut<T>>)>;
+pub type MutexSensorDataExec<T> = RevisedData<(std::sync::Mutex<T>, ExecutorMut<T>)>;
 pub type MutexSensorExec<'a, T> =
-    AbstractSensorObserver<'a, T, std::sync::Mutex<T>, AsMut<T, ExecutorMut<T>>>;
-pub type MutexSensorWriterExec<T> =
-    AbstractSensorWriter<T, std::sync::Mutex<T>, AsMut<T, ExecutorMut<T>>>;
+    AbstractSensorObserver<'a, T, std::sync::Mutex<T>, ExecutorMut<T>>;
+pub type MutexSensorWriterExec<T> = AbstractSensorWriter<T, std::sync::Mutex<T>, ExecutorMut<T>>;
 impl<T> MutexSensorWriterExec<T> {
     #[inline(always)]
     pub const fn new(init: T) -> Self {
         SensorWriter::new_from_shared(RevisedData::new((
             std::sync::Mutex::new(init),
-            AsMut::new(ExecutorMut::new()),
+            ExecutorMut::new(),
         )))
     }
 }
@@ -158,15 +164,15 @@ impl<T> From<T> for MutexSensorWriterExec<T> {
     }
 }
 
-pub type ArcRwSensorData<T> = Arc<RevisedData<(std::sync::RwLock<T>, AsImmut<T, ()>)>>;
-pub type ArcRwSensor<T> = AbstractArcSensorObserver<T, std::sync::RwLock<T>, AsImmut<T, ()>>;
-pub type ArcRwSensorWriter<T> = AbstractArcSensorWriter<T, std::sync::RwLock<T>, AsImmut<T, ()>>;
+pub type ArcRwSensorData<T> = Arc<RevisedData<(std::sync::RwLock<T>, ())>>;
+pub type ArcRwSensor<T> = AbstractArcSensorObserver<T, std::sync::RwLock<T>, ()>;
+pub type ArcRwSensorWriter<T> = AbstractArcSensorWriter<T, std::sync::RwLock<T>, ()>;
 impl<T> ArcRwSensorWriter<T> {
     #[inline(always)]
     pub fn new(init: T) -> Self {
         SensorWriter::new_from_shared(Arc::new(RevisedData::new((
             std::sync::RwLock::new(init),
-            AsImmut::new(()),
+            (),
         ))))
     }
 }
@@ -178,15 +184,15 @@ impl<T> From<T> for ArcRwSensorWriter<T> {
     }
 }
 
-pub type ArcMutexSensorData<T> = Arc<RevisedData<(std::sync::Mutex<T>, AsImmut<T, ()>)>>;
-pub type ArcMutexSensor<T> = AbstractArcSensorObserver<T, std::sync::Mutex<T>, AsImmut<T, ()>>;
-pub type ArcMutexSensorWriter<T> = AbstractArcSensorWriter<T, std::sync::Mutex<T>, AsImmut<T, ()>>;
+pub type ArcMutexSensorData<T> = Arc<RevisedData<(std::sync::Mutex<T>, ())>>;
+pub type ArcMutexSensor<T> = AbstractArcSensorObserver<T, std::sync::Mutex<T>, ()>;
+pub type ArcMutexSensorWriter<T> = AbstractArcSensorWriter<T, std::sync::Mutex<T>, ()>;
 impl<T> ArcMutexSensorWriter<T> {
     #[inline(always)]
     pub fn new(init: T) -> Self {
         SensorWriter::new_from_shared(Arc::new(RevisedData::new((
             std::sync::Mutex::new(init),
-            AsImmut::new(()),
+            (),
         ))))
     }
 }
@@ -198,18 +204,16 @@ impl<T> From<T> for ArcMutexSensorWriter<T> {
     }
 }
 
-pub type ArcRwSensorDataExec<T> =
-    Arc<RevisedData<(std::sync::RwLock<T>, AsImmut<T, ExecutorImmut<T>>)>>;
-pub type ArcRwSensorExec<T> =
-    AbstractArcSensorObserver<T, std::sync::RwLock<T>, AsImmut<T, ExecutorImmut<T>>>;
+pub type ArcRwSensorDataExec<T> = Arc<RevisedData<(std::sync::RwLock<T>, ExecutorMut<T>)>>;
+pub type ArcRwSensorExec<T> = AbstractArcSensorObserver<T, std::sync::RwLock<T>, ExecutorMut<T>>;
 pub type ArcRwSensorWriterExec<T> =
-    AbstractArcSensorWriter<T, std::sync::RwLock<T>, AsImmut<T, ExecutorImmut<T>>>;
+    AbstractArcSensorWriter<T, std::sync::RwLock<T>, ExecutorMut<T>>;
 impl<T> ArcRwSensorWriterExec<T> {
     #[inline(always)]
     pub fn new(init: T) -> Self {
         SensorWriter::new_from_shared(Arc::new(RevisedData::new((
             std::sync::RwLock::new(init),
-            AsImmut::new(ExecutorImmut::new()),
+            ExecutorMut::new(),
         ))))
     }
 }
@@ -221,18 +225,16 @@ impl<T> From<T> for ArcRwSensorWriterExec<T> {
     }
 }
 
-pub type ArcMutexSensorDataExec<T> =
-    Arc<RevisedData<(std::sync::Mutex<T>, AsMut<T, ExecutorMut<T>>)>>;
-pub type ArcMutexSensorExec<T> =
-    AbstractArcSensorObserver<T, std::sync::Mutex<T>, AsMut<T, ExecutorMut<T>>>;
+pub type ArcMutexSensorDataExec<T> = Arc<RevisedData<(std::sync::Mutex<T>, ExecutorMut<T>)>>;
+pub type ArcMutexSensorExec<T> = AbstractArcSensorObserver<T, std::sync::Mutex<T>, ExecutorMut<T>>;
 pub type ArcMutexSensorWriterExec<T> =
-    AbstractArcSensorWriter<T, std::sync::Mutex<T>, AsMut<T, ExecutorMut<T>>>;
+    AbstractArcSensorWriter<T, std::sync::Mutex<T>, ExecutorMut<T>>;
 impl<T> ArcMutexSensorWriterExec<T> {
     #[inline(always)]
     pub fn new(init: T) -> Self {
         SensorWriter::new_from_shared(Arc::new(RevisedData::new((
             std::sync::Mutex::new(init),
-            AsMut::new(ExecutorMut::new()),
+            ExecutorMut::new(),
         ))))
     }
 }
