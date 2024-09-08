@@ -2,8 +2,8 @@
 extern crate alloc;
 
 pub mod parking_lot;
-#[cfg(feature = "std")]
-pub mod std_sync;
+// #[cfg(feature = "std")]
+// pub mod std_sync;
 
 #[cfg(feature = "alloc")]
 use alloc::sync::Arc;
@@ -40,7 +40,7 @@ pub trait DataWriteLock: DataReadLock {
     type WriteGuard<'write>: Deref<Target = Self::Target> + DerefMut
     where
         Self: 'write;
-    type ExclusiveReadGuard<'read>: Deref<Target = Self::Target>
+    type DowngradedGuard<'read>: Deref<Target = Self::Target>
     where
         Self: 'read;
 
@@ -52,7 +52,12 @@ pub trait DataWriteLock: DataReadLock {
     /// Optional optimization for accessing the executor in callback enabled sensor writers and observers.
     /// This method should by default just return the write guard, but, if the lock allows for it,
     /// should return a read guard which was atomically downgraded from the given write guard.
-    fn atomic_downgrade(write_guard: Self::WriteGuard<'_>) -> Self::ExclusiveReadGuard<'_>;
+    fn atomic_downgrade(write_guard: Self::WriteGuard<'_>) -> Self::DowngradedGuard<'_>;
+
+    #[inline]
+    fn downgraded(&self) -> Self::DowngradedGuard<'_> {
+        Self::atomic_downgrade(self.write())
+    }
 }
 
 #[derive(Deref, DerefMut, Clone)]

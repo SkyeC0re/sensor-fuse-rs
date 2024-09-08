@@ -3,90 +3,104 @@ extern crate alloc;
 use alloc::{boxed::Box, vec::Vec};
 use core::{ptr, task::Waker};
 use parking_lot::Mutex;
+use std::{cell::UnsafeCell, collections::VecDeque, mem};
 
-use super::{ExecManager, ExecManagerMut, ExecRegister, ExecRegisterMut};
+use crate::lock::DataWriteLock;
+
+use super::{ExecManager, ExecRegister};
 
 pub struct ExecutorMut<T> {
-    callbacks: Vec<Box<dyn Send + FnMut(&T) -> bool>>,
-    wakers: Vec<Waker>,
+    registration_mtx: Mutex<()>,
+    callbacks_in: UnsafeCell<Vec<Box<dyn Send + FnMut(&T) -> bool>>>,
+    callbacks_out: UnsafeCell<Vec<Box<dyn Send + FnMut(&T) -> bool>>>,
+    wakers_in: UnsafeCell<Vec<Waker>>,
+    wakers_out: UnsafeCell<Vec<Waker>>,
 }
 
+unsafe impl<T> Sync for ExecutorMut<T> where T: Send {}
+
+/// TODO Optimize later
 impl<T> ExecutorMut<T> {
     #[inline]
     pub const fn new() -> Self {
         Self {
-            callbacks: Vec::new(),
-            wakers: Vec::new(),
+            registration_mtx: Mutex::new(()),
+            callbacks_in: UnsafeCell::new(Vec::new()),
+            callbacks_out: UnsafeCell::new(Vec::new()),
+            wakers_in: UnsafeCell::new(Vec::new()),
+            wakers_out: UnsafeCell::new(Vec::new()),
         }
     }
-}
 
-impl<T> ExecManagerMut<T> for ExecutorMut<T> {
-    fn execute(&mut self, value: &T) {
-        for waker in self.wakers.drain(..) {
-            waker.wake();
-        }
-
+    unsafe fn callback_and_truncate(&self, value: &T) {
+        let callbacks = &mut *self.callbacks_out.get();
         let mut i = 0;
-        let mut len = self.callbacks.len();
-        let ptr_slice = self.callbacks.as_ptr().cast_mut();
-        unsafe {
-            while i < len {
-                let func = ptr_slice.add(i);
-                if (*func)(value) {
-                    i += 1;
-                } else {
-                    len -= 1;
-                    ptr::swap(func, ptr_slice.add(len));
-                }
+        let mut len = callbacks.len();
+        let ptr_slice = callbacks.as_ptr().cast_mut();
+        while i < len {
+            let func = ptr_slice.add(i);
+            if (*func)(value) {
+                i += 1;
+            } else {
+                len -= 1;
+                ptr::swap(func, ptr_slice.add(len));
             }
         }
 
-        self.callbacks.truncate(len);
+        callbacks.truncate(len);
     }
 }
 
-impl<T, F: 'static + Send + FnMut(&T) -> bool> ExecRegisterMut<F> for ExecutorMut<T> {
-    #[inline]
-    fn register(&mut self, f: F) {
-        self.callbacks.push(Box::new(f));
+impl<T, L> ExecManager<L> for ExecutorMut<T>
+where
+    L: DataWriteLock<Target = T>,
+{
+    fn execute(&self, value: L::DowngradedGuard<'_>) {
+        unsafe {
+            // Call kept callbacks.
+            self.callback_and_truncate(&value);
+        }
+
+        let guard = self.registration_mtx.lock();
+        unsafe {
+            ptr::swap(self.callbacks_in.get(), self.callbacks_out.get());
+            ptr::swap(self.wakers_in.get(), self.wakers_out.get());
+        }
+        drop(guard);
+        for waker in unsafe { (*self.wakers_out.get()).drain(..) } {
+            waker.wake();
+        }
+
+        unsafe {
+            self.callback_and_truncate(&value);
+        }
     }
 }
 
-impl<T> ExecRegisterMut<&Waker> for ExecutorMut<T> {
+impl<T, L> ExecRegister<L, Box<dyn 'static + Send + FnMut(&T) -> bool>> for ExecutorMut<T>
+where
+    L: DataWriteLock<Target = T>,
+{
     #[inline]
-    fn register(&mut self, w: &Waker) {
-        self.wakers.push(w.clone());
+    fn register(&self, f: Box<dyn 'static + Send + FnMut(&T) -> bool>, _: &L) {
+        let guard = self.registration_mtx.lock();
+        unsafe {
+            (*self.callbacks_in.get()).push(f);
+        }
+        drop(guard);
     }
 }
 
-#[repr(transparent)]
-pub struct ExecutorImmut<T>(Mutex<ExecutorMut<T>>);
-
-impl<T> ExecutorImmut<T> {
+impl<T, L> ExecRegister<L, &Waker> for ExecutorMut<T>
+where
+    L: DataWriteLock<Target = T>,
+{
     #[inline]
-    pub const fn new() -> Self {
-        Self(Mutex::new(ExecutorMut::new()))
-    }
-}
-
-impl<T> ExecManager<T> for ExecutorImmut<T> {
-    #[inline]
-    fn execute(&self, value: &T) {
-        self.0.lock().execute(value);
-    }
-}
-
-impl<T, F: 'static + Send + FnMut(&T) -> bool> ExecRegister<F> for ExecutorImmut<T> {
-    #[inline]
-    fn register(&self, f: F) {
-        self.0.lock().register(f);
-    }
-}
-
-impl<T> ExecRegister<&Waker> for ExecutorImmut<T> {
-    #[inline]
-    fn register(&self, w: &Waker) {
-        self.0.lock().register(w);
+    fn register(&self, w: &Waker, _: &L) {
+        let guard = self.registration_mtx.lock();
+        unsafe {
+            (*self.wakers_in.get()).push(w.clone());
+        }
+        drop(guard);
     }
 }

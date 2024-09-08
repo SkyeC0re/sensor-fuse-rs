@@ -21,12 +21,12 @@
 //! use sensor_fuse::{prelude::*, lock::parking_lot::RwSensorWriterExec};
 //!
 //! let writer = RwSensorWriterExec::new(3);
-//! writer.register(|x: &i32 | {
+//! writer.register(Box::new(|x: &i32 | {
 //!     println!("{}", x);
 //!     // The standard executor uses a boolean return value to determine whether or not to keep the
 //!     // function in its execution set. To keep the function forever, we just unconditionally return true.
 //!     true
-//! });
+//! }) as Box<dyn 'static + Send + FnMut(&i32)-> bool>);
 //!
 //! let mut observer = writer.spawn_observer();
 //! assert_eq!(*observer.pull(), 3);
@@ -64,6 +64,7 @@ pub mod prelude;
 
 #[cfg(feature = "alloc")]
 use alloc::sync::Arc;
+use executor::{ExecManager, ExecRegister};
 
 use core::{
     future::Future,
@@ -75,11 +76,8 @@ use core::{
     task::{Context, Poll, Waker},
 };
 
-use crate::{
-    executor::{ExecutionStrategy, RegistrationStrategy},
-    lock::{
-        DataReadLock, DataWriteLock, FalseReadLock, OwnedData, OwnedFalseLock, ReadGuardSpecifier,
-    },
+use crate::lock::{
+    DataReadLock, DataWriteLock, FalseReadLock, OwnedData, OwnedFalseLock, ReadGuardSpecifier,
 };
 
 /*** Revised Data ***/
@@ -183,13 +181,13 @@ impl<'a, T> ShareStrategy<'a> for &'a Arc<RevisedData<T>> {
 pub struct SensorWriter<T, S, L, E = ()>(S)
 where
     L: DataWriteLock<Target = T>,
-    E: ExecutionStrategy<T>,
+    E: ExecManager<L>,
     for<'a> &'a S: ShareStrategy<'a, Target = (L, E)>;
 
 impl<T, S, L, E> SensorWriter<T, S, L, E>
 where
     L: DataWriteLock<Target = T>,
-    E: ExecutionStrategy<T>,
+    E: ExecManager<L>,
     for<'a> &'a S: ShareStrategy<'a, Target = (L, E)>,
 {
     /// Create a new sensor writer by wrapping the appropriate shared data.
@@ -202,7 +200,7 @@ where
 impl<T, S, L, E> Drop for SensorWriter<T, S, L, E>
 where
     L: DataWriteLock<Target = T>,
-    E: ExecutionStrategy<T>,
+    E: ExecManager<L>,
     for<'a> &'a S: ShareStrategy<'a, Target = (L, E)>,
 {
     fn drop(&mut self) {
@@ -217,7 +215,7 @@ where
 impl<T, S, L, E> SensorWriter<T, S, L, E>
 where
     L: DataWriteLock<Target = T>,
-    E: ExecutionStrategy<T>,
+    E: ExecManager<L>,
     for<'a> &'a S: ShareStrategy<'a, Target = (L, E)>,
 {
     /// Acquire a read lock on the underlying data.
@@ -242,7 +240,7 @@ where
         let guard = L::atomic_downgrade(guard);
 
         // Atomic downgrade just occured. No other modication can happen.
-        revised_data.1.execute(&guard);
+        revised_data.1.execute(guard);
     }
 
     /// Modify the sensor value in place, notify observers and execute all registered callbacks.
@@ -255,7 +253,7 @@ where
         let guard = L::atomic_downgrade(guard);
 
         // Atomic downgrade just occured. No other modification can happen.
-        revised_data.1.execute(&guard);
+        revised_data.1.execute(guard);
     }
 
     /// Mark the current sensor value as unseen to all observers, notify them and execute all registered callbacks.
@@ -266,7 +264,7 @@ where
         revised_data.update_version(STEP_SIZE);
 
         // Atomic downgrade just occured. No other modification can happen.
-        revised_data.1.execute(&guard);
+        revised_data.1.execute(guard);
     }
 
     /// Spawn an observer by immutably borrowing the sensor writer's data. By definition this observer's scope will be limited
@@ -371,7 +369,7 @@ pub trait SensorObserve {
 /// The generalized sensor observer.
 pub struct SensorObserver<T, R, L, E = L>
 where
-    E: ExecutionStrategy<T>,
+    E: ExecManager<L>,
     L: DataWriteLock<Target = T>,
     R: Deref<Target = RevisedData<(L, E)>>,
 {
@@ -381,7 +379,7 @@ where
 
 impl<T, R, L, E> Clone for SensorObserver<T, R, L, E>
 where
-    E: ExecutionStrategy<T>,
+    E: ExecManager<L>,
     L: DataWriteLock<Target = T>,
     R: Deref<Target = RevisedData<(L, E)>> + Clone,
 {
@@ -395,7 +393,7 @@ where
 
 impl<T, R, L, E> SensorObserve for SensorObserver<T, R, L, E>
 where
-    E: ExecutionStrategy<T>,
+    E: ExecManager<L>,
     L: DataWriteLock<Target = T>,
     R: Deref<Target = RevisedData<(L, E)>>,
 {
@@ -766,11 +764,12 @@ pub trait RegisterFunction<F> {
 impl<T, S, L, E, F> RegisterFunction<F> for SensorWriter<T, S, L, E>
 where
     L: DataWriteLock<Target = T>,
-    E: ExecutionStrategy<T> + RegistrationStrategy<F>,
+    E: ExecManager<L> + ExecRegister<L, F>,
     for<'a> &'a S: ShareStrategy<'a, Target = (L, E)>,
 {
     fn register(&self, f: F) {
-        E::register(self.0.share_elided_ref(), f);
+        let inner_data = self.0.share_elided_ref();
+        inner_data.1.register(f, &inner_data.0);
     }
 }
 
@@ -778,10 +777,11 @@ impl<T, R, L, E, F> RegisterFunction<F> for SensorObserver<T, R, L, E>
 where
     L: DataWriteLock<Target = T>,
     R: Deref<Target = RevisedData<(L, E)>>,
-    E: ExecutionStrategy<T> + RegistrationStrategy<F>,
+    E: ExecManager<L> + ExecRegister<L, F>,
 {
     fn register(&self, f: F) {
-        E::register(self.inner.share_elided_ref(), f);
+        let inner_data = self.inner.share_elided_ref();
+        inner_data.1.register(f, &inner_data.0);
     }
 }
 
@@ -789,7 +789,7 @@ where
 #[repr(transparent)]
 pub struct WaitUntilChangedFuture<'a, T, R, L, E>(Option<&'a SensorObserver<T, R, L, E>>)
 where
-    E: ExecutionStrategy<T>,
+    E: ExecManager<L>,
     L: DataWriteLock<Target = T>,
     R: Deref<Target = RevisedData<(L, E)>>;
 
@@ -797,7 +797,7 @@ impl<'a, T, R, L, E> Future for WaitUntilChangedFuture<'a, T, R, L, E>
 where
     L: DataWriteLock<Target = T>,
     R: Deref<Target = RevisedData<(L, E)>>,
-    E: ExecutionStrategy<T>,
+    E: ExecManager<L>,
     for<'b> SensorObserver<T, R, L, E>: RegisterFunction<&'b Waker>,
     Self: Unpin,
 {
@@ -828,7 +828,7 @@ pub struct WaitForFuture<'a, T, R, L, E, F>(
     PhantomData<&'a ()>,
 )
 where
-    E: ExecutionStrategy<T>,
+    E: ExecManager<L>,
     L: DataWriteLock<Target = T>,
     R: Deref<Target = RevisedData<(L, E)>>;
 
@@ -836,7 +836,7 @@ impl<'a, T: 'a, R: 'a, L: 'a, E: 'a, F> Future for WaitForFuture<'a, T, R, L, E,
 where
     L: DataWriteLock<Target = T>,
     R: Deref<Target = RevisedData<(L, E)>>,
-    E: ExecutionStrategy<T>,
+    E: ExecManager<L>,
     for<'b> SensorObserver<T, R, L, E>: RegisterFunction<&'b Waker>,
     Self: Unpin,
     F: Send + FnMut(&T) -> bool,
@@ -872,7 +872,7 @@ impl<T, R, L, E> SensorObserver<T, R, L, E>
 where
     L: DataWriteLock<Target = T>,
     R: Deref<Target = RevisedData<(L, E)>>,
-    for<'a> E: ExecutionStrategy<T> + RegistrationStrategy<&'a Waker>,
+    for<'a> E: ExecManager<L> + ExecRegister<L, &'a Waker>,
 {
     /// Asyncronously wait until the sensor value is updated. This call will **not** update the observer's version,
     /// as such an additional call to `pull` or `pull_updated` is required.

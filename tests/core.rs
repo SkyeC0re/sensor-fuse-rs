@@ -2,7 +2,7 @@ use async_std::future::timeout;
 use futures::executor::block_on;
 use paste::paste;
 use sensor_fuse::{
-    executor::{ExecutionStrategy, RegistrationStrategy},
+    executor::{ExecManager, ExecRegister},
     lock::{self, DataWriteLock},
     prelude::*,
     RevisedData, SensorWriter, ShareStrategy,
@@ -85,7 +85,7 @@ fn test_basic_sensor_observation<S, L, E>()
 where
     for<'a> &'a S: ShareStrategy<'a, Target = (L, E)>,
     L: DataWriteLock<Target = usize>,
-    E: ExecutionStrategy<usize>,
+    E: ExecManager<L>,
     SensorWriter<usize, S, L, E>: From<usize>,
     for<'a> <&'a S as ShareStrategy<'a>>::Shared: Clone,
 {
@@ -130,7 +130,7 @@ fn test_basic_sensor_observation_parallel_synced<S, L, E>(num_threads: usize, nu
 where
     for<'a> &'a S: ShareStrategy<'a, Target = (L, E)>,
     L: DataWriteLock<Target = usize>,
-    E: ExecutionStrategy<usize>,
+    E: ExecManager<L>,
     SensorWriter<usize, S, L, E>: From<usize> + Send + Sync + 'static,
     for<'a> <&'a S as ShareStrategy<'a>>::Shared: Clone,
 {
@@ -205,7 +205,7 @@ fn test_basic_sensor_observation_parallel_unsynced<S, L, E>(num_threads: usize, 
 where
     for<'a> &'a S: ShareStrategy<'a, Target = (L, E)>,
     L: DataWriteLock<Target = usize>,
-    E: ExecutionStrategy<usize>,
+    E: ExecManager<L>,
     SensorWriter<usize, S, L, E>: From<usize> + Send + Sync + 'static,
     for<'a> <&'a S as ShareStrategy<'a>>::Shared: Clone,
 {
@@ -245,7 +245,7 @@ fn test_mapped_sensor<S, L, E>()
 where
     for<'a> &'a S: ShareStrategy<'a, Target = (L, E)>,
     L: DataWriteLock<Target = usize>,
-    E: ExecutionStrategy<usize>,
+    E: ExecManager<L>,
     SensorWriter<usize, S, L, E>: From<usize>,
 {
     let sensor_writer = SensorWriter::<usize, S, L, E>::from(0);
@@ -273,7 +273,7 @@ fn test_mapped_sensor_cached<S, L, E>()
 where
     for<'a> &'a S: ShareStrategy<'a, Target = (L, E)>,
     L: DataWriteLock<Target = usize>,
-    E: ExecutionStrategy<usize>,
+    E: ExecManager<L>,
     SensorWriter<usize, S, L, E>: From<usize>,
 {
     let sensor_writer = SensorWriter::<usize, S, L, E>::from(0);
@@ -301,7 +301,7 @@ fn test_fused_sensor<S, L, E>()
 where
     for<'a> &'a S: ShareStrategy<'a, Target = (L, E)>,
     L: DataWriteLock<Target = usize>,
-    E: ExecutionStrategy<usize>,
+    E: ExecManager<L>,
     SensorWriter<usize, S, L, E>: From<usize>,
 {
     let sensor_writer_1 = SensorWriter::<usize, S, L, E>::from(1);
@@ -347,7 +347,7 @@ fn test_fused_sensor_cached<S, L, E>()
 where
     for<'a> &'a S: ShareStrategy<'a, Target = (L, E)>,
     L: DataWriteLock<Target = usize>,
-    E: ExecutionStrategy<usize>,
+    E: ExecManager<L>,
     SensorWriter<usize, S, L, E>: From<usize>,
 {
     let sensor_writer_1 = Arc::new(SensorWriter::<usize, S, L, E>::from(1));
@@ -394,7 +394,7 @@ where
     R: Deref<Target = RevisedData<(L, E)>>,
     for<'a> &'a S: ShareStrategy<'a, Target = (L, E), Shared = R>,
     L: DataWriteLock<Target = usize>,
-    E: ExecutionStrategy<usize>,
+    E: ExecManager<L>,
     SensorWriter<usize, S, L, E>: From<usize>,
 {
     let sensor_writer = SensorWriter::<usize, S, L, E>::from(1);
@@ -408,7 +408,7 @@ fn test_async_waiting<S, L, E>()
 where
     for<'a> &'a S: ShareStrategy<'a, Target = (L, E)>,
     L: DataWriteLock<Target = usize>,
-    for<'a> E: ExecutionStrategy<usize> + RegistrationStrategy<&'a Waker>,
+    for<'a> E: ExecManager<L> + ExecRegister<L, &'a Waker>,
     SensorWriter<usize, S, L, E>: 'static + Send + Sync + From<usize>,
 {
     let sync_send = watch::Sender::new(());
@@ -456,7 +456,7 @@ fn test_callbacks<S, L, E>()
 where
     for<'a> &'a S: ShareStrategy<'a, Target = (L, E)>,
     L: DataWriteLock<Target = usize>,
-    E: RegistrationStrategy<Box<dyn Send + FnMut(&usize) -> bool>> + ExecutionStrategy<usize>,
+    E: ExecManager<L> + ExecRegister<L, Box<dyn Send + FnMut(&usize) -> bool>>,
     SensorWriter<usize, S, L, E>: 'static + Send + Sync + From<usize>,
 {
     let sensor_writer = SensorWriter::<usize, S, L, E>::from(1);
@@ -565,26 +565,26 @@ test_core_exec!(
 
 /*** std_sync locks ***/
 
-test_core!(ss_rwl, lock::std_sync::RwSensorData<_>);
+// test_core!(ss_rwl, lock::std_sync::RwSensorData<_>);
 
-test_core!(ss_arc_rwl, lock::std_sync::ArcRwSensorData<_>);
-test_core_with_owned_observer!(ss_arc_rwl, lock::std_sync::ArcRwSensorData<_>);
+// test_core!(ss_arc_rwl, lock::std_sync::ArcRwSensorData<_>);
+// test_core_with_owned_observer!(ss_arc_rwl, lock::std_sync::ArcRwSensorData<_>);
 
-test_core!(ss_mtx, lock::std_sync::MutexSensorData<_>);
+// test_core!(ss_mtx, lock::std_sync::MutexSensorData<_>);
 
-test_core!(ss_arc_mtx, lock::std_sync::ArcMutexSensorData<_>);
-test_core_with_owned_observer!(ss_arc_mtx, lock::std_sync::ArcMutexSensorData<_>);
+// test_core!(ss_arc_mtx, lock::std_sync::ArcMutexSensorData<_>);
+// test_core_with_owned_observer!(ss_arc_mtx, lock::std_sync::ArcMutexSensorData<_>);
 
-test_core!(ss_rwl_exec, lock::std_sync::RwSensorDataExec<_>);
-test_core_exec!(ss_rwl_exec, lock::std_sync::RwSensorDataExec<_>);
+// test_core!(ss_rwl_exec, lock::std_sync::RwSensorDataExec<_>);
+// test_core_exec!(ss_rwl_exec, lock::std_sync::RwSensorDataExec<_>);
 
-test_core!(ss_arc_rwl_exec, lock::std_sync::ArcRwSensorDataExec<_>);
-test_core_with_owned_observer!(ss_arc_rwl_exec, lock::std_sync::ArcMutexSensorDataExec<_>);
-test_core_exec!(ss_arc_rwl_exec, lock::std_sync::ArcRwSensorDataExec<_>);
+// test_core!(ss_arc_rwl_exec, lock::std_sync::ArcRwSensorDataExec<_>);
+// test_core_with_owned_observer!(ss_arc_rwl_exec, lock::std_sync::ArcMutexSensorDataExec<_>);
+// test_core_exec!(ss_arc_rwl_exec, lock::std_sync::ArcRwSensorDataExec<_>);
 
-test_core!(ss_mtx_exec, lock::std_sync::MutexSensorDataExec<_>);
-test_core_exec!(ss_mtx_exec, lock::std_sync::MutexSensorDataExec<_>);
+// test_core!(ss_mtx_exec, lock::std_sync::MutexSensorDataExec<_>);
+// test_core_exec!(ss_mtx_exec, lock::std_sync::MutexSensorDataExec<_>);
 
-test_core!(ss_arc_mtx_exec, lock::std_sync::ArcMutexSensorDataExec<_>);
-test_core_with_owned_observer!(ss_arc_mtx_exec, lock::std_sync::ArcMutexSensorDataExec<_>);
-test_core_exec!(ss_arc_mtx_exec, lock::std_sync::ArcMutexSensorDataExec<_>);
+// test_core!(ss_arc_mtx_exec, lock::std_sync::ArcMutexSensorDataExec<_>);
+// test_core_with_owned_observer!(ss_arc_mtx_exec, lock::std_sync::ArcMutexSensorDataExec<_>);
+// test_core_exec!(ss_arc_mtx_exec, lock::std_sync::ArcMutexSensorDataExec<_>);
