@@ -125,7 +125,7 @@ mod alloc_req {
     use alloc::sync::Arc;
 
     use crate::{
-        executor::standard::ExecutorMut,
+        executor::standard::StdExec,
         lock::{
             AbstractArcSensorObserver, AbstractArcSensorWriter, AbstractSensorObserver,
             AbstractSensorWriter,
@@ -133,17 +133,16 @@ mod alloc_req {
         RevisedData, SensorWriter,
     };
 
-    pub type RwSensorDataExec<T> = RevisedData<(parking_lot::RwLock<T>, ExecutorMut<T>)>;
+    pub type RwSensorDataExec<T> = RevisedData<(parking_lot::RwLock<T>, StdExec<T>)>;
     pub type RwSensorExec<'a, T> =
-        AbstractSensorObserver<'a, T, parking_lot::RwLock<T>, ExecutorMut<T>>;
-    pub type RwSensorWriterExec<T> =
-        AbstractSensorWriter<T, parking_lot::RwLock<T>, ExecutorMut<T>>;
+        AbstractSensorObserver<'a, T, parking_lot::RwLock<T>, StdExec<T>>;
+    pub type RwSensorWriterExec<T> = AbstractSensorWriter<T, parking_lot::RwLock<T>, StdExec<T>>;
     impl<T> RwSensorWriterExec<T> {
         #[inline(always)]
         pub const fn new(init: T) -> Self {
             SensorWriter::new_from_shared(RevisedData::new((
                 parking_lot::RwLock::new(init),
-                ExecutorMut::new(),
+                StdExec::new(),
             )))
         }
     }
@@ -155,17 +154,16 @@ mod alloc_req {
         }
     }
 
-    pub type MutexSensorDataExec<T> = RevisedData<(parking_lot::Mutex<T>, ExecutorMut<T>)>;
+    pub type MutexSensorDataExec<T> = RevisedData<(parking_lot::Mutex<T>, StdExec<T>)>;
     pub type MutexSensorExec<'a, T> =
-        AbstractSensorObserver<'a, T, parking_lot::Mutex<T>, ExecutorMut<T>>;
-    pub type MutexSensorWriterExec<T> =
-        AbstractSensorWriter<T, parking_lot::Mutex<T>, ExecutorMut<T>>;
+        AbstractSensorObserver<'a, T, parking_lot::Mutex<T>, StdExec<T>>;
+    pub type MutexSensorWriterExec<T> = AbstractSensorWriter<T, parking_lot::Mutex<T>, StdExec<T>>;
     impl<T> MutexSensorWriterExec<T> {
         #[inline(always)]
         pub const fn new(init: T) -> Self {
             SensorWriter::new_from_shared(RevisedData::new((
                 parking_lot::Mutex::new(init),
-                ExecutorMut::new(),
+                StdExec::new(),
             )))
         }
     }
@@ -217,17 +215,16 @@ mod alloc_req {
         }
     }
 
-    pub type ArcRwSensorDataExec<T> = Arc<RevisedData<(parking_lot::RwLock<T>, ExecutorMut<T>)>>;
-    pub type ArcRwSensorExec<T> =
-        AbstractArcSensorObserver<T, parking_lot::RwLock<T>, ExecutorMut<T>>;
+    pub type ArcRwSensorDataExec<T> = Arc<RevisedData<(parking_lot::RwLock<T>, StdExec<T>)>>;
+    pub type ArcRwSensorExec<T> = AbstractArcSensorObserver<T, parking_lot::RwLock<T>, StdExec<T>>;
     pub type ArcRwSensorWriterExec<T> =
-        AbstractArcSensorWriter<T, parking_lot::RwLock<T>, ExecutorMut<T>>;
+        AbstractArcSensorWriter<T, parking_lot::RwLock<T>, StdExec<T>>;
     impl<T> ArcRwSensorWriterExec<T> {
         #[inline(always)]
         pub fn new(init: T) -> Self {
             SensorWriter::new_from_shared(Arc::new(RevisedData::new((
                 parking_lot::RwLock::new(init),
-                ExecutorMut::new(),
+                StdExec::new(),
             ))))
         }
     }
@@ -239,17 +236,17 @@ mod alloc_req {
         }
     }
 
-    pub type ArcMutexSensorDataExec<T> = Arc<RevisedData<(parking_lot::Mutex<T>, ExecutorMut<T>)>>;
+    pub type ArcMutexSensorDataExec<T> = Arc<RevisedData<(parking_lot::Mutex<T>, StdExec<T>)>>;
     pub type ArcMutexSensorExec<T> =
-        AbstractArcSensorObserver<T, parking_lot::Mutex<T>, ExecutorMut<T>>;
+        AbstractArcSensorObserver<T, parking_lot::Mutex<T>, StdExec<T>>;
     pub type ArcMutexSensorWriterExec<T> =
-        AbstractArcSensorWriter<T, parking_lot::Mutex<T>, ExecutorMut<T>>;
+        AbstractArcSensorWriter<T, parking_lot::Mutex<T>, StdExec<T>>;
     impl<T> ArcMutexSensorWriterExec<T> {
         #[inline(always)]
         pub fn new(init: T) -> Self {
             SensorWriter::new_from_shared(Arc::new(RevisedData::new((
                 parking_lot::Mutex::new(init),
-                ExecutorMut::new(),
+                StdExec::new(),
             ))))
         }
     }

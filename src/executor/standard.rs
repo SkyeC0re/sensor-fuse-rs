@@ -3,13 +3,13 @@ extern crate alloc;
 use alloc::{boxed::Box, vec::Vec};
 use core::{ptr, task::Waker};
 use parking_lot::Mutex;
-use std::{cell::UnsafeCell, collections::VecDeque, mem};
+use std::cell::UnsafeCell;
 
 use crate::lock::DataWriteLock;
 
 use super::{ExecManager, ExecRegister};
 
-pub struct ExecutorMut<T> {
+pub struct StdExec<T> {
     registration_mtx: Mutex<()>,
     callbacks_in: UnsafeCell<Vec<Box<dyn Send + FnMut(&T) -> bool>>>,
     callbacks_out: UnsafeCell<Vec<Box<dyn Send + FnMut(&T) -> bool>>>,
@@ -17,10 +17,10 @@ pub struct ExecutorMut<T> {
     wakers_out: UnsafeCell<Vec<Waker>>,
 }
 
-unsafe impl<T> Sync for ExecutorMut<T> where T: Send {}
+unsafe impl<T> Sync for StdExec<T> where T: Send {}
 
 /// TODO Optimize later
-impl<T> ExecutorMut<T> {
+impl<T> StdExec<T> {
     #[inline]
     pub const fn new() -> Self {
         Self {
@@ -51,7 +51,7 @@ impl<T> ExecutorMut<T> {
     }
 }
 
-impl<T, L> ExecManager<L> for ExecutorMut<T>
+impl<T, L> ExecManager<L> for StdExec<T>
 where
     L: DataWriteLock<Target = T>,
 {
@@ -77,7 +77,7 @@ where
     }
 }
 
-impl<T, L> ExecRegister<L, Box<dyn 'static + Send + FnMut(&T) -> bool>> for ExecutorMut<T>
+impl<T, L> ExecRegister<L, Box<dyn 'static + Send + FnMut(&T) -> bool>> for StdExec<T>
 where
     L: DataWriteLock<Target = T>,
 {
@@ -91,7 +91,7 @@ where
     }
 }
 
-impl<T, L> ExecRegister<L, &Waker> for ExecutorMut<T>
+impl<T, L> ExecRegister<L, &Waker> for StdExec<T>
 where
     L: DataWriteLock<Target = T>,
 {
