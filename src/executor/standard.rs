@@ -9,6 +9,7 @@ use crate::lock::DataWriteLock;
 
 use super::{ExecManager, ExecRegister};
 
+/// Standard executor that supports registration of functions and wakers.
 pub struct StdExec<T> {
     registration_mtx: Mutex<()>,
     callbacks_in: UnsafeCell<Vec<Box<dyn Send + FnMut(&T) -> bool>>>,
@@ -21,6 +22,7 @@ unsafe impl<T> Sync for StdExec<T> where T: Send {}
 
 /// TODO Optimize later
 impl<T> StdExec<T> {
+    /// Create a new Executor.
     #[inline]
     pub const fn new() -> Self {
         Self {
