@@ -893,20 +893,20 @@ where
         if !self.ptr.is_null() {
             let observer = unsafe { &*self.ptr };
             let guard = observer.pull();
-            let do_check = observer.is_locally_closed()
-                || self.last_version != unsafe { *observer.version.get() };
-            if do_check {
+            let satisfies_condition = (self.f)(&guard);
+            let closed = observer.is_locally_closed();
+            if satisfies_condition || closed {
                 self.ptr = null_mut();
-                return Poll::Ready(if (self.f)(&guard) {
+                return Poll::Ready(if satisfies_condition {
                     Ok(guard)
                 } else {
                     Err(guard)
                 });
-            } else {
-                drop(guard);
-                observer.register(cx.waker());
-                return Poll::Pending;
             }
+
+            drop(guard);
+            observer.register(cx.waker());
+            return Poll::Pending;
         }
 
         #[cfg(debug_assertions)]
