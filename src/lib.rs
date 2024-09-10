@@ -75,6 +75,7 @@ use core::{
     sync::atomic::{AtomicUsize, Ordering},
     task::{Context, Poll, Waker},
 };
+use std::cell::UnsafeCell;
 
 use crate::lock::{
     DataReadLock, DataWriteLock, FalseReadLock, OwnedData, OwnedFalseLock, ReadGuardSpecifier,
@@ -274,7 +275,7 @@ where
         let inner = self.0.share_elided_ref();
         SensorObserver {
             inner,
-            version: inner.version(),
+            version: UnsafeCell::new(inner.version()),
         }
     }
 
@@ -284,7 +285,7 @@ where
     pub fn spawn_observer(&self) -> SensorObserver<T, <&'_ S as ShareStrategy>::Shared, L, E> {
         let inner = self.0.share_data();
         SensorObserver {
-            version: inner.version(),
+            version: UnsafeCell::new(inner.version()),
             inner,
         }
     }
@@ -300,20 +301,31 @@ pub trait SensorObserve {
     /// Returns the latest value obtainable by the sensor. The sensor's internal cache is guaranteed to
     /// be updated after this call if the sensor is cached. After a call to this function, the obtained
     /// sensor value will be marked as seen.
-    fn pull(&mut self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_>;
+    fn pull(&self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_>;
     /// Returns the current cached value of the sensor. This is guaranteed to be the latest value if the sensor
     /// is not cached. A call to this function will however **not** mark the value as seen, even if the value is not cached.
-    fn borrow(&mut self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_>;
+    fn borrow(&self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_>;
     /// Mark the current sensor data as seen.
-    fn mark_seen(&mut self);
+    fn mark_seen(&self);
     /// Mark the current sensor data as unseen.
-    fn mark_unseen(&mut self);
+    fn mark_unseen(&self);
     /// Returns true if the sensor data has been marked as unseen.
     fn has_changed(&self) -> bool;
     /// Returns true if `borrow` may produce stale results.
     fn is_cached(&self) -> bool;
     /// Returns true if all upstream writers has been dropped and no more updates can occur.
     fn is_closed(&self) -> bool;
+    /// Returns true if this observer has observed that all upstream writers has been dropped.
+    /// This may return false even if all upstream writers have been dropped, but is guaranteed to
+    /// be updated whenever a call to the following is made:
+    /// - `function@pull`
+    /// - `function@mark_seen`
+    /// - `function@mark_unseen`
+    /// - `functon@has_changed`
+    /// - `function@is_closed`
+    /// - `function@wait_until_changed` is awaited.
+    /// - `function@wait_for` is awaited.
+    fn is_locally_closed(&self) -> bool;
 
     /// Fuse this observer with another using the given fusion function into a cacheless observer.
     #[inline(always)]
@@ -372,7 +384,7 @@ where
     R: Deref<Target = RevisedData<(L, E)>>,
 {
     inner: R,
-    version: usize,
+    version: UnsafeCell<usize>,
 }
 
 impl<T, R, L, E> Clone for SensorObserver<T, R, L, E>
@@ -384,7 +396,7 @@ where
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.clone(),
-            version: self.version,
+            version: UnsafeCell::new(unsafe { *self.version.get() }),
         }
     }
 }
@@ -398,38 +410,52 @@ where
     type Lock = L;
 
     #[inline(always)]
-    fn borrow(&mut self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_> {
+    fn borrow(&self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_> {
         self.inner.data.0.read()
     }
 
     #[inline(always)]
-    fn pull(&mut self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_> {
+    fn pull(&self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_> {
+        let guard = self.inner.data.0.read();
         self.mark_seen();
-        self.inner.data.0.read()
+        // unsafe {
+        //     *self.version.get() = self.inner.version();
+        // }
+        guard
     }
 
     #[inline(always)]
-    fn mark_seen(&mut self) {
-        self.version = self.inner.version();
+    fn mark_seen(&self) {
+        unsafe { *self.version.get() = self.inner.version() };
     }
 
     #[inline(always)]
-    fn mark_unseen(&mut self) {
-        self.version = self.inner.version().wrapping_sub(STEP_SIZE);
+    fn mark_unseen(&self) {
+        unsafe { *self.version.get() = self.inner.version().wrapping_sub(STEP_SIZE) };
     }
 
     #[inline(always)]
     fn has_changed(&self) -> bool {
-        self.version >> 1 != self.inner.version() >> 1
+        let latest_version = self.inner.version();
+        let version = unsafe { &mut *self.version.get() };
+        *version |= latest_version & CLOSED_BIT;
+        *version != latest_version
     }
     #[inline(always)]
     fn is_cached(&self) -> bool {
         false
     }
-
     #[inline(always)]
     fn is_closed(&self) -> bool {
-        self.inner.version() & CLOSED_BIT == CLOSED_BIT
+        unsafe {
+            *self.version.get() |= self.inner.version() & CLOSED_BIT;
+        }
+        self.is_locally_closed()
+    }
+
+    #[inline(always)]
+    fn is_locally_closed(&self) -> bool {
+        unsafe { *self.version.get() & CLOSED_BIT == CLOSED_BIT }
     }
 }
 
@@ -443,8 +469,7 @@ pub struct MappedSensorObserver<
 > {
     /// The original pre-mapped observer.
     pub inner: A,
-    _false_cache: OwnedFalseLock<T>,
-    map: F,
+    map: UnsafeCell<F>,
 }
 
 impl<A, T, F> MappedSensorObserver<A, T, F>
@@ -457,8 +482,7 @@ where
     pub const fn map_with(a: A, f: F) -> Self {
         Self {
             inner: a,
-            _false_cache: OwnedFalseLock::new(),
-            map: f,
+            map: UnsafeCell::new(f),
         }
     }
 }
@@ -471,22 +495,22 @@ where
     type Lock = OwnedFalseLock<T>;
 
     #[inline]
-    fn pull(&mut self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_> {
-        OwnedData((self.map)(&self.inner.pull()))
+    fn pull(&self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_> {
+        unsafe { OwnedData((*self.map.get())(&self.inner.pull())) }
     }
 
     #[inline(always)]
-    fn borrow(&mut self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_> {
-        OwnedData((self.map)(&self.inner.borrow()))
+    fn borrow(&self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_> {
+        unsafe { OwnedData((*self.map.get())(&self.inner.borrow())) }
     }
 
     #[inline(always)]
-    fn mark_seen(&mut self) {
+    fn mark_seen(&self) {
         self.inner.mark_seen();
     }
 
     #[inline(always)]
-    fn mark_unseen(&mut self) {
+    fn mark_unseen(&self) {
         self.inner.mark_unseen();
     }
 
@@ -504,6 +528,11 @@ where
     fn is_closed(&self) -> bool {
         self.inner.is_closed()
     }
+
+    #[inline(always)]
+    fn is_locally_closed(&self) -> bool {
+        self.inner.is_locally_closed()
+    }
 }
 
 /// A cached mapped sensor observer.
@@ -514,8 +543,8 @@ pub struct MappedSensorObserverCached<
 > {
     /// The original pre-mapped observer.
     pub inner: A,
-    cached: FalseReadLock<T>,
-    map: F,
+    cached: UnsafeCell<T>,
+    map: UnsafeCell<F>,
 }
 
 impl<A, T, F> MappedSensorObserverCached<A, T, F>
@@ -525,12 +554,12 @@ where
 {
     /// Create a new cached mapped observer given another observer and an appropriate mapping function.
     #[inline(always)]
-    pub fn map_with(mut a: A, mut f: F) -> Self {
-        let cached = FalseReadLock(f(&mut a.borrow()));
+    pub fn map_with(a: A, mut f: F) -> Self {
+        let cached = f(&a.borrow());
         Self {
+            cached: UnsafeCell::new(cached),
             inner: a,
-            cached,
-            map: f,
+            map: UnsafeCell::new(f),
         }
     }
 }
@@ -543,23 +572,24 @@ where
     type Lock = FalseReadLock<T>;
 
     #[inline]
-    fn pull(&mut self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_> {
-        *self.cached = (self.map)(&self.inner.pull());
-        &self.cached
+    fn pull(&self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_> {
+        let cached = unsafe { &mut *self.cached.get() };
+        *cached = unsafe { (*self.map.get())(&self.inner.pull()) };
+        cached
     }
 
     #[inline(always)]
-    fn borrow(&mut self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_> {
-        &self.cached
+    fn borrow(&self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_> {
+        unsafe { &*self.cached.get() }
     }
 
     #[inline(always)]
-    fn mark_seen(&mut self) {
+    fn mark_seen(&self) {
         self.inner.mark_seen();
     }
 
     #[inline(always)]
-    fn mark_unseen(&mut self) {
+    fn mark_unseen(&self) {
         self.inner.mark_unseen();
     }
 
@@ -577,6 +607,11 @@ where
     fn is_closed(&self) -> bool {
         self.inner.is_closed()
     }
+
+    #[inline(always)]
+    fn is_locally_closed(&self) -> bool {
+        self.inner.is_locally_closed()
+    }
 }
 
 /// A cacheless fused sensor observer.
@@ -590,8 +625,7 @@ pub struct FusedSensorObserver<
     pub a: A,
     /// The second original pre-mapped observer.
     pub b: B,
-    _false_cache: OwnedFalseLock<T>,
-    fuse: F,
+    fuse: UnsafeCell<F>,
 }
 
 impl<A, B, T, F> FusedSensorObserver<A, B, T, F>
@@ -609,8 +643,7 @@ where
         Self {
             a,
             b,
-            _false_cache: OwnedFalseLock::new(),
-            fuse: f,
+            fuse: UnsafeCell::new(f),
         }
     }
 }
@@ -627,23 +660,23 @@ where
     type Lock = OwnedFalseLock<T>;
 
     #[inline(always)]
-    fn pull(&mut self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_> {
-        OwnedData((self.fuse)(&self.a.pull(), &self.b.pull()))
+    fn pull(&self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_> {
+        unsafe { OwnedData((*self.fuse.get())(&self.a.pull(), &self.b.pull())) }
     }
 
     #[inline(always)]
-    fn borrow(&mut self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_> {
-        OwnedData((self.fuse)(&self.a.borrow(), &self.b.borrow()))
+    fn borrow(&self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_> {
+        unsafe { OwnedData((*self.fuse.get())(&self.a.borrow(), &self.b.borrow())) }
     }
 
     #[inline(always)]
-    fn mark_seen(&mut self) {
+    fn mark_seen(&self) {
         self.a.mark_seen();
         self.b.mark_seen();
     }
 
     #[inline(always)]
-    fn mark_unseen(&mut self) {
+    fn mark_unseen(&self) {
         self.a.mark_unseen();
         self.b.mark_unseen();
     }
@@ -662,6 +695,11 @@ where
     fn is_closed(&self) -> bool {
         self.a.is_closed() && self.b.is_closed()
     }
+
+    #[inline(always)]
+    fn is_locally_closed(&self) -> bool {
+        self.a.is_locally_closed() && self.b.is_locally_closed()
+    }
 }
 
 /// A cached fused sensor observer.
@@ -675,8 +713,8 @@ pub struct FusedSensorObserverCached<
     pub a: A,
     /// The second original pre-mapped observer.
     pub b: B,
-    cache: FalseReadLock<T>,
-    fuse: F,
+    cache: UnsafeCell<T>,
+    fuse: UnsafeCell<F>,
 }
 
 impl<A, B, T, F> FusedSensorObserverCached<A, B, T, F>
@@ -690,13 +728,13 @@ where
 {
     /// Create a new cacheled fused observer given two other independent observers and an appropriate fusing function.
     #[inline(always)]
-    pub fn fuse_with(mut a: A, mut b: B, mut f: F) -> Self {
-        let cache = FalseReadLock(f(&a.borrow(), &b.borrow()));
+    pub fn fuse_with(a: A, b: B, mut f: F) -> Self {
+        let cache = f(&a.borrow(), &b.borrow());
         Self {
+            cache: UnsafeCell::new(cache),
             a,
             b,
-            cache,
-            fuse: f,
+            fuse: UnsafeCell::new(f),
         }
     }
 }
@@ -713,24 +751,25 @@ where
     type Lock = FalseReadLock<T>;
 
     #[inline(always)]
-    fn pull(&mut self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_> {
-        *self.cache = (self.fuse)(&self.a.pull(), &self.b.pull());
-        &self.cache
+    fn pull(&self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_> {
+        let cache = unsafe { &mut *self.cache.get() };
+        *cache = unsafe { (*self.fuse.get())(&self.a.pull(), &self.b.pull()) };
+        cache
     }
 
     #[inline(always)]
-    fn borrow(&mut self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_> {
-        &self.cache
+    fn borrow(&self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_> {
+        unsafe { &*self.cache.get() }
     }
 
     #[inline(always)]
-    fn mark_seen(&mut self) {
+    fn mark_seen(&self) {
         self.a.mark_seen();
         self.b.mark_seen();
     }
 
     #[inline(always)]
-    fn mark_unseen(&mut self) {
+    fn mark_unseen(&self) {
         self.a.mark_unseen();
         self.b.mark_unseen();
     }
@@ -748,6 +787,10 @@ where
     #[inline(always)]
     fn is_closed(&self) -> bool {
         self.a.is_closed() && self.b.is_closed()
+    }
+
+    fn is_locally_closed(&self) -> bool {
+        self.a.is_locally_closed() && self.b.is_locally_closed()
     }
 }
 
@@ -799,12 +842,13 @@ where
     for<'b> SensorObserver<T, R, L, E>: RegisterFunction<&'b Waker>,
     Self: Unpin,
 {
-    type Output = ();
+    type Output = Result<(), ()>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         if let Some(value) = self.0.take() {
-            if value.has_changed() {
-                Poll::Ready(())
+            let has_changed = value.has_changed();
+            if has_changed || value.is_locally_closed() {
+                Poll::Ready(if has_changed { Ok(()) } else { Err(()) })
             } else {
                 value.register(cx.waker());
                 self.0 = Some(value);
@@ -820,15 +864,17 @@ where
 }
 
 /// A future that resolves when the sensor value gets updated with a value that matches a certain condition.
-pub struct WaitForFuture<'a, T, R, L, E, F>(
-    *mut SensorObserver<T, R, L, E>,
-    F,
-    PhantomData<&'a ()>,
-)
+pub struct WaitForFuture<'a, T, R, L, E, F>
 where
     E: ExecManager<L>,
     L: DataWriteLock<Target = T>,
-    R: Deref<Target = RevisedData<(L, E)>>;
+    R: Deref<Target = RevisedData<(L, E)>>,
+{
+    ptr: *const SensorObserver<T, R, L, E>,
+    f: F,
+    last_version: usize,
+    _ptr_lifetime: PhantomData<&'a ()>,
+}
 
 impl<'a, T: 'a, R: 'a, L: 'a, E: 'a, F> Future for WaitForFuture<'a, T, R, L, E, F>
 where
@@ -839,21 +885,25 @@ where
     Self: Unpin,
     F: Send + FnMut(&T) -> bool,
 {
-    type Output = L::ReadGuard<'a>;
+    type Output = Result<L::ReadGuard<'a>, L::ReadGuard<'a>>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         // Safe code does not seem to want to compile without a guard reaquisition. Possibly inexperience,
         // but also possibly a quirk of `Option`'s `None` variant still storing type information.
-        if !self.0.is_null() {
-            let mut observer = unsafe { &mut *self.0 };
-            let changed = observer.has_changed();
+        if !self.ptr.is_null() {
+            let observer = unsafe { &*self.ptr };
             let guard = observer.pull();
-            if changed && (self.1)(&guard) {
-                self.0 = null_mut();
-                return Poll::Ready(guard);
+            let do_check = observer.is_locally_closed()
+                || self.last_version != unsafe { *observer.version.get() };
+            if do_check {
+                self.ptr = null_mut();
+                return Poll::Ready(if (self.f)(&guard) {
+                    Ok(guard)
+                } else {
+                    Err(guard)
+                });
             } else {
                 drop(guard);
-                observer = unsafe { &mut *self.0 };
                 observer.register(cx.waker());
                 return Poll::Pending;
             }
@@ -879,10 +929,13 @@ where
     }
     /// Asyncronously wait until the sensor value has been updated with a value that satisfies a condition. This call **will** update the observer's version
     /// and evaluate the condition function on values obtained by `pull_updated`.
-    pub fn wait_for<F: Send + FnMut(&T) -> bool>(
-        &mut self,
-        f: F,
-    ) -> WaitForFuture<'_, T, R, L, E, F> {
-        WaitForFuture(self, f, PhantomData)
+    pub fn wait_for<F: Send + FnMut(&T) -> bool>(&self, f: F) -> WaitForFuture<'_, T, R, L, E, F> {
+        WaitForFuture {
+            ptr: self,
+            f,
+            // Force evaluation of `f` when observer is polled for the first time.
+            last_version: unsafe { *self.version.get() }.wrapping_sub(STEP_SIZE),
+            _ptr_lifetime: PhantomData,
+        }
     }
 }
