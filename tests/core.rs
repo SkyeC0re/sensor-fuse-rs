@@ -7,10 +7,7 @@ use sensor_fuse::{
     prelude::*,
     RevisedData, SensorWriter, ShareStrategy,
 };
-use std::ops::Deref;
-use std::task::Waker;
-use std::time::Duration;
-use std::{sync::Arc, thread};
+use std::{ops::Deref, sync::Arc, task::Waker, thread, time::Duration};
 use tokio::sync::watch;
 
 macro_rules! test_core_with_owned_observer {
@@ -32,15 +29,10 @@ macro_rules! test_core {
                 test_basic_sensor_observation::<$sensor_writer, _, _>();
             }
 
-            // #[test]
-            // fn [<$prefix _basic_sensor_observation_parallel_synced_10_1000>]() {
-            //     test_basic_sensor_observation_parallel_synced::<$sensor_writer, _, _>(10, 1000);
-            // }
-
-            // #[test]
-            // fn [<$prefix _basic_sensor_observation_parallel_unsynced_10_1000>]() {
-            //     test_basic_sensor_observation_parallel_unsynced::<$sensor_writer, _, _>(10, 1000);
-            // }
+            #[test]
+            fn [<$prefix _basic_sensor_observation_parallel_unsynced_10_1000>]() {
+                test_basic_sensor_observation_parallel_unsynced::<$sensor_writer, _, _>(10, 1000);
+            }
 
             #[test]
             fn [<$prefix _mapped_sensor>]() {
@@ -126,81 +118,6 @@ where
     assert_eq!(*sensor_writer.read(), 3);
 }
 
-fn test_basic_sensor_observation_parallel_synced<S, L, E>(num_threads: usize, num_updates: usize)
-where
-    for<'a> &'a S: ShareStrategy<'a, Target = (L, E)>,
-    L: DataWriteLock<Target = usize>,
-    E: ExecManager<L>,
-    SensorWriter<usize, S, L, E>: From<usize> + Send + Sync + 'static,
-    for<'a> <&'a S as ShareStrategy<'a>>::Shared: Clone,
-{
-    let sync = Arc::new((
-        parking_lot::Mutex::new(Some(0)),
-        parking_lot::Condvar::new(),
-        parking_lot::Condvar::new(),
-    ));
-
-    let sensor_writer = Arc::new(SensorWriter::<usize, S, L, E>::from(0));
-
-    let handles = Vec::from_iter((0..num_threads).map(|_| {
-        let sensor_writer_clone = sensor_writer.clone();
-
-        let sync_clone = sync.clone();
-        thread::spawn(move || {
-            let mut sensor_observer = sensor_writer_clone.spawn_observer();
-            sensor_observer.mark_unseen();
-            let (mutex, observer_start, writer_start) = &*sync_clone;
-            for i in 0..num_updates {
-                let mut guard = mutex.lock();
-                if !sensor_observer.has_changed() {
-                    *guard = None;
-                    drop(guard);
-                    writer_start.notify_one();
-                    panic!("Value change not registered.");
-                }
-
-                if *sensor_observer.pull() != i {
-                    *guard = None;
-                    drop(guard);
-                    writer_start.notify_one();
-                    panic!("Unexpected value found.");
-                }
-
-                if let Some(mut count) = *guard {
-                    count += 1;
-                    *guard = Some(count);
-                    if count == num_threads {
-                        writer_start.notify_one();
-                    }
-                }
-                observer_start.wait(&mut guard);
-            }
-            drop(sensor_observer);
-        })
-    }));
-
-    let (mutex, observer_start, writer_start) = &*sync;
-    for i in 1..=num_updates {
-        let mut guard = mutex.lock();
-        if let Some(count) = *guard {
-            if count != num_threads {
-                writer_start.wait(&mut guard);
-            }
-        } else {
-            observer_start.notify_all();
-            panic!();
-        }
-        *guard = Some(0);
-        drop(guard);
-        sensor_writer.update(i);
-        assert_eq!(observer_start.notify_all(), num_threads);
-    }
-
-    handles.into_iter().for_each(|h| {
-        h.join().unwrap();
-    });
-}
-
 fn test_basic_sensor_observation_parallel_unsynced<S, L, E>(num_threads: usize, num_updates: usize)
 where
     for<'a> &'a S: ShareStrategy<'a, Target = (L, E)>,
@@ -209,12 +126,12 @@ where
     SensorWriter<usize, S, L, E>: From<usize> + Send + Sync + 'static,
     for<'a> <&'a S as ShareStrategy<'a>>::Shared: Clone,
 {
-    let sensor_writer = Arc::new(SensorWriter::<usize, S, L, E>::from(0));
+    let sensor_writer = Arc::new(SensorWriter::<usize, S, L, E>::from(1));
 
     let handles = Vec::from_iter((0..num_threads).map(|_| {
-        let sensor_writer_clone = sensor_writer.clone();
+        let sensor_writer = sensor_writer.clone();
         thread::spawn(move || {
-            let mut sensor_observer = sensor_writer_clone.spawn_observer();
+            let sensor_observer = sensor_writer.spawn_observer();
             let mut last_seen_value = 0;
             sensor_observer.mark_unseen();
 
@@ -222,8 +139,8 @@ where
                 if !sensor_observer.has_changed() {
                     continue;
                 }
-                let new_value = *sensor_observer.borrow();
-                assert!(last_seen_value <= new_value);
+                let new_value = *sensor_observer.pull();
+                assert!(last_seen_value < new_value);
                 if new_value == num_updates {
                     break;
                 }
@@ -232,7 +149,7 @@ where
         })
     }));
 
-    for _ in 0..num_updates {
+    for _ in 1..num_updates {
         sensor_writer.modify_with(|x| *x += 1);
     }
 
@@ -249,7 +166,7 @@ where
     SensorWriter<usize, S, L, E>: From<usize>,
 {
     let sensor_writer = SensorWriter::<usize, S, L, E>::from(0);
-    let mut observer = sensor_writer.spawn_observer().map(|x| x + 1);
+    let observer = sensor_writer.spawn_observer().map(|x| x + 1);
 
     assert!(!observer.is_cached());
     assert_eq!(*observer.borrow(), 1);
@@ -277,7 +194,7 @@ where
     SensorWriter<usize, S, L, E>: From<usize>,
 {
     let sensor_writer = SensorWriter::<usize, S, L, E>::from(0);
-    let mut observer = sensor_writer.spawn_observer().map_cached(|x| x + 1);
+    let observer = sensor_writer.spawn_observer().map_cached(|x| x + 1);
 
     assert!(observer.is_cached());
     assert_eq!(*observer.borrow(), 1);
@@ -307,7 +224,7 @@ where
     let sensor_writer_1 = SensorWriter::<usize, S, L, E>::from(1);
     let sensor_writer_2 = SensorWriter::<usize, S, L, E>::from(2);
 
-    let mut observer = sensor_writer_1
+    let observer = sensor_writer_1
         .spawn_observer()
         .fuse(sensor_writer_2.spawn_observer(), |x, y| x * y);
 
@@ -353,7 +270,7 @@ where
     let sensor_writer_1 = Arc::new(SensorWriter::<usize, S, L, E>::from(1));
     let sensor_writer_2 = Arc::new(SensorWriter::<usize, S, L, E>::from(2));
 
-    let mut observer = sensor_writer_1
+    let observer = sensor_writer_1
         .spawn_observer()
         .fuse_cached(sensor_writer_2.spawn_observer(), |x, y| x * y);
 
@@ -398,7 +315,7 @@ where
     SensorWriter<usize, S, L, E>: From<usize>,
 {
     let sensor_writer = SensorWriter::<usize, S, L, E>::from(1);
-    let mut observer = sensor_writer.spawn_observer();
+    let observer = sensor_writer.spawn_observer();
     drop(sensor_writer);
     assert!(observer.is_closed());
     assert_eq!(*observer.borrow(), 1);
@@ -428,7 +345,7 @@ where
         sensor_writer_clone.modify_with(|x| *x += 1);
     });
 
-    let mut observer = sensor_writer.as_ref().spawn_observer();
+    let observer = sensor_writer.as_ref().spawn_observer();
     sync_send.send_replace(());
     block_on(timeout(
         Duration::from_secs(1),

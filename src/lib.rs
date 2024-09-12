@@ -847,8 +847,10 @@ where
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         if let Some(value) = self.0.take() {
             let has_changed = value.has_changed();
-            if has_changed || value.is_locally_closed() {
-                Poll::Ready(if has_changed { Ok(()) } else { Err(()) })
+            let closed = value.is_locally_closed();
+            if has_changed || closed {
+                // Should get compiled out into value assignment
+                Poll::Ready(if closed { Err(()) } else { Ok(()) })
             } else {
                 value.register(cx.waker());
                 self.0 = Some(value);
@@ -888,23 +890,25 @@ where
     type Output = Result<L::ReadGuard<'a>, L::ReadGuard<'a>>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        // Safe code does not seem to want to compile without a guard reaquisition. Possibly inexperience,
+        // Safe code does not seem to want to compile without a guard reacquisition. Possibly inexperience,
         // but also possibly a quirk of `Option`'s `None` variant still storing type information.
         if !self.ptr.is_null() {
             let observer = unsafe { &*self.ptr };
-            let guard = observer.pull();
-            let satisfies_condition = (self.f)(&guard);
-            let closed = observer.is_locally_closed();
-            if satisfies_condition || closed {
-                self.ptr = null_mut();
-                return Poll::Ready(if satisfies_condition {
-                    Ok(guard)
-                } else {
-                    Err(guard)
-                });
+            if self.last_version != observer.inner.version.load(Ordering::Relaxed) {
+                let guard = observer.pull();
+                self.last_version = unsafe { *observer.version.get() };
+                // Optimize for non-closed case to remove additional if statement at the cost of evaluating
+                // the condition function in the rare case that the sensor is closed.
+                let closed = observer.is_locally_closed();
+                if closed || (self.f)(&guard) {
+                    self.ptr = null_mut();
+                    // Should get compiled out into a value assignment.
+                    return Poll::Ready(if closed { Err(guard) } else { Ok(guard) });
+                }
+
+                drop(guard);
             }
 
-            drop(guard);
             observer.register(cx.waker());
             return Poll::Pending;
         }
