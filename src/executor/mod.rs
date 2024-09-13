@@ -3,6 +3,8 @@ use crate::lock::DataWriteLock;
 #[cfg(feature = "alloc")]
 pub mod standard;
 
+#[cfg(feature = "alloc")]
+pub type BoxedFn<T> = Box<dyn 'static + Send + FnMut(&T) -> bool>;
 /// An execution manager that only requires immutable access.
 pub trait ExecManager<L>
 where

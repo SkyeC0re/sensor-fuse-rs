@@ -7,7 +7,7 @@ use std::cell::UnsafeCell;
 
 use crate::lock::DataWriteLock;
 
-use super::{ExecManager, ExecRegister};
+use super::{BoxedFn, ExecManager, ExecRegister};
 
 /// Standard executor that supports registration of functions and wakers.
 pub struct StdExec<T> {
@@ -79,12 +79,27 @@ where
     }
 }
 
-impl<T, L> ExecRegister<L, Box<dyn 'static + Send + FnMut(&T) -> bool>> for StdExec<T>
+impl<T, L, F> ExecRegister<L, Box<F>> for StdExec<T>
+where
+    L: DataWriteLock<Target = T>,
+    F: 'static + Send + FnMut(&T) -> bool,
+{
+    #[inline]
+    fn register(&self, f: Box<F>, _: &L) {
+        let guard = self.registration_mtx.lock();
+        unsafe {
+            (*self.callbacks_in.get()).push(f);
+        }
+        drop(guard);
+    }
+}
+
+impl<T, L> ExecRegister<L, BoxedFn<T>> for StdExec<T>
 where
     L: DataWriteLock<Target = T>,
 {
     #[inline]
-    fn register(&self, f: Box<dyn 'static + Send + FnMut(&T) -> bool>, _: &L) {
+    fn register(&self, f: BoxedFn<T>, _: &L) {
         let guard = self.registration_mtx.lock();
         unsafe {
             (*self.callbacks_in.get()).push(f);

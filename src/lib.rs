@@ -1,5 +1,5 @@
 //! # Sensor-Fuse
-//! An unopinionated no-std compatible observer/callback framework for the opinionated user.
+//! An un-opinionated no-std compatible observer/callback framework for the opinionated user.
 //!
 //! Designed as generalization to [Tokio's watch channel](https://docs.rs/tokio/latest/tokio/sync/watch/index.html), Sensor-Fuse aims
 //! to provide a modular framework for implementing observer or observer + callback patterns. From the perspective of this crate sensor data can
@@ -21,12 +21,13 @@
 //! use sensor_fuse::{prelude::*, lock::parking_lot::RwSensorWriterExec};
 //!
 //! let writer = RwSensorWriterExec::new(3);
-//! writer.register(Box::new(|x: &i32 | {
+//!
+//! writer.register(Box::new(|x: &_| {
 //!     println!("{}", x);
 //!     // The standard executor uses a boolean return value to determine whether or not to keep the
 //!     // function in its execution set. To keep the function forever, we just unconditionally return true.
 //!     true
-//! }) as Box<dyn 'static + Send + FnMut(&i32)-> bool>);
+//! }));
 //!
 //! let mut observer = writer.spawn_observer();
 //! assert_eq!(*observer.pull(), 3);
@@ -37,13 +38,14 @@
 //! assert_eq!(*observer.pull(), 5);
 //! ```
 //!
-//! ## Execution Managers and Executables
+//! ## Executors and Executables
 //!
+//! Within the framework, every sensor is associated with an executor which allows executables to be registered. In this context
+//! an executable can be anything but fundamentally represents a piece of work that must occur each time the sensor value is updated. The frameworks basic
+//! non-trivial (`()`) executor (`struct@StdExec`) for example allows for both the registration of `Waker`s to power asynchronous behaviour and
+//! callback functions that act on references to the sensor value. Each time the sensor value is updated, `struct@StdExec` will execute and drop all `Waker`s and
+//! all callbacks and drop those callbacks that produced `false` as output values.
 //!
-//!
-//! ## Execution Optimization
-//!
-//! The framework allows for two execution
 
 #![warn(bad_style)]
 #![warn(missing_docs)]
