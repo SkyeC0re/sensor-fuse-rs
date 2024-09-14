@@ -1,4 +1,3 @@
-use core::ops::Deref;
 use parking_lot;
 
 use crate::{DataReadLock, DataWriteLock, ReadGuardSpecifier, RevisedData, SensorWriter};
@@ -89,7 +88,10 @@ pub type RwSensorWriter<T> = AbstractSensorWriter<T, parking_lot::RwLock<T>, ()>
 impl<T> RwSensorWriter<T> {
     #[inline(always)]
     pub const fn new(init: T) -> Self {
-        SensorWriter::new_from_shared(RevisedData::new((parking_lot::RwLock::new(init), ())))
+        SensorWriter::new_from_shared(RevisedData::new_sensor_data(
+            parking_lot::RwLock::new(init),
+            (),
+        ))
     }
 }
 impl<T> From<T> for RwSensorWriter<T> {
@@ -106,7 +108,10 @@ pub type MutexSensorWriter<T> = AbstractSensorWriter<T, parking_lot::Mutex<T>, (
 impl<T> MutexSensorWriter<T> {
     #[inline(always)]
     pub const fn new(init: T) -> Self {
-        SensorWriter::new_from_shared(RevisedData::new((parking_lot::Mutex::new(init), ())))
+        SensorWriter::new_from_shared(RevisedData::new_sensor_data(
+            parking_lot::Mutex::new(init),
+            (),
+        ))
     }
 }
 
@@ -140,10 +145,10 @@ mod alloc_req {
     impl<T> RwSensorWriterExec<T> {
         #[inline(always)]
         pub const fn new(init: T) -> Self {
-            SensorWriter::new_from_shared(RevisedData::new((
+            SensorWriter::new_from_shared(RevisedData::new_sensor_data(
                 parking_lot::RwLock::new(init),
                 StdExec::new(),
-            )))
+            ))
         }
     }
 
@@ -161,10 +166,10 @@ mod alloc_req {
     impl<T> MutexSensorWriterExec<T> {
         #[inline(always)]
         pub const fn new(init: T) -> Self {
-            SensorWriter::new_from_shared(RevisedData::new((
+            SensorWriter::new_from_shared(RevisedData::new_sensor_data(
                 parking_lot::Mutex::new(init),
                 StdExec::new(),
-            )))
+            ))
         }
     }
 
@@ -181,10 +186,10 @@ mod alloc_req {
     impl<T> ArcRwSensorWriter<T> {
         #[inline(always)]
         pub fn new(init: T) -> Self {
-            SensorWriter::new_from_shared(Arc::new(RevisedData::new((
+            SensorWriter::new_from_shared(Arc::new(RevisedData::new_sensor_data(
                 parking_lot::RwLock::new(init),
                 (),
-            ))))
+            )))
         }
     }
 
@@ -201,10 +206,10 @@ mod alloc_req {
     impl<T> ArcMutexSensorWriter<T> {
         #[inline(always)]
         pub fn new(init: T) -> Self {
-            SensorWriter::new_from_shared(Arc::new(RevisedData::new((
+            SensorWriter::new_from_shared(Arc::new(RevisedData::new_sensor_data(
                 parking_lot::Mutex::new(init),
                 (),
-            ))))
+            )))
         }
     }
 
@@ -222,10 +227,10 @@ mod alloc_req {
     impl<T> ArcRwSensorWriterExec<T> {
         #[inline(always)]
         pub fn new(init: T) -> Self {
-            SensorWriter::new_from_shared(Arc::new(RevisedData::new((
+            SensorWriter::new_from_shared(Arc::new(RevisedData::new_sensor_data(
                 parking_lot::RwLock::new(init),
                 StdExec::new(),
-            ))))
+            )))
         }
     }
 
@@ -244,10 +249,10 @@ mod alloc_req {
     impl<T> ArcMutexSensorWriterExec<T> {
         #[inline(always)]
         pub fn new(init: T) -> Self {
-            SensorWriter::new_from_shared(Arc::new(RevisedData::new((
+            SensorWriter::new_from_shared(Arc::new(RevisedData::new_sensor_data(
                 parking_lot::Mutex::new(init),
                 StdExec::new(),
-            ))))
+            )))
         }
     }
 

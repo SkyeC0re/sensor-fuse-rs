@@ -66,18 +66,16 @@ pub mod prelude;
 
 #[cfg(feature = "alloc")]
 use alloc::sync::Arc;
-use executor::{ExecManager, ExecRegister};
-
-use core::{cell::UnsafeCell, pin::pin};
 use core::{
+    cell::UnsafeCell,
     future::Future,
-    marker::PhantomData,
     ops::{Deref, DerefMut},
+    pin::pin,
     pin::Pin,
-    ptr::null_mut,
     sync::atomic::{AtomicUsize, Ordering},
     task::{Context, Poll, Waker},
 };
+use executor::{ExecManager, ExecRegister};
 
 use crate::lock::{DataReadLock, DataWriteLock, OwnedData, OwnedFalseLock, ReadGuardSpecifier};
 
@@ -93,6 +91,8 @@ const STEP_SIZE: usize = 2;
 pub struct RevisedData<T> {
     data: T,
     version: AtomicUsize,
+    writers: AtomicUsize,
+    observers: AtomicUsize,
 }
 
 impl<T> Deref for RevisedData<T> {
@@ -111,24 +111,62 @@ impl<T> DerefMut for RevisedData<T> {
     }
 }
 
+impl<L, E> RevisedData<(L, E)>
+where
+    L: DataWriteLock,
+    E: ExecManager<L>,
+{
+    /// Create raw sensor data for the purposes of creating a sensor writer.
+    #[inline(always)]
+    pub const fn new_sensor_data(locked_data: L, executor: E) -> Self {
+        Self::new((locked_data, executor), 1, 0)
+    }
+}
+
 impl<T> RevisedData<T> {
     /// Initialize using the given initial data.
     #[inline(always)]
-    const fn new(data: T) -> Self {
+    const fn new(data: T, initial_writers: usize, initial_observers: usize) -> Self {
         Self {
             data,
             version: AtomicUsize::new(0),
+            writers: AtomicUsize::new(initial_writers),
+            observers: AtomicUsize::new(initial_observers),
         }
     }
 
+    /* Keep all atomic operations here to reason about memory ordering. */
+
     #[inline(always)]
-    fn update_version(&self, step_size: usize) {
-        let _ = self.version.fetch_add(step_size, Ordering::Release);
+    fn update_version(&self) {
+        let _ = self.version.fetch_add(STEP_SIZE, Ordering::Release);
     }
 
     #[inline(always)]
     fn version(&self) -> usize {
         self.version.load(Ordering::Acquire)
+    }
+
+    #[inline(always)]
+    fn add_writer(&self) {
+        let _ = self.writers.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    fn remove_writer(&self) {
+        if self.writers.fetch_sub(1, Ordering::Relaxed) == 1 {
+            let _ = self.version.fetch_xor(CLOSED_BIT, Ordering::Release);
+        }
+    }
+
+    #[inline(always)]
+    fn add_observer(&self) {
+        let _ = self.observers.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    fn remove_observer(&self) {
+        let _ = self.observers.fetch_sub(1, Ordering::Relaxed);
     }
 }
 
@@ -207,11 +245,20 @@ where
     for<'a> &'a S: ShareStrategy<'a, Target = (L, E)>,
 {
     fn drop(&mut self) {
-        let x = &self.0;
-        let _ = x
-            .share_elided_ref()
-            .version
-            .fetch_or(CLOSED_BIT, Ordering::Release);
+        self.0.share_elided_ref().remove_writer();
+    }
+}
+
+impl<T, S, L, E> Clone for SensorWriter<T, S, L, E>
+where
+    L: DataWriteLock<Target = T>,
+    E: ExecManager<L>,
+    for<'a> &'a S: ShareStrategy<'a, Target = (L, E)>,
+    S: Clone,
+{
+    fn clone(&self) -> Self {
+        self.0.share_elided_ref().add_writer();
+        Self(self.0.clone())
     }
 }
 
@@ -239,10 +286,10 @@ where
         let revised_data = self.0.share_elided_ref();
         let mut guard = revised_data.data.0.write();
         *guard = sample;
-        revised_data.update_version(STEP_SIZE);
+        revised_data.update_version();
         let guard = L::atomic_downgrade(guard);
 
-        // Atomic downgrade just occured. No other modication can happen.
+        // Atomic downgrade just occurred. No other modification can happen.
         revised_data.1.execute(guard);
     }
 
@@ -252,7 +299,7 @@ where
         let revised_data = self.0.share_elided_ref();
         let mut guard = revised_data.data.0.write();
         f(&mut guard);
-        revised_data.update_version(STEP_SIZE);
+        revised_data.update_version();
         let guard = L::atomic_downgrade(guard);
 
         // Atomic downgrade just occured. No other modification can happen.
@@ -264,7 +311,7 @@ where
     pub fn mark_all_unseen(&self) {
         let revised_data = self.0.share_elided_ref();
         let guard = L::atomic_downgrade(revised_data.data.0.write());
-        revised_data.update_version(STEP_SIZE);
+        revised_data.update_version();
 
         // Atomic downgrade just occured. No other modification can happen.
         revised_data.1.execute(guard);
@@ -275,6 +322,7 @@ where
     #[inline(always)]
     pub fn spawn_referenced_observer(&self) -> SensorObserver<T, &'_ RevisedData<(L, E)>, L, E> {
         let inner = self.0.share_elided_ref();
+        inner.add_observer();
         SensorObserver {
             inner,
             version: UnsafeCell::new(inner.version()),
@@ -286,6 +334,7 @@ where
     #[inline(always)]
     pub fn spawn_observer(&self) -> SensorObserver<T, <&'_ S as ShareStrategy>::Shared, L, E> {
         let inner = self.0.share_data();
+        inner.add_observer();
         SensorObserver {
             version: UnsafeCell::new(inner.version()),
             inner,
@@ -318,7 +367,7 @@ pub trait SensorObserve {
     /// - `function@pull`
     /// - `function@mark_seen`
     /// - `function@mark_unseen`
-    /// - `functon@has_changed`
+    /// - `function@has_changed`
     /// - `function@is_closed`
     /// - `function@wait_until_changed` is awaited.
     /// - `function@wait_for` is awaited.
@@ -350,11 +399,11 @@ pub trait SensorObserve {
 }
 
 pub trait SensorObserveAsync: SensorObserve {
-    /// Asyncronously wait until the sensor value is updated. This call will **not** update the observer's version,
+    /// Asynchronously wait until the sensor value is updated. This call will **not** update the observer's version,
     /// as such an additional call to `pull` or `pull_updated` is required.
     fn wait_until_changed(&self) -> impl Future<Output = SymResult<()>>;
 
-    /// Asyncronously wait until the sensor value has been updated with a value that satisfies a condition. This call **will** update the observer's version
+    /// Asynchronously wait until the sensor value has been updated with a value that satisfies a condition. This call **will** update the observer's version
     /// and evaluate the condition function on values obtained by `pull_updated`.
     #[inline]
     fn wait_for<F: Send + FnMut(&<Self::Lock as ReadGuardSpecifier>::Target) -> bool>(
@@ -391,6 +440,17 @@ where
     version: UnsafeCell<usize>,
 }
 
+impl<T, R, L, E> Drop for SensorObserver<T, R, L, E>
+where
+    E: ExecManager<L>,
+    L: DataWriteLock<Target = T>,
+    R: Deref<Target = RevisedData<(L, E)>>,
+{
+    fn drop(&mut self) {
+        self.inner.remove_observer();
+    }
+}
+
 impl<T, R, L, E> Clone for SensorObserver<T, R, L, E>
 where
     E: ExecManager<L>,
@@ -422,9 +482,6 @@ where
     fn pull(&self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_> {
         let guard = self.inner.data.0.read();
         self.mark_seen();
-        // unsafe {
-        //     *self.version.get() = self.inner.version();
-        // }
         guard
     }
 
@@ -489,7 +546,7 @@ where
     A: SensorObserve,
     F: FnMut(&<A::Lock as ReadGuardSpecifier>::Target) -> T,
 {
-    /// Create a new cacheless mapped observer given another observer and an appropriate mapping function.
+    /// Create a new mapped observer given another observer and an appropriate mapping function.
     #[inline(always)]
     pub const fn map_with(a: A, f: F) -> Self {
         Self {
