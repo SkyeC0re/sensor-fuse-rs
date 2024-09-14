@@ -68,6 +68,7 @@ pub mod prelude;
 use alloc::sync::Arc;
 use executor::{ExecManager, ExecRegister};
 
+use core::{cell::UnsafeCell, pin::pin};
 use core::{
     future::Future,
     marker::PhantomData,
@@ -77,11 +78,10 @@ use core::{
     sync::atomic::{AtomicUsize, Ordering},
     task::{Context, Poll, Waker},
 };
-use std::cell::UnsafeCell;
 
-use crate::lock::{
-    DataReadLock, DataWriteLock, FalseReadLock, OwnedData, OwnedFalseLock, ReadGuardSpecifier,
-};
+use crate::lock::{DataReadLock, DataWriteLock, OwnedData, OwnedFalseLock, ReadGuardSpecifier};
+
+pub type SymResult<T> = Result<T, T>;
 
 /*** Revised Data ***/
 
@@ -349,6 +349,37 @@ pub trait SensorObserve {
     }
 }
 
+pub trait SensorObserveAsync: SensorObserve {
+    /// Asyncronously wait until the sensor value is updated. This call will **not** update the observer's version,
+    /// as such an additional call to `pull` or `pull_updated` is required.
+    fn wait_until_changed(&self) -> impl Future<Output = SymResult<()>>;
+
+    /// Asyncronously wait until the sensor value has been updated with a value that satisfies a condition. This call **will** update the observer's version
+    /// and evaluate the condition function on values obtained by `pull_updated`.
+    #[inline]
+    fn wait_for<F: Send + FnMut(&<Self::Lock as ReadGuardSpecifier>::Target) -> bool>(
+        &self,
+        mut condition: F,
+    ) -> impl Future<Output = SymResult<<Self::Lock as ReadGuardSpecifier>::ReadGuard<'_>>> {
+        async move {
+            let mut is_closed = self.is_locally_closed();
+            loop {
+                let guard = self.pull();
+                if condition(&guard) {
+                    // Should get compiled into a value assignment.
+                    return if is_closed { Err(guard) } else { Ok(guard) };
+                }
+                drop(guard);
+                // Should get compiled into a value assignment.
+                is_closed = match self.wait_until_changed().await {
+                    Ok(()) => false,
+                    Err(()) => true,
+                }
+            }
+        }
+    }
+}
+
 /// The generalized sensor observer.
 pub struct SensorObserver<T, R, L, E = L>
 where
@@ -429,9 +460,20 @@ where
     }
 }
 
+impl<T, R, L, E> SensorObserveAsync for SensorObserver<T, R, L, E>
+where
+    for<'a> E: ExecManager<L> + ExecRegister<L, &'a Waker>,
+    L: DataWriteLock<Target = T>,
+    R: Deref<Target = RevisedData<(L, E)>>,
+{
+    async fn wait_until_changed(&self) -> SymResult<()> {
+        WaitUntilChangedFuture(Some(self)).await
+    }
+}
+
 /*** Mapped and Fused Observers ***/
 
-/// A cacheless mapped sensor observer.
+/// A mapped sensor observer.
 pub struct MappedSensorObserver<
     A: SensorObserve,
     T,
@@ -497,6 +539,16 @@ where
     #[inline(always)]
     fn is_locally_closed(&self) -> bool {
         self.inner.is_locally_closed()
+    }
+}
+
+impl<A, T, F> SensorObserveAsync for MappedSensorObserver<A, T, F>
+where
+    A: SensorObserve + SensorObserveAsync,
+    F: FnMut(&<A::Lock as ReadGuardSpecifier>::Target) -> T,
+{
+    fn wait_until_changed(&self) -> impl Future<Output = SymResult<()>> {
+        self.inner.wait_until_changed()
     }
 }
 
@@ -583,6 +635,52 @@ where
     }
 }
 
+struct FusedWaitChanged<A, B>
+where
+    A: Future<Output = SymResult<()>> + Unpin,
+    B: Future<Output = SymResult<()>> + Unpin,
+{
+    a: A,
+    b: B,
+}
+
+impl<A, B> Future for FusedWaitChanged<A, B>
+where
+    A: Future<Output = SymResult<()>> + Unpin,
+    B: Future<Output = SymResult<()>> + Unpin,
+{
+    type Output = SymResult<()>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        if let Poll::Ready(res) = pin!(&mut self.a).poll(cx) {
+            return Poll::Ready(res);
+        }
+        if let Poll::Ready(res) = pin!(&mut self.b).poll(cx) {
+            return Poll::Ready(res);
+        }
+
+        return Poll::Pending;
+    }
+}
+
+impl<A, B, T, F> SensorObserveAsync for FusedSensorObserver<A, B, T, F>
+where
+    A: SensorObserve + SensorObserveAsync,
+    B: SensorObserve + SensorObserveAsync,
+    F: FnMut(
+        &<A::Lock as ReadGuardSpecifier>::Target,
+        &<B::Lock as ReadGuardSpecifier>::Target,
+    ) -> T,
+{
+    async fn wait_until_changed(&self) -> SymResult<()> {
+        FusedWaitChanged {
+            a: pin!(self.a.wait_until_changed()),
+            b: pin!(self.b.wait_until_changed()),
+        }
+        .await
+    }
+}
+
 /*** Executables and Async ***/
 
 /// Allows registration of an executable.
@@ -650,85 +748,6 @@ where
             panic!("Poll called after future returned ready.");
             #[cfg(not(debug_assertions))]
             Poll::Pending
-        }
-    }
-}
-
-/// A future that resolves when the sensor value gets updated with a value that matches a certain condition.
-pub struct WaitForFuture<'a, T, R, L, E, F>
-where
-    E: ExecManager<L>,
-    L: DataWriteLock<Target = T>,
-    R: Deref<Target = RevisedData<(L, E)>>,
-{
-    ptr: *const SensorObserver<T, R, L, E>,
-    f: F,
-    last_version: usize,
-    _ptr_lifetime: PhantomData<&'a ()>,
-}
-
-impl<'a, T: 'a, R: 'a, L: 'a, E: 'a, F> Future for WaitForFuture<'a, T, R, L, E, F>
-where
-    L: DataWriteLock<Target = T>,
-    R: Deref<Target = RevisedData<(L, E)>>,
-    E: ExecManager<L>,
-    for<'b> SensorObserver<T, R, L, E>: RegisterFunction<&'b Waker>,
-    Self: Unpin,
-    F: Send + FnMut(&T) -> bool,
-{
-    type Output = Result<L::ReadGuard<'a>, L::ReadGuard<'a>>;
-
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        // Safe code does not seem to want to compile without a guard reacquisition. Possibly inexperience,
-        // but also possibly a quirk of `Option`'s `None` variant still storing type information.
-        if !self.ptr.is_null() {
-            let observer = unsafe { &*self.ptr };
-            if self.last_version != observer.inner.version.load(Ordering::Relaxed) {
-                let guard = observer.pull();
-                self.last_version = unsafe { *observer.version.get() };
-                // Optimize for non-closed case to remove additional if statement at the cost of evaluating
-                // the condition function in the rare case that the sensor is closed.
-                let closed = observer.is_locally_closed();
-                if closed || (self.f)(&guard) {
-                    self.ptr = null_mut();
-                    // Should get compiled out into a value assignment.
-                    return Poll::Ready(if closed { Err(guard) } else { Ok(guard) });
-                }
-
-                drop(guard);
-            }
-
-            observer.register(cx.waker());
-            return Poll::Pending;
-        }
-
-        #[cfg(debug_assertions)]
-        panic!("Poll called after future returned ready.");
-        #[cfg(not(debug_assertions))]
-        Poll::Pending
-    }
-}
-
-impl<T, R, L, E> SensorObserver<T, R, L, E>
-where
-    L: DataWriteLock<Target = T>,
-    R: Deref<Target = RevisedData<(L, E)>>,
-    for<'a> E: ExecManager<L> + ExecRegister<L, &'a Waker>,
-{
-    /// Asyncronously wait until the sensor value is updated. This call will **not** update the observer's version,
-    /// as such an additional call to `pull` or `pull_updated` is required.
-    pub fn wait_until_changed(&self) -> WaitUntilChangedFuture<'_, T, R, L, E> {
-        WaitUntilChangedFuture(Some(self))
-    }
-    /// Asyncronously wait until the sensor value has been updated with a value that satisfies a condition. This call **will** update the observer's version
-    /// and evaluate the condition function on values obtained by `pull_updated`.
-    pub fn wait_for<F: Send + FnMut(&T) -> bool>(&self, f: F) -> WaitForFuture<'_, T, R, L, E, F> {
-        WaitForFuture {
-            ptr: self,
-            f,
-            // Force evaluation of `f` when observer is polled for the first time.
-            last_version: unsafe { *self.version.get() }.wrapping_sub(STEP_SIZE),
-            _ptr_lifetime: PhantomData,
         }
     }
 }
