@@ -40,19 +40,10 @@ macro_rules! test_core {
             }
 
             #[test]
-            fn [<$prefix _mapped_sensor_cached>]() {
-                test_mapped_sensor_cached::<$sensor_writer, _, _>();
-            }
-
-            #[test]
             fn [<$prefix _fused_sensor_sensor>]() {
                 test_fused_sensor::<$sensor_writer, _, _>();
             }
 
-            #[test]
-            fn [<$prefix _fused_sensor_sensor_cached>]() {
-                test_fused_sensor_cached::<$sensor_writer, _, _>();
-            }
         }
     };
 }
@@ -168,7 +159,6 @@ where
     let sensor_writer = SensorWriter::<usize, S, L, E>::from(0);
     let observer = sensor_writer.spawn_observer().map(|x| x + 1);
 
-    assert!(!observer.is_cached());
     assert_eq!(*observer.borrow(), 1);
 
     sensor_writer.update(2);
@@ -182,34 +172,6 @@ where
 
     let cached = *observer.borrow();
     assert_eq!(cached, 3);
-    let new = *observer.pull();
-    assert_eq!(new, 3);
-}
-
-fn test_mapped_sensor_cached<S, L, E>()
-where
-    for<'a> &'a S: ShareStrategy<'a, Target = (L, E)>,
-    L: DataWriteLock<Target = usize>,
-    E: ExecManager<L>,
-    SensorWriter<usize, S, L, E>: From<usize>,
-{
-    let sensor_writer = SensorWriter::<usize, S, L, E>::from(0);
-    let observer = sensor_writer.spawn_observer().map_cached(|x| x + 1);
-
-    assert!(observer.is_cached());
-    assert_eq!(*observer.borrow(), 1);
-
-    sensor_writer.update(2);
-    assert!(observer.has_changed());
-
-    observer.mark_seen();
-    assert!(!observer.inner.has_changed());
-
-    observer.mark_unseen();
-    assert!(observer.inner.has_changed());
-
-    let cached = *observer.borrow();
-    assert_eq!(cached, 1);
     let new = *observer.pull();
     assert_eq!(new, 3);
 }
@@ -228,7 +190,6 @@ where
         .spawn_observer()
         .fuse(sensor_writer_2.spawn_observer(), |x, y| x * y);
 
-    assert!(!observer.is_cached());
     assert_eq!(*observer.borrow(), 2);
 
     sensor_writer_1.update(2);
@@ -254,52 +215,6 @@ where
 
     let cached = *observer.borrow();
     assert_eq!(cached, 6);
-    let new = *observer.pull();
-    assert_eq!(new, 6);
-
-    assert!(!observer.has_changed());
-}
-
-fn test_fused_sensor_cached<S, L, E>()
-where
-    for<'a> &'a S: ShareStrategy<'a, Target = (L, E)>,
-    L: DataWriteLock<Target = usize>,
-    E: ExecManager<L>,
-    SensorWriter<usize, S, L, E>: From<usize>,
-{
-    let sensor_writer_1 = Arc::new(SensorWriter::<usize, S, L, E>::from(1));
-    let sensor_writer_2 = Arc::new(SensorWriter::<usize, S, L, E>::from(2));
-
-    let observer = sensor_writer_1
-        .spawn_observer()
-        .fuse_cached(sensor_writer_2.spawn_observer(), |x, y| x * y);
-
-    assert!(observer.is_cached());
-    assert_eq!(*observer.borrow(), 2);
-
-    sensor_writer_1.update(2);
-    assert!(observer.has_changed());
-
-    let cached = *observer.borrow();
-    assert_eq!(cached, 2);
-    let new = *observer.pull();
-    assert_eq!(new, 4);
-
-    assert!(!observer.has_changed());
-
-    sensor_writer_2.update(3);
-    assert!(observer.has_changed());
-
-    observer.mark_seen();
-    assert!(!observer.a.has_changed());
-    assert!(!observer.b.has_changed());
-
-    observer.mark_unseen();
-    assert!(observer.a.has_changed());
-    assert!(observer.b.has_changed());
-
-    let cached = *observer.borrow();
-    assert_eq!(cached, 4);
     let new = *observer.pull();
     assert_eq!(new, 6);
 

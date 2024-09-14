@@ -300,12 +300,9 @@ pub trait SensorObserve {
     /// The underlying locking mechanism associated with this observer.
     type Lock: ReadGuardSpecifier;
 
-    /// Returns the latest value obtainable by the sensor. The sensor's internal cache is guaranteed to
-    /// be updated after this call if the sensor is cached. After a call to this function, the obtained
-    /// sensor value will be marked as seen.
+    /// Returns the latest value obtainable by the sensor and marks it as seen.
     fn pull(&self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_>;
-    /// Returns the current cached value of the sensor. This is guaranteed to be the latest value if the sensor
-    /// is not cached. A call to this function will however **not** mark the value as seen, even if the value is not cached.
+    /// Returns the latest value obtainable by the sensor without marking it as seen.
     fn borrow(&self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_>;
     /// Mark the current sensor data as seen.
     fn mark_seen(&self);
@@ -313,8 +310,6 @@ pub trait SensorObserve {
     fn mark_unseen(&self);
     /// Returns true if the sensor data has been marked as unseen.
     fn has_changed(&self) -> bool;
-    /// Returns true if `borrow` may produce stale results.
-    fn is_cached(&self) -> bool;
     /// Returns true if all upstream writers has been dropped and no more updates can occur.
     fn is_closed(&self) -> bool;
     /// Returns true if this observer has observed that all upstream writers has been dropped.
@@ -343,20 +338,6 @@ pub trait SensorObserve {
         FusedSensorObserver::fuse_with(self, other, f)
     }
 
-    /// Fuse this observer with another using the given fusion function into a cached observer.
-    #[inline(always)]
-    fn fuse_cached<B, T, F>(self, other: B, f: F) -> FusedSensorObserverCached<Self, B, T, F>
-    where
-        Self: Sized,
-        B: SensorObserve,
-        F: FnMut(
-            &<<Self as SensorObserve>::Lock as ReadGuardSpecifier>::Target,
-            &<<B as SensorObserve>::Lock as ReadGuardSpecifier>::Target,
-        ) -> T,
-    {
-        FusedSensorObserverCached::fuse_with(self, other, f)
-    }
-
     /// Map this observer into another using the given mapping function into a cacheless observer.
     #[inline(always)]
     fn map<T, F>(self, f: F) -> MappedSensorObserver<Self, T, F>
@@ -365,16 +346,6 @@ pub trait SensorObserve {
         F: FnMut(&<<Self as SensorObserve>::Lock as ReadGuardSpecifier>::Target) -> T,
     {
         MappedSensorObserver::map_with(self, f)
-    }
-
-    /// Map this observer into another using the given mapping function into a cached observer.
-    #[inline(always)]
-    fn map_cached<T, F>(self, f: F) -> MappedSensorObserverCached<Self, T, F>
-    where
-        Self: Sized,
-        F: FnMut(&<<Self as SensorObserve>::Lock as ReadGuardSpecifier>::Target) -> T,
-    {
-        MappedSensorObserverCached::map_with(self, f)
     }
 }
 
@@ -443,10 +414,7 @@ where
         *version |= latest_version & CLOSED_BIT;
         *version != latest_version
     }
-    #[inline(always)]
-    fn is_cached(&self) -> bool {
-        false
-    }
+
     #[inline(always)]
     fn is_closed(&self) -> bool {
         unsafe {
@@ -522,11 +490,6 @@ where
     }
 
     #[inline(always)]
-    fn is_cached(&self) -> bool {
-        false
-    }
-
-    #[inline(always)]
     fn is_closed(&self) -> bool {
         self.inner.is_closed()
     }
@@ -537,86 +500,7 @@ where
     }
 }
 
-/// A cached mapped sensor observer.
-pub struct MappedSensorObserverCached<
-    A: SensorObserve,
-    T,
-    F: FnMut(&<A::Lock as ReadGuardSpecifier>::Target) -> T,
-> {
-    /// The original pre-mapped observer.
-    pub inner: A,
-    cached: UnsafeCell<T>,
-    map: UnsafeCell<F>,
-}
-
-impl<A, T, F> MappedSensorObserverCached<A, T, F>
-where
-    A: SensorObserve,
-    F: FnMut(&<A::Lock as ReadGuardSpecifier>::Target) -> T,
-{
-    /// Create a new cached mapped observer given another observer and an appropriate mapping function.
-    #[inline(always)]
-    pub fn map_with(a: A, mut f: F) -> Self {
-        let cached = f(&a.borrow());
-        Self {
-            cached: UnsafeCell::new(cached),
-            inner: a,
-            map: UnsafeCell::new(f),
-        }
-    }
-}
-
-impl<A, T, F> SensorObserve for MappedSensorObserverCached<A, T, F>
-where
-    A: SensorObserve,
-    F: FnMut(&<A::Lock as ReadGuardSpecifier>::Target) -> T,
-{
-    type Lock = FalseReadLock<T>;
-
-    #[inline]
-    fn pull(&self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_> {
-        let cached = unsafe { &mut *self.cached.get() };
-        *cached = unsafe { (*self.map.get())(&self.inner.pull()) };
-        cached
-    }
-
-    #[inline(always)]
-    fn borrow(&self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_> {
-        unsafe { &*self.cached.get() }
-    }
-
-    #[inline(always)]
-    fn mark_seen(&self) {
-        self.inner.mark_seen();
-    }
-
-    #[inline(always)]
-    fn mark_unseen(&self) {
-        self.inner.mark_unseen();
-    }
-
-    #[inline(always)]
-    fn has_changed(&self) -> bool {
-        self.inner.has_changed()
-    }
-
-    #[inline(always)]
-    fn is_cached(&self) -> bool {
-        true
-    }
-
-    #[inline(always)]
-    fn is_closed(&self) -> bool {
-        self.inner.is_closed()
-    }
-
-    #[inline(always)]
-    fn is_locally_closed(&self) -> bool {
-        self.inner.is_locally_closed()
-    }
-}
-
-/// A cacheless fused sensor observer.
+/// A fused sensor observer.
 pub struct FusedSensorObserver<
     A: SensorObserve,
     B: SensorObserve,
@@ -689,108 +573,11 @@ where
     }
 
     #[inline(always)]
-    fn is_cached(&self) -> bool {
-        self.a.is_cached() || self.b.is_cached()
-    }
-
-    #[inline(always)]
     fn is_closed(&self) -> bool {
         self.a.is_closed() && self.b.is_closed()
     }
 
     #[inline(always)]
-    fn is_locally_closed(&self) -> bool {
-        self.a.is_locally_closed() && self.b.is_locally_closed()
-    }
-}
-
-/// A cached fused sensor observer.
-pub struct FusedSensorObserverCached<
-    A: SensorObserve,
-    B: SensorObserve,
-    T,
-    F: FnMut(&<A::Lock as ReadGuardSpecifier>::Target, &<B::Lock as ReadGuardSpecifier>::Target) -> T,
-> {
-    /// The first original pre-mapped observer.
-    pub a: A,
-    /// The second original pre-mapped observer.
-    pub b: B,
-    cache: UnsafeCell<T>,
-    fuse: UnsafeCell<F>,
-}
-
-impl<A, B, T, F> FusedSensorObserverCached<A, B, T, F>
-where
-    A: SensorObserve,
-    B: SensorObserve,
-    F: FnMut(
-        &<A::Lock as ReadGuardSpecifier>::Target,
-        &<B::Lock as ReadGuardSpecifier>::Target,
-    ) -> T,
-{
-    /// Create a new cacheled fused observer given two other independent observers and an appropriate fusing function.
-    #[inline(always)]
-    pub fn fuse_with(a: A, b: B, mut f: F) -> Self {
-        let cache = f(&a.borrow(), &b.borrow());
-        Self {
-            cache: UnsafeCell::new(cache),
-            a,
-            b,
-            fuse: UnsafeCell::new(f),
-        }
-    }
-}
-
-impl<A, B, T, F> SensorObserve for FusedSensorObserverCached<A, B, T, F>
-where
-    A: SensorObserve,
-    B: SensorObserve,
-    F: FnMut(
-        &<A::Lock as ReadGuardSpecifier>::Target,
-        &<B::Lock as ReadGuardSpecifier>::Target,
-    ) -> T,
-{
-    type Lock = FalseReadLock<T>;
-
-    #[inline(always)]
-    fn pull(&self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_> {
-        let cache = unsafe { &mut *self.cache.get() };
-        *cache = unsafe { (*self.fuse.get())(&self.a.pull(), &self.b.pull()) };
-        cache
-    }
-
-    #[inline(always)]
-    fn borrow(&self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_> {
-        unsafe { &*self.cache.get() }
-    }
-
-    #[inline(always)]
-    fn mark_seen(&self) {
-        self.a.mark_seen();
-        self.b.mark_seen();
-    }
-
-    #[inline(always)]
-    fn mark_unseen(&self) {
-        self.a.mark_unseen();
-        self.b.mark_unseen();
-    }
-
-    #[inline(always)]
-    fn has_changed(&self) -> bool {
-        self.a.has_changed() || self.b.has_changed()
-    }
-
-    #[inline(always)]
-    fn is_cached(&self) -> bool {
-        true
-    }
-
-    #[inline(always)]
-    fn is_closed(&self) -> bool {
-        self.a.is_closed() && self.b.is_closed()
-    }
-
     fn is_locally_closed(&self) -> bool {
         self.a.is_locally_closed() && self.b.is_locally_closed()
     }
