@@ -5,7 +5,7 @@ use sensor_fuse::{
     executor::{ExecManager, ExecRegister},
     lock::{self, DataWriteLock},
     prelude::*,
-    RevisedData, SensorWriter, ShareStrategy,
+    RawSensorData, SensorWriter, ShareStrategy,
 };
 use std::{ops::Deref, sync::Arc, task::Waker, thread, time::Duration};
 use tokio::sync::watch;
@@ -66,7 +66,7 @@ macro_rules! test_core_exec {
 
 fn test_basic_sensor_observation<S, L, E>()
 where
-    for<'a> &'a S: ShareStrategy<'a, Target = (L, E)>,
+    for<'a> &'a S: ShareStrategy<'a, Data = (L, E)>,
     L: DataWriteLock<Target = usize>,
     E: ExecManager<L>,
     SensorWriter<usize, S, L, E>: From<usize>,
@@ -111,7 +111,7 @@ where
 
 fn test_basic_sensor_observation_parallel_unsynced<S, L, E>(num_threads: usize, num_updates: usize)
 where
-    for<'a> &'a S: ShareStrategy<'a, Target = (L, E)>,
+    for<'a> &'a S: ShareStrategy<'a, Data = (L, E)>,
     L: DataWriteLock<Target = usize>,
     E: ExecManager<L>,
     SensorWriter<usize, S, L, E>: From<usize> + Send + Sync + 'static,
@@ -151,7 +151,7 @@ where
 
 fn test_mapped_sensor<S, L, E>()
 where
-    for<'a> &'a S: ShareStrategy<'a, Target = (L, E)>,
+    for<'a> &'a S: ShareStrategy<'a, Data = (L, E)>,
     L: DataWriteLock<Target = usize>,
     E: ExecManager<L>,
     SensorWriter<usize, S, L, E>: From<usize>,
@@ -178,7 +178,7 @@ where
 
 fn test_fused_sensor<S, L, E>()
 where
-    for<'a> &'a S: ShareStrategy<'a, Target = (L, E)>,
+    for<'a> &'a S: ShareStrategy<'a, Data = (L, E)>,
     L: DataWriteLock<Target = usize>,
     E: ExecManager<L>,
     SensorWriter<usize, S, L, E>: From<usize>,
@@ -223,8 +223,8 @@ where
 
 fn test_closed<S, R, L, E>()
 where
-    R: Deref<Target = RevisedData<(L, E)>>,
-    for<'a> &'a S: ShareStrategy<'a, Target = (L, E), Shared = R>,
+    R: Deref<Target = RawSensorData<(L, E)>>,
+    for<'a> &'a S: ShareStrategy<'a, Data = (L, E), Shared = R>,
     L: DataWriteLock<Target = usize>,
     E: ExecManager<L>,
     SensorWriter<usize, S, L, E>: From<usize>,
@@ -238,7 +238,7 @@ where
 
 fn test_async_waiting<S, L, E>()
 where
-    for<'a> &'a S: ShareStrategy<'a, Target = (L, E)>,
+    for<'a> &'a S: ShareStrategy<'a, Data = (L, E)>,
     L: DataWriteLock<Target = usize>,
     for<'a> E: ExecManager<L> + ExecRegister<L, &'a Waker>,
     SensorWriter<usize, S, L, E>: 'static + Send + Sync + From<usize>,
@@ -291,7 +291,7 @@ where
 
 fn test_callbacks<S, L, E>()
 where
-    for<'a> &'a S: ShareStrategy<'a, Target = (L, E)>,
+    for<'a> &'a S: ShareStrategy<'a, Data = (L, E)>,
     L: DataWriteLock<Target = usize>,
     E: ExecManager<L> + ExecRegister<L, Box<dyn Send + FnMut(&usize) -> bool>>,
     SensorWriter<usize, S, L, E>: 'static + Send + Sync + From<usize>,

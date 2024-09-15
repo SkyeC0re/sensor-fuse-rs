@@ -1,9 +1,9 @@
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
-pub mod parking_lot;
-#[cfg(feature = "std")]
-pub mod std_sync;
+// pub mod parking_lot;
+// #[cfg(feature = "std")]
+// pub mod std_sync;
 
 #[cfg(feature = "alloc")]
 use alloc::sync::Arc;
@@ -13,15 +13,17 @@ use core::{
 };
 use derived_deref::{Deref, DerefMut};
 
-use crate::{RevisedData, SensorObserver, SensorWriter};
+// use crate::{RevisedSensorData, SensorObserver, SensorWriter};
 
-pub type AbstractSensorObserver<'a, T, L, E> = SensorObserver<T, &'a RevisedData<(L, E)>, L, E>;
-pub type AbstractSensorWriter<T, L, E> = SensorWriter<T, RevisedData<(L, E)>, L, E>;
+// pub type AbstractSensorObserver<'a, T, L, E> =
+//     SensorObserver<T, &'a RevisedSensorData<(L, E)>, L, E>;
+// pub type AbstractSensorWriter<T, L, E> = SensorWriter<T, RevisedSensorData<(L, E)>, L, E>;
 
-#[cfg(feature = "alloc")]
-pub type AbstractArcSensorObserver<T, L, E> = SensorObserver<T, Arc<RevisedData<(L, E)>>, L, E>;
-#[cfg(feature = "alloc")]
-pub type AbstractArcSensorWriter<T, L, E> = SensorWriter<T, Arc<RevisedData<(L, E)>>, L, E>;
+// #[cfg(feature = "alloc")]
+// pub type AbstractArcSensorObserver<T, L, E> =
+//     SensorObserver<T, Arc<RevisedSensorData<(L, E)>>, L, E>;
+// #[cfg(feature = "alloc")]
+// pub type AbstractArcSensorWriter<T, L, E> = SensorWriter<T, Arc<RevisedSensorData<(L, E)>>, L, E>;
 
 pub trait ReadGuardSpecifier {
     /// The underlying type that the guard is protecting.
