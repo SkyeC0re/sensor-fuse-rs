@@ -7,7 +7,17 @@ use sensor_fuse::{
     prelude::*,
     DerefSensorData, RawSensorData, SensorWriter, ShareStrategy, SharedSensorData,
 };
-use std::{ops::Deref, sync::Arc, task::Waker, thread, time::Duration};
+use std::{
+    hint::black_box,
+    ops::Deref,
+    sync::{
+        atomic::{compiler_fence, fence, Ordering},
+        Arc,
+    },
+    task::Waker,
+    thread,
+    time::Duration,
+};
 use tokio::sync::watch;
 
 macro_rules! test_core_with_owned_observer {
@@ -239,49 +249,64 @@ where
     SensorWriter<usize, S>: 'static + Send + Sync + From<usize>,
 {
     let sync_send = watch::Sender::new(());
-    let mut sync_recv = sync_send.subscribe();
-    let sensor_writer = Arc::new(SensorWriter::<usize, S>::from(1));
+    let ping_send = Arc::new(SensorWriter::<usize, S>::from(1));
+    for _ in 0..50 {
+        let ping_recv = ping_send.as_ref().spawn_observer();
+        let mut sync_recv = sync_send.subscribe();
+        sync_recv.mark_unchanged();
+        let handle = thread::spawn({
+            let ping_send = ping_send.clone();
+            move || {
+                for _ in 0..50 {
+                    let _ = block_on(timeout(Duration::from_secs(1), sync_recv.changed())).unwrap();
 
-    let sensor_writer_clone = sensor_writer.clone();
-    let handle = thread::spawn(move || {
-        let _ = block_on(timeout(Duration::from_secs(1), sync_recv.changed()))
-            .expect("Timeout waiting for initial confirmation");
+                    fence(Ordering::SeqCst);
+                    ping_send.update(5);
 
-        sensor_writer_clone.update(5);
+                    let _ = block_on(timeout(Duration::from_secs(1), sync_recv.changed())).unwrap();
 
-        let _ = block_on(timeout(Duration::from_secs(1), sync_recv.changed()))
-            .expect("Timeout waiting for secondary confirmation");
+                    fence(Ordering::SeqCst);
+                    ping_send.modify_with(|x| *x += 1);
+                }
+            }
+        });
 
-        sensor_writer_clone.modify_with(|x| *x += 1);
-    });
+        for _ in 0..50 {
+            ping_recv.mark_seen();
+            let unused = black_box(ping_recv.wait_until_changed());
 
-    let observer = sensor_writer.as_ref().spawn_observer();
-    sync_send.send_replace(());
-    block_on(timeout(
-        Duration::from_secs(1),
-        observer.wait_until_changed(),
-    ))
-    .expect("Timeout occured waiting for first update.")
-    .expect("Writer was not dropped");
+            black_box(sync_send.send_replace(()));
 
-    assert!(observer.has_changed());
-    assert_eq!(*observer.pull(), 5);
+            fence(Ordering::SeqCst);
+            block_on(timeout(
+                Duration::from_secs(1),
+                ping_recv.wait_until_changed(),
+            ))
+            .unwrap()
+            .unwrap();
 
-    sync_send.send_replace(());
-    if block_on(timeout(
-        Duration::from_secs(1),
-        observer.wait_for(|x| *x == 6),
-    ))
-    .expect("Timeout occured waiting for second update.")
-    .is_err()
-    {
-        panic!("Writer was not dropped");
+            assert!(ping_recv.has_changed());
+            assert_eq!(*ping_recv.pull(), 5);
+            drop(unused);
+
+            black_box(sync_send.send_replace(()));
+
+            fence(Ordering::SeqCst);
+            if block_on(timeout(
+                Duration::from_secs(1),
+                ping_recv.wait_for(|x| *x == 6),
+            ))
+            .unwrap()
+            .is_err()
+            {
+                panic!();
+            }
+
+            assert!(!ping_recv.has_changed());
+            assert_eq!(*ping_recv.borrow(), 6);
+        }
+        handle.join().unwrap();
     }
-
-    assert!(!observer.has_changed());
-    assert_eq!(*observer.borrow(), 6);
-
-    handle.join().unwrap();
 }
 
 fn test_callbacks<S>()
@@ -397,26 +422,26 @@ test_core_exec!(
 
 /*** std_sync locks ***/
 
-// test_core!(ss_rwl, lock::std_sync::RwSensorData<_>);
+test_core!(ss_rwl, lock::std_sync::RwSensorData<_>);
 
-// test_core!(ss_arc_rwl, lock::std_sync::ArcRwSensorData<_>);
-// test_core_with_owned_observer!(ss_arc_rwl, lock::std_sync::ArcRwSensorData<_>);
+test_core!(ss_arc_rwl, lock::std_sync::ArcRwSensorData<_>);
+test_core_with_owned_observer!(ss_arc_rwl, lock::std_sync::ArcRwSensorData<_>);
 
-// test_core!(ss_mtx, lock::std_sync::MutexSensorData<_>);
+test_core!(ss_mtx, lock::std_sync::MutexSensorData<_>);
 
-// test_core!(ss_arc_mtx, lock::std_sync::ArcMutexSensorData<_>);
-// test_core_with_owned_observer!(ss_arc_mtx, lock::std_sync::ArcMutexSensorData<_>);
+test_core!(ss_arc_mtx, lock::std_sync::ArcMutexSensorData<_>);
+test_core_with_owned_observer!(ss_arc_mtx, lock::std_sync::ArcMutexSensorData<_>);
 
-// test_core!(ss_rwl_exec, lock::std_sync::RwSensorDataExec<_>);
-// test_core_exec!(ss_rwl_exec, lock::std_sync::RwSensorDataExec<_>);
+test_core!(ss_rwl_exec, lock::std_sync::RwSensorDataExec<_>);
+test_core_exec!(ss_rwl_exec, lock::std_sync::RwSensorDataExec<_>);
 
-// test_core!(ss_arc_rwl_exec, lock::std_sync::ArcRwSensorDataExec<_>);
-// test_core_with_owned_observer!(ss_arc_rwl_exec, lock::std_sync::ArcMutexSensorDataExec<_>);
-// test_core_exec!(ss_arc_rwl_exec, lock::std_sync::ArcRwSensorDataExec<_>);
+test_core!(ss_arc_rwl_exec, lock::std_sync::ArcRwSensorDataExec<_>);
+test_core_with_owned_observer!(ss_arc_rwl_exec, lock::std_sync::ArcMutexSensorDataExec<_>);
+test_core_exec!(ss_arc_rwl_exec, lock::std_sync::ArcRwSensorDataExec<_>);
 
-// test_core!(ss_mtx_exec, lock::std_sync::MutexSensorDataExec<_>);
-// test_core_exec!(ss_mtx_exec, lock::std_sync::MutexSensorDataExec<_>);
+test_core!(ss_mtx_exec, lock::std_sync::MutexSensorDataExec<_>);
+test_core_exec!(ss_mtx_exec, lock::std_sync::MutexSensorDataExec<_>);
 
-// test_core!(ss_arc_mtx_exec, lock::std_sync::ArcMutexSensorDataExec<_>);
-// test_core_with_owned_observer!(ss_arc_mtx_exec, lock::std_sync::ArcMutexSensorDataExec<_>);
-// test_core_exec!(ss_arc_mtx_exec, lock::std_sync::ArcMutexSensorDataExec<_>);
+test_core!(ss_arc_mtx_exec, lock::std_sync::ArcMutexSensorDataExec<_>);
+test_core_with_owned_observer!(ss_arc_mtx_exec, lock::std_sync::ArcMutexSensorDataExec<_>);
+test_core_exec!(ss_arc_mtx_exec, lock::std_sync::ArcMutexSensorDataExec<_>);

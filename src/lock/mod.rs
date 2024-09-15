@@ -2,8 +2,8 @@
 extern crate alloc;
 
 pub mod parking_lot;
-// #[cfg(feature = "std")]
-// pub mod std_sync;
+#[cfg(feature = "std")]
+pub mod std_sync;
 
 #[cfg(feature = "alloc")]
 use alloc::sync::Arc;
@@ -51,11 +51,6 @@ pub trait DataWriteLock: DataReadLock {
     /// This method should by default just return the write guard, but, if the lock allows for it,
     /// should return a read guard which was atomically downgraded from the given write guard.
     fn atomic_downgrade(write_guard: Self::WriteGuard<'_>) -> Self::DowngradedGuard<'_>;
-
-    #[inline]
-    fn downgraded(&self) -> Self::DowngradedGuard<'_> {
-        Self::atomic_downgrade(self.write())
-    }
 }
 
 #[derive(Deref, DerefMut, Clone)]

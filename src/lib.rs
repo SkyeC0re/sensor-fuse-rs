@@ -76,7 +76,10 @@ use core::{
     task::{Context, Poll, Waker},
 };
 use executor::{ExecManager, ExecRegister};
-use std::marker::PhantomData;
+use std::{
+    marker::PhantomData,
+    sync::atomic::{compiler_fence, fence},
+};
 
 use crate::lock::{DataReadLock, DataWriteLock, OwnedData, OwnedFalseLock, ReadGuardSpecifier};
 
@@ -308,8 +311,9 @@ where
         let mut guard = revised_data.lock.write();
         *guard = sample;
         let _ = revised_data.version.fetch_add(STEP_SIZE, Ordering::Release);
+        fence(Ordering::SeqCst);
         let guard = S::Lock::atomic_downgrade(guard);
-
+        fence(Ordering::SeqCst);
         // Atomic downgrade just occurred. No other modification can happen.
         revised_data.executor.execute(guard);
     }
@@ -321,8 +325,9 @@ where
         let mut guard = revised_data.lock.write();
         f(&mut guard);
         let _ = revised_data.version.fetch_add(STEP_SIZE, Ordering::Release);
+        fence(Ordering::SeqCst);
         let guard = S::Lock::atomic_downgrade(guard);
-
+        fence(Ordering::SeqCst);
         // Atomic downgrade just occured. No other modification can happen.
         revised_data.executor.execute(guard);
     }
@@ -446,6 +451,7 @@ pub trait SensorObserveAsync: SensorObserve {
                     return if is_closed { Err(guard) } else { Ok(guard) };
                 }
                 drop(guard);
+                fence(Ordering::SeqCst);
                 // Should get compiled into a value assignment.
                 is_closed = match self.wait_until_changed().await {
                     Ok(()) => false,
@@ -518,7 +524,9 @@ where
     #[inline(always)]
     fn pull(&self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_> {
         let guard = self.inner.lock.read();
+        fence(Ordering::SeqCst);
         self.mark_seen();
+        fence(Ordering::SeqCst);
         guard
     }
 
