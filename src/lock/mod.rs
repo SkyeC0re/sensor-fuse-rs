@@ -1,7 +1,7 @@
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
-// pub mod parking_lot;
+pub mod parking_lot;
 // #[cfg(feature = "std")]
 // pub mod std_sync;
 
@@ -12,18 +12,6 @@ use core::{
     ops::{Deref, DerefMut},
 };
 use derived_deref::{Deref, DerefMut};
-
-// use crate::{RevisedSensorData, SensorObserver, SensorWriter};
-
-// pub type AbstractSensorObserver<'a, T, L, E> =
-//     SensorObserver<T, &'a RevisedSensorData<(L, E)>, L, E>;
-// pub type AbstractSensorWriter<T, L, E> = SensorWriter<T, RevisedSensorData<(L, E)>, L, E>;
-
-// #[cfg(feature = "alloc")]
-// pub type AbstractArcSensorObserver<T, L, E> =
-//     SensorObserver<T, Arc<RevisedSensorData<(L, E)>>, L, E>;
-// #[cfg(feature = "alloc")]
-// pub type AbstractArcSensorWriter<T, L, E> = SensorWriter<T, Arc<RevisedSensorData<(L, E)>>, L, E>;
 
 pub trait ReadGuardSpecifier {
     /// The underlying type that the guard is protecting.

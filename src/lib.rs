@@ -62,14 +62,14 @@ extern crate alloc;
 
 pub mod executor;
 pub mod lock;
-// pub mod prelude;
+pub mod prelude;
 
 #[cfg(feature = "alloc")]
 use alloc::sync::Arc;
 use core::{
     cell::UnsafeCell,
     future::Future,
-    ops::{Deref, DerefMut},
+    ops::Deref,
     pin::pin,
     pin::Pin,
     sync::atomic::{AtomicUsize, Ordering},
@@ -101,82 +101,25 @@ where
     observers: AtomicUsize,
 }
 
-// impl<T> Deref for RevisedSensorData<T> {
-//     type Target = T;
-
-//     #[inline(always)]
-//     fn deref(&self) -> &Self::Target {
-//         &self.data
-//     }
-// }
-
-// impl<T> DerefMut for RevisedSensorData<T> {
-//     #[inline(always)]
-//     fn deref_mut(&mut self) -> &mut Self::Target {
-//         &mut self.data
-//     }
-// }
-
-// impl<L, E> RevisedSensorData<(L, E)>
-// where
-//     L: DataWriteLock,
-//     E: ExecManager<L>,
-// {
-//     /// Create raw sensor data for the purposes of creating a sensor writer.
-//     #[inline(always)]
-//     pub const fn new_sensor_data(locked_data: L, executor: E) -> Self {
-//         Self::new((locked_data, executor), 1, 0)
-//     }
-// }
-
-// impl<T> RevisedSensorData<T> {
-//     /// Initialize using the given initial data.
-//     #[inline(always)]
-//     const fn new(data: T, initial_writers: usize, initial_observers: usize) -> Self {
-//         Self {
-//             data,
-//             version: AtomicUsize::new(0),
-//             writers: AtomicUsize::new(initial_writers),
-//             observers: AtomicUsize::new(initial_observers),
-//         }
-//     }
-
-//     /* Keep all atomic operations here to reason about memory ordering. */
-//     #[inline(always)]
-//     fn update_version(&self) {
-//         let _ = self.version.fetch_add(STEP_SIZE, Ordering::Release);
-//     }
-
-//     #[inline(always)]
-//     fn version(&self) -> usize {
-//         self.version.load(Ordering::Acquire)
-//     }
-
-//     #[inline(always)]
-//     fn add_writer(&self) {
-//         let _ = self.writers.fetch_add(1, Ordering::Relaxed);
-//     }
-
-//     #[inline(always)]
-//     fn remove_writer(&self) {
-//         if self.writers.fetch_sub(1, Ordering::Relaxed) == 1 {
-//             let _ = self.version.fetch_xor(CLOSED_BIT, Ordering::Release);
-//         }
-//     }
-
-//     #[inline(always)]
-//     fn add_observer(&self) {
-//         let _ = self.observers.fetch_add(1, Ordering::Relaxed);
-//     }
-
-//     #[inline(always)]
-//     fn remove_observer(&self) {
-//         let _ = self.observers.fetch_sub(1, Ordering::Relaxed);
-//     }
-// }
-
+impl<L, E> RawSensorData<L, E>
+where
+    L: DataWriteLock,
+    E: ExecManager<L>,
+{
+    #[inline(always)]
+    const fn new_for_writer(lock: L, executor: E) -> Self {
+        Self {
+            lock,
+            executor,
+            version: AtomicUsize::new(0),
+            writers: AtomicUsize::new(1),
+            observers: AtomicUsize::new(0),
+        }
+    }
+}
 /// Trait for sharing a (most likely heap pointer) wrapped `struct@RevisedData` with a locking strategy.
 pub trait ShareStrategy<'a> {
+    /// The underlying data that is being shared.
     type Data;
     /// The wrapping container for the shared data.
     type Shared: Deref<Target = Self::Data>;
@@ -189,11 +132,14 @@ pub trait ShareStrategy<'a> {
     fn share_elided_ref(self) -> &'a Self::Data;
 }
 
+/// QOL trait to encapsulate sensor writer's data wrapper, locking strategy and executor type.
 pub trait SharedSensorData<T>
 where
     for<'a> &'a Self: ShareStrategy<'a, Data = RawSensorData<Self::Lock, Self::Executor>>,
 {
+    /// The locking mechanism for the sensor's data.
     type Lock: DataWriteLock<Target = T>;
+    /// The executor associated with the sensor.
     type Executor: ExecManager<Self::Lock>;
 }
 
@@ -215,8 +161,11 @@ where
     }
 }
 
+/// QOL trait to encapsulate sensor observer's data wrapper, locking strategy and executor type.
 pub trait DerefSensorData<T>: Deref<Target = RawSensorData<Self::Lock, Self::Executor>> {
+    /// The locking mechanism for the sensor's data.
     type Lock: DataWriteLock<Target = T>;
+    /// The executor associated with the sensor.
     type Executor: ExecManager<Self::Lock>;
 }
 
@@ -279,15 +228,31 @@ where
     S: SharedSensorData<T>,
     for<'a> &'a S: ShareStrategy<'a, Data = RawSensorData<S::Lock, S::Executor>>;
 
-impl<T, S> SensorWriter<T, S>
+impl<T, L, E> SensorWriter<T, RawSensorData<L, E>>
 where
-    S: SharedSensorData<T>,
-    for<'a> &'a S: ShareStrategy<'a, Data = RawSensorData<S::Lock, S::Executor>>,
+    L: DataWriteLock<Target = T>,
+    E: ExecManager<L>,
 {
     /// Create a new sensor writer by wrapping the appropriate shared data.
     #[inline(always)]
-    pub const fn new_from_shared(shared: S) -> Self {
-        Self(shared, PhantomData)
+    pub const fn from_parts(lock: L, executor: E) -> Self {
+        Self(RawSensorData::new_for_writer(lock, executor), PhantomData)
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl<T, L, E> SensorWriter<T, Arc<RawSensorData<L, E>>>
+where
+    L: DataWriteLock<Target = T>,
+    E: ExecManager<L>,
+{
+    /// Create a new sensor writer by wrapping the appropriate shared data.
+    #[inline(always)]
+    pub fn from_parts_arc(lock: L, executor: E) -> Self {
+        Self(
+            Arc::new(RawSensorData::new_for_writer(lock, executor)),
+            PhantomData,
+        )
     }
 }
 
@@ -297,10 +262,10 @@ where
     for<'a> &'a S: ShareStrategy<'a, Data = RawSensorData<S::Lock, S::Executor>>,
 {
     fn drop(&mut self) {
-        self.0
-            .share_elided_ref()
-            .writers
-            .fetch_sub(1, Ordering::Relaxed);
+        let data = self.0.share_elided_ref();
+        if data.writers.fetch_sub(1, Ordering::Relaxed) == 1 {
+            let _ = data.version.fetch_or(CLOSED_BIT, Ordering::Release);
+        }
     }
 }
 
@@ -310,7 +275,8 @@ where
     for<'a> &'a S: ShareStrategy<'a, Data = RawSensorData<S::Lock, S::Executor>>,
 {
     fn clone(&self) -> Self {
-        self.0
+        let _ = self
+            .0
             .share_elided_ref()
             .writers
             .fetch_add(1, Ordering::Relaxed);
@@ -403,6 +369,7 @@ where
 }
 
 /*** Sensor Observation ***/
+
 /// General observer functionality.
 pub trait SensorObserve {
     /// The underlying locking mechanism associated with this observer.
@@ -457,6 +424,7 @@ pub trait SensorObserve {
     }
 }
 
+/// Async observer functionality.
 pub trait SensorObserveAsync: SensorObserve {
     /// Asynchronously wait until the sensor value is updated. This call will **not** update the observer's version,
     /// as such an additional call to `pull` or `pull_updated` is required.
@@ -518,7 +486,7 @@ where
     R: DerefSensorData<T>,
 {
     fn drop(&mut self) {
-        self.inner.observers.fetch_sub(1, Ordering::Relaxed);
+        let _ = self.inner.observers.fetch_sub(1, Ordering::Relaxed);
     }
 }
 
