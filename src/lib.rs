@@ -41,10 +41,10 @@
 //! ## Executors and Executables
 //!
 //! Within the framework, every sensor is associated with an executor which allows executables to be registered. In this context
-//! an executable can be anything but fundamentally represents a piece of work that must occur each time the sensor value is updated. The frameworks basic
-//! non-trivial (`()`) executor (`struct@StdExec`) for example allows for both the registration of `Waker`s to power asynchronous behaviour and
-//! callback functions that act on references to the sensor value. Each time the sensor value is updated, `struct@StdExec` will execute and drop all `Waker`s and
-//! all callbacks and drop those callbacks that produced `false` as output values.
+//! an executable can be anything but fundamentally represents a piece of work that must occur each time the sensor value is updated. The framework's basic
+//! non-trivial executor (`struct@StdExec`) for example allows for both the registration of `Waker`s to power asynchronous behaviour and
+//! callback functions that act on references to the sensor value. Each time the sensor value is updated, `struct@StdExec` will execute all `Waker`s and
+//! callbacks, dropping all the Wakers and those callbacks that produced `false` as output values.
 //!
 
 #![warn(bad_style)]
@@ -69,7 +69,7 @@ use alloc::sync::Arc;
 use core::marker::PhantomData;
 use core::{
     cell::UnsafeCell,
-    future::Future,
+    future::{poll_fn, Future},
     ops::Deref,
     pin::pin,
     pin::Pin,
@@ -77,7 +77,6 @@ use core::{
     task::{Context, Poll, Waker},
 };
 use executor::{ExecManager, ExecRegister};
-use std::future::poll_fn;
 
 use crate::lock::{DataReadLock, DataWriteLock, OwnedData, OwnedFalseLock, ReadGuardSpecifier};
 
@@ -846,7 +845,7 @@ where
                 Poll::Ready(if closed { Err(()) } else { Ok(()) })
             } else {
                 value.register(cx.waker());
-                // Some executors like `StdExec` allows simultaneous registration and execution. Checking for updates again after
+                // Some executors like `StdExec` may allow simultaneous registration and execution. Checking for updates again after
                 // registration ensures that any update will either be observed right now, or the waker will be called for it and
                 // therefore no update is missed.
                 has_changed = value.has_changed();
