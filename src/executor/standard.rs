@@ -34,6 +34,7 @@ impl<T> StdExec<T> {
         }
     }
 
+    #[inline]
     unsafe fn callback_and_truncate(&self, value: &T) {
         let callbacks = &mut *self.callbacks_out.get();
         let mut i = 0;

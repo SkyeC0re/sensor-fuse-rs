@@ -66,6 +66,7 @@ pub mod prelude;
 
 #[cfg(feature = "alloc")]
 use alloc::sync::Arc;
+use core::marker::PhantomData;
 use core::{
     cell::UnsafeCell,
     future::Future,
@@ -76,10 +77,7 @@ use core::{
     task::{Context, Poll, Waker},
 };
 use executor::{ExecManager, ExecRegister};
-use std::{
-    marker::PhantomData,
-    sync::atomic::{compiler_fence, fence},
-};
+use std::future::poll_fn;
 
 use crate::lock::{DataReadLock, DataWriteLock, OwnedData, OwnedFalseLock, ReadGuardSpecifier};
 
@@ -305,17 +303,9 @@ where
     }
 
     /// Update the sensor value, notify observers and execute all registered callbacks.
-    #[inline]
+    #[inline(always)]
     pub fn update(&self, sample: T) {
-        let revised_data = self.0.share_elided_ref();
-        let mut guard = revised_data.lock.write();
-        *guard = sample;
-        let _ = revised_data.version.fetch_add(STEP_SIZE, Ordering::Release);
-        fence(Ordering::SeqCst);
-        let guard = S::Lock::atomic_downgrade(guard);
-        fence(Ordering::SeqCst);
-        // Atomic downgrade just occurred. No other modification can happen.
-        revised_data.executor.execute(guard);
+        self.modify_with(|v| *v = sample)
     }
 
     /// Modify the sensor value in place, notify observers and execute all registered callbacks.
@@ -323,25 +313,19 @@ where
     pub fn modify_with(&self, f: impl FnOnce(&mut T)) {
         let revised_data = self.0.share_elided_ref();
         let mut guard = revised_data.lock.write();
+
         f(&mut guard);
         let _ = revised_data.version.fetch_add(STEP_SIZE, Ordering::Release);
-        fence(Ordering::SeqCst);
+
         let guard = S::Lock::atomic_downgrade(guard);
-        fence(Ordering::SeqCst);
-        // Atomic downgrade just occured. No other modification can happen.
+        // Atomic downgrade just occurred. No other modification can happen.
         revised_data.executor.execute(guard);
     }
 
     /// Mark the current sensor value as unseen to all observers, notify them and execute all registered callbacks.
-    #[inline]
+    #[inline(always)]
     pub fn mark_all_unseen(&self) {
-        let revised_data = self.0.share_elided_ref();
-        let guard = S::Lock::atomic_downgrade(revised_data.lock.write());
-
-        let _ = revised_data.version.fetch_add(STEP_SIZE, Ordering::Release);
-
-        // Atomic downgrade just occured. No other modification can happen.
-        revised_data.executor.execute(guard);
+        self.modify_with(|_| ())
     }
 
     /// Spawn an observer by immutably borrowing the sensor writer's data. By definition this observer's scope will be limited
@@ -433,7 +417,7 @@ pub trait SensorObserve {
 pub trait SensorObserveAsync: SensorObserve {
     /// Asynchronously wait until the sensor value is updated. This call will **not** update the observer's version,
     /// as such an additional call to `pull` or `pull_updated` is required.
-    fn wait_until_changed(&self) -> impl Future<Output = SymResult<()>>;
+    fn wait_until_changed(&self) -> impl Future<Output = SymResult<()>> + Unpin;
 
     /// Asynchronously wait until the sensor value has been updated with a value that satisfies a condition. This call **will** update the observer's version
     /// and evaluate the condition function on values obtained by `pull_updated`.
@@ -451,7 +435,6 @@ pub trait SensorObserveAsync: SensorObserve {
                     return if is_closed { Err(guard) } else { Ok(guard) };
                 }
                 drop(guard);
-                fence(Ordering::SeqCst);
                 // Should get compiled into a value assignment.
                 is_closed = match self.wait_until_changed().await {
                     Ok(()) => false,
@@ -524,9 +507,7 @@ where
     #[inline(always)]
     fn pull(&self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_> {
         let guard = self.inner.lock.read();
-        fence(Ordering::SeqCst);
         self.mark_seen();
-        fence(Ordering::SeqCst);
         guard
     }
 
@@ -573,8 +554,27 @@ where
     for<'a> R::Executor: ExecRegister<R::Lock, &'a Waker>,
     R: DerefSensorData<T>,
 {
-    async fn wait_until_changed(&self) -> SymResult<()> {
-        WaitUntilChangedFuture(Some(self)).await
+    fn wait_until_changed(&self) -> impl Future<Output = SymResult<()>> + Unpin {
+        poll_fn(move |cx| {
+            let mut has_changed = self.has_changed();
+            let mut closed = self.is_locally_closed();
+            if has_changed || closed {
+                // Should get compiled out into value assignment
+                Poll::Ready(if closed { Err(()) } else { Ok(()) })
+            } else {
+                self.register(cx.waker());
+                // Some executors like `StdExec` allows simultaneous registration and execution. Checking for updates again after
+                // registration ensures that any update will either be observed right now, or the waker will be called for it and
+                // therefore no update is missed.
+                has_changed = self.has_changed();
+                closed = self.is_locally_closed();
+                if has_changed || closed {
+                    // Should get compiled out into value assignment
+                    return Poll::Ready(if closed { Err(()) } else { Ok(()) });
+                }
+                Poll::Pending
+            }
+        })
     }
 }
 
@@ -653,7 +653,7 @@ where
     A: SensorObserve + SensorObserveAsync,
     F: FnMut(&<A::Lock as ReadGuardSpecifier>::Target) -> T,
 {
-    fn wait_until_changed(&self) -> impl Future<Output = SymResult<()>> {
+    fn wait_until_changed(&self) -> impl Future<Output = SymResult<()>> + Unpin {
         self.inner.wait_until_changed()
     }
 }
@@ -778,12 +778,19 @@ where
         &<B::Lock as ReadGuardSpecifier>::Target,
     ) -> T,
 {
-    async fn wait_until_changed(&self) -> SymResult<()> {
-        FusedWaitChanged {
-            a: pin!(self.a.wait_until_changed()),
-            b: pin!(self.b.wait_until_changed()),
-        }
-        .await
+    fn wait_until_changed(&self) -> impl Future<Output = SymResult<()>> + Unpin {
+        let mut a = self.a.wait_until_changed();
+        let mut b = self.b.wait_until_changed();
+        poll_fn(move |cx| {
+            if let Poll::Ready(res) = pin!(&mut a).poll(cx) {
+                return Poll::Ready(res);
+            }
+            if let Poll::Ready(res) = pin!(&mut b).poll(cx) {
+                return Poll::Ready(res);
+            }
+
+            return Poll::Pending;
+        })
     }
 }
 
@@ -827,27 +834,32 @@ impl<'a, T, R> Future for WaitUntilChangedFuture<'a, T, R>
 where
     R: DerefSensorData<T>,
     for<'b> SensorObserver<T, R>: RegisterFunction<&'b Waker>,
-    Self: Unpin,
 {
     type Output = Result<(), ()>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         if let Some(value) = self.0.take() {
-            let has_changed = value.has_changed();
-            let closed = value.is_locally_closed();
+            let mut has_changed = value.has_changed();
+            let mut closed = value.is_locally_closed();
             if has_changed || closed {
                 // Should get compiled out into value assignment
                 Poll::Ready(if closed { Err(()) } else { Ok(()) })
             } else {
                 value.register(cx.waker());
+                // Some executors like `StdExec` allows simultaneous registration and execution. Checking for updates again after
+                // registration ensures that any update will either be observed right now, or the waker will be called for it and
+                // therefore no update is missed.
+                has_changed = value.has_changed();
+                closed = value.is_locally_closed();
+                if has_changed || closed {
+                    // Should get compiled out into value assignment
+                    return Poll::Ready(if closed { Err(()) } else { Ok(()) });
+                }
                 self.0 = Some(value);
                 Poll::Pending
             }
         } else {
-            #[cfg(debug_assertions)]
             panic!("Poll called after future returned ready.");
-            #[cfg(not(debug_assertions))]
-            Poll::Pending
         }
     }
 }
