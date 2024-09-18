@@ -21,8 +21,10 @@ pub trait ExecRegister<L, F>: ExecManager<L>
 where
     L: DataWriteLock,
 {
-    /// Register an executable unit on the callback manager's execution set. In most cases this will usually be a function.
-    fn register(&self, f: F, lock: &L);
+    /// Register an executable unit on the executor's execution set. The executor must call `C` and register `F` if `Some(F)`
+    /// is returned, and returns true if `F` was registered. If the executor supports simultaneous execution
+    /// and registration then it must guarantee that the next execution cycle contains `F` if it was registered.
+    fn register<C: FnOnce() -> Option<F>>(&self, condition: C, lock: &L) -> bool;
 }
 
 impl<L> ExecManager<L> for ()

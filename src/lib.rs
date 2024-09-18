@@ -72,9 +72,8 @@ use core::{
     future::{poll_fn, Future},
     ops::Deref,
     pin::pin,
-    pin::Pin,
     sync::atomic::{AtomicUsize, Ordering},
-    task::{Context, Poll, Waker},
+    task::{Poll, Waker},
 };
 use executor::{ExecManager, ExecRegister};
 
@@ -555,24 +554,30 @@ where
 {
     fn wait_until_changed(&self) -> impl Future<Output = SymResult<()>> + Unpin {
         poll_fn(move |cx| {
-            let mut has_changed = self.has_changed();
-            let mut closed = self.is_locally_closed();
+            let has_changed = self.has_changed();
+            let closed = self.is_locally_closed();
             if has_changed || closed {
                 // Should get compiled out into value assignment
-                Poll::Ready(if closed { Err(()) } else { Ok(()) })
-            } else {
-                self.register(cx.waker());
-                // Some executors like `StdExec` allows simultaneous registration and execution. Checking for updates again after
-                // registration ensures that any update will either be observed right now, or the waker will be called for it and
-                // therefore no update is missed.
-                has_changed = self.has_changed();
-                closed = self.is_locally_closed();
-                if has_changed || closed {
-                    // Should get compiled out into value assignment
-                    return Poll::Ready(if closed { Err(()) } else { Ok(()) });
-                }
-                Poll::Pending
+                return Poll::Ready(if closed { Err(()) } else { Ok(()) });
             }
+
+            if !self.register_if(|| {
+                let has_changed = self.has_changed();
+                let closed = self.is_locally_closed();
+                if has_changed || closed {
+                    return None;
+                }
+                Some(cx.waker())
+            }) {
+                // Should get compiled out into value assignment
+                return Poll::Ready(if self.is_locally_closed() {
+                    Err(())
+                } else {
+                    Ok(())
+                });
+            }
+
+            Poll::Pending
         })
     }
 }
@@ -740,34 +745,6 @@ where
     }
 }
 
-struct FusedWaitChanged<A, B>
-where
-    A: Future<Output = SymResult<()>> + Unpin,
-    B: Future<Output = SymResult<()>> + Unpin,
-{
-    a: A,
-    b: B,
-}
-
-impl<A, B> Future for FusedWaitChanged<A, B>
-where
-    A: Future<Output = SymResult<()>> + Unpin,
-    B: Future<Output = SymResult<()>> + Unpin,
-{
-    type Output = SymResult<()>;
-
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        if let Poll::Ready(res) = pin!(&mut self.a).poll(cx) {
-            return Poll::Ready(res);
-        }
-        if let Poll::Ready(res) = pin!(&mut self.b).poll(cx) {
-            return Poll::Ready(res);
-        }
-
-        return Poll::Pending;
-    }
-}
-
 impl<A, B, T, F> SensorObserveAsync for FusedSensorObserver<A, B, T, F>
 where
     A: SensorObserve + SensorObserveAsync,
@@ -794,10 +771,17 @@ where
 }
 
 /*** Executables and Async ***/
+
 /// Allows registration of an executable.
 pub trait RegisterFunction<F> {
-    /// Register an executable.
-    fn register(&self, f: F);
+    /// Unconditionally register an executable.
+    #[inline(always)]
+    fn register(&self, f: F) {
+        let _ = self.register_if(|| Some(f));
+    }
+
+    /// Conditionally register a function and returns whether or not it was registered.
+    fn register_if<C: FnOnce() -> Option<F>>(&self, condition: C) -> bool;
 }
 
 impl<T, S, F> RegisterFunction<F> for SensorWriter<T, S>
@@ -806,9 +790,9 @@ where
     for<'a> &'a S: ShareStrategy<'a, Data = RawSensorData<S::Lock, S::Executor>>,
     S::Executor: ExecRegister<S::Lock, F>,
 {
-    fn register(&self, f: F) {
+    fn register_if<C: FnOnce() -> Option<F>>(&self, condition: C) -> bool {
         let inner_data = self.0.share_elided_ref();
-        inner_data.executor.register(f, &inner_data.lock);
+        inner_data.executor.register(condition, &inner_data.lock)
     }
 }
 
@@ -817,48 +801,9 @@ where
     R: DerefSensorData<T>,
     R::Executor: ExecRegister<R::Lock, F>,
 {
-    fn register(&self, f: F) {
+    #[inline]
+    fn register_if<C: FnOnce() -> Option<F>>(&self, condition: C) -> bool {
         let inner_data = self.inner.share_elided_ref();
-        inner_data.executor.register(f, &inner_data.lock);
-    }
-}
-
-/// A future that resolves when the sensor value gets updated.
-#[repr(transparent)]
-pub struct WaitUntilChangedFuture<'a, T, R>(Option<&'a SensorObserver<T, R>>)
-where
-    R: DerefSensorData<T>;
-
-impl<'a, T, R> Future for WaitUntilChangedFuture<'a, T, R>
-where
-    R: DerefSensorData<T>,
-    for<'b> SensorObserver<T, R>: RegisterFunction<&'b Waker>,
-{
-    type Output = Result<(), ()>;
-
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        if let Some(value) = self.0.take() {
-            let mut has_changed = value.has_changed();
-            let mut closed = value.is_locally_closed();
-            if has_changed || closed {
-                // Should get compiled out into value assignment
-                Poll::Ready(if closed { Err(()) } else { Ok(()) })
-            } else {
-                value.register(cx.waker());
-                // Some executors like `StdExec` may allow simultaneous registration and execution. Checking for updates again after
-                // registration ensures that any update will either be observed right now, or the waker will be called for it and
-                // therefore no update is missed.
-                has_changed = value.has_changed();
-                closed = value.is_locally_closed();
-                if has_changed || closed {
-                    // Should get compiled out into value assignment
-                    return Poll::Ready(if closed { Err(()) } else { Ok(()) });
-                }
-                self.0 = Some(value);
-                Poll::Pending
-            }
-        } else {
-            panic!("Poll called after future returned ready.");
-        }
+        inner_data.executor.register(condition, &inner_data.lock)
     }
 }

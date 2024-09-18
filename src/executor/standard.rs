@@ -86,12 +86,19 @@ where
     F: 'static + Send + FnMut(&T) -> bool,
 {
     #[inline]
-    fn register(&self, f: Box<F>, _: &L) {
+    fn register<C: FnOnce() -> Option<Box<F>>>(&self, condition: C, _: &L) -> bool {
         let guard = self.registration_mtx.lock();
-        unsafe {
-            (*self.callbacks_in.get()).push(f);
-        }
+        let res = match condition() {
+            Some(f) => {
+                unsafe {
+                    (*self.callbacks_in.get()).push(f);
+                }
+                true
+            }
+            None => false,
+        };
         drop(guard);
+        res
     }
 }
 
@@ -100,25 +107,40 @@ where
     L: DataWriteLock<Target = T>,
 {
     #[inline]
-    fn register(&self, f: BoxedFn<T>, _: &L) {
+    fn register<C: FnOnce() -> Option<BoxedFn<T>>>(&self, condition: C, _: &L) -> bool {
         let guard = self.registration_mtx.lock();
-        unsafe {
-            (*self.callbacks_in.get()).push(f);
-        }
+        let res = match condition() {
+            Some(f) => {
+                unsafe {
+                    (*self.callbacks_in.get()).push(f);
+                }
+                true
+            }
+            None => false,
+        };
         drop(guard);
+        res
     }
 }
 
-impl<T, L> ExecRegister<L, &Waker> for StdExec<T>
+impl<'b, T, L> ExecRegister<L, &'b Waker> for StdExec<T>
 where
+    // Self: 'b,
     L: DataWriteLock<Target = T>,
 {
     #[inline]
-    fn register(&self, w: &Waker, _: &L) {
+    fn register<C: FnOnce() -> Option<&'b Waker>>(&self, condition: C, _: &L) -> bool {
         let guard = self.registration_mtx.lock();
-        unsafe {
-            (*self.wakers_in.get()).push(w.clone());
-        }
+        let res = match condition() {
+            Some(w) => {
+                unsafe {
+                    (*self.wakers_in.get()).push(w.clone());
+                }
+                true
+            }
+            None => false,
+        };
         drop(guard);
+        res
     }
 }
