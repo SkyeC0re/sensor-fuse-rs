@@ -10,10 +10,12 @@ pub trait ExecManager<L>
 where
     L: DataWriteLock,
 {
-    /// Execute all executables registered on the executor manager by giving it access to an atomically downgraded write guard. This will
-    /// either just be the write guard or a read guard that was atomically downgraded from a write guard. As such the execution
-    /// manager is given the guarantee that as long as it holds the guard, no other `execute` call will be initiated.
-    fn execute(&self, value: L::DowngradedGuard<'_>);
+    /// Execute all executables registered on the executor by giving it access to a write guard through a commit function.
+    /// The executor must call the commit function once it is ready to commit to the next execution cycle, such that
+    /// it becomes impossible to register additional executables for the newly initiated execution cycle.
+    fn execute<'a, F: FnOnce() -> L::WriteGuard<'a>>(&'a self, commit: F)
+    where
+        L: 'a;
 }
 
 /// Signifies that an execution manager may register an executable using immutable access.
@@ -21,9 +23,9 @@ pub trait ExecRegister<L, F>: ExecManager<L>
 where
     L: DataWriteLock,
 {
-    /// Register an executable unit on the executor's execution set. The executor must call `C` and register `F` if `Some(F)`
-    /// is returned, and returns true if `F` was registered. If the executor supports simultaneous execution
-    /// and registration then it must guarantee that the next execution cycle contains `F` if it was registered.
+    /// Register an executable unit on the executor's execution set. The executor calls `C` and registers `F` if `Some(F)`
+    /// is returned, and returns true if `F` was registered. The executor must guarantee that evaluation and registration step is atomic
+    /// with respect to `commit` functions.
     fn register<C: FnOnce() -> Option<F>>(&self, condition: C, lock: &L) -> bool;
 }
 
@@ -32,5 +34,10 @@ where
     L: DataWriteLock,
 {
     #[inline(always)]
-    fn execute(&self, _: L::DowngradedGuard<'_>) {}
+    fn execute<'a, F: FnOnce() -> L::WriteGuard<'a>>(&'a self, commit: F)
+    where
+        L: 'a,
+    {
+        let _ = commit();
+    }
 }

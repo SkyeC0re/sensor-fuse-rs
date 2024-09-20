@@ -312,12 +312,12 @@ where
         let revised_data = self.0.share_elided_ref();
         let mut guard = revised_data.lock.write();
 
-        f(&mut guard);
-        let _ = revised_data.version.fetch_add(STEP_SIZE, Ordering::Release);
-
-        let guard = S::Lock::atomic_downgrade(guard);
         // Atomic downgrade just occurred. No other modification can happen.
-        revised_data.executor.execute(guard);
+        revised_data.executor.execute(|| {
+            f(&mut guard);
+            let _ = revised_data.version.fetch_add(STEP_SIZE, Ordering::Release);
+            guard
+        });
     }
 
     /// Mark the current sensor value as unseen to all observers, notify them and execute all registered callbacks.
@@ -554,27 +554,23 @@ where
 {
     fn wait_until_changed(&self) -> impl Future<Output = SymResult<()>> + Unpin {
         poll_fn(move |cx| {
-            let has_changed = self.has_changed();
-            let closed = self.is_locally_closed();
+            let mut has_changed = self.has_changed();
+            let mut closed = self.is_locally_closed();
             if has_changed || closed {
                 // Should get compiled out into value assignment
                 return Poll::Ready(if closed { Err(()) } else { Ok(()) });
             }
 
             if !self.register_if(|| {
-                let has_changed = self.has_changed();
-                let closed = self.is_locally_closed();
+                has_changed = self.has_changed();
+                closed = self.is_locally_closed();
                 if has_changed || closed {
                     return None;
                 }
                 Some(cx.waker())
             }) {
                 // Should get compiled out into value assignment
-                return Poll::Ready(if self.is_locally_closed() {
-                    Err(())
-                } else {
-                    Ok(())
-                });
+                return Poll::Ready(if closed { Err(()) } else { Ok(()) });
             }
 
             Poll::Pending
