@@ -81,7 +81,7 @@ use crate::lock::{DataReadLock, DataWriteLock, OwnedData, OwnedFalseLock, ReadGu
 
 pub type SymResult<T> = Result<T, T>;
 
-/*** Revised Data ***/
+/*** Sensor State ***/
 
 // All credit to [Tokio's Watch Channel](https://docs.rs/tokio/latest/tokio/sync/watch/index.html). If it's not broken don't fix it.
 const CLOSED_BIT: usize = 1;
@@ -116,17 +116,17 @@ where
         }
     }
 }
-/// Trait for sharing a (most likely heap pointer) wrapped `struct@RevisedData` with a locking strategy.
+/// Trait for sharing a (most likely heap pointer) wrapped `struct@RawSensorData` with a locking strategy.
 pub trait ShareStrategy<'a> {
     /// The underlying data that is being shared.
     type Data;
-    /// The wrapping container for the shared data.
+    /// The wrapping container for the sensor state.
     type Shared: Deref<Target = Self::Data>;
 
-    /// Share the revised data for the largest possible lifetime.
+    /// Share the sensor state for the largest possible lifetime.
     fn share_data(self) -> Self::Shared;
 
-    /// Create an immutable borrow to the underlying data, elided by the lifetime of
+    /// Create an immutable borrow to the sensor state, elided by the lifetime of
     /// wrapping container.
     fn share_elided_ref(self) -> &'a Self::Data;
 }
@@ -309,13 +309,13 @@ where
     /// Modify the sensor value in place, notify observers and execute all registered callbacks.
     #[inline]
     pub fn modify_with(&self, f: impl FnOnce(&mut T)) {
-        let revised_data = self.0.share_elided_ref();
-        let mut guard = revised_data.lock.write();
+        let sensor_state = self.0.share_elided_ref();
+        let mut guard = sensor_state.lock.write();
 
         // Atomic downgrade just occurred. No other modification can happen.
-        revised_data.executor.execute(|| {
+        sensor_state.executor.execute(|| {
             f(&mut guard);
-            let _ = revised_data.version.fetch_add(STEP_SIZE, Ordering::Release);
+            let _ = sensor_state.version.fetch_add(STEP_SIZE, Ordering::Release);
             guard
         });
     }
@@ -451,21 +451,6 @@ where
     inner: R,
     version: UnsafeCell<usize>,
     _type: PhantomData<T>,
-}
-
-impl<T, R> From<R> for SensorObserver<T, R>
-where
-    R: DerefSensorData<T>,
-{
-    #[inline(always)]
-    fn from(raw_sensor_data: R) -> Self {
-        let _ = raw_sensor_data.observers.fetch_add(1, Ordering::Relaxed);
-        Self {
-            version: UnsafeCell::new(raw_sensor_data.version.load(Ordering::Acquire)),
-            inner: raw_sensor_data,
-            _type: PhantomData,
-        }
-    }
 }
 
 impl<T, R> Drop for SensorObserver<T, R>
@@ -786,9 +771,10 @@ where
     for<'a> &'a S: ShareStrategy<'a, Data = RawSensorData<S::Lock, S::Executor>>,
     S::Executor: ExecRegister<S::Lock, F>,
 {
+    #[inline]
     fn register_if<C: FnOnce() -> Option<F>>(&self, condition: C) -> bool {
         let inner_data = self.0.share_elided_ref();
-        inner_data.executor.register(condition, &inner_data.lock)
+        inner_data.executor.register(condition)
     }
 }
 
@@ -800,6 +786,6 @@ where
     #[inline]
     fn register_if<C: FnOnce() -> Option<F>>(&self, condition: C) -> bool {
         let inner_data = self.inner.share_elided_ref();
-        inner_data.executor.register(condition, &inner_data.lock)
+        inner_data.executor.register(condition)
     }
 }

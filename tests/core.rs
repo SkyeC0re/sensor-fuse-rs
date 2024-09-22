@@ -242,62 +242,61 @@ where
 {
     let sync_send = watch::Sender::new(());
     let ping_send = Arc::new(SensorWriter::<usize, S>::from(1));
-    for _ in 0..100 {
-        let ping_recv = ping_send.as_ref().spawn_observer();
-        let mut sync_recv = sync_send.subscribe();
-        sync_recv.mark_unchanged();
-        let handle = thread::spawn({
-            let ping_send = ping_send.clone();
-            move || {
-                for _ in 0..100 {
-                    let _ = block_on(timeout(
-                        Duration::from_secs(REASONABLE_TIMEOUT_S),
-                        sync_recv.changed(),
-                    ))
-                    .unwrap();
-                    ping_send.update(5);
+    let ping_recv = ping_send.as_ref().spawn_observer();
+    let mut sync_recv = sync_send.subscribe();
+    sync_recv.mark_unchanged();
 
-                    let _ = block_on(timeout(
-                        Duration::from_secs(REASONABLE_TIMEOUT_S),
-                        sync_recv.changed(),
-                    ))
-                    .unwrap();
-                    ping_send.modify_with(|x| *x += 1);
-                }
+    let handle = thread::spawn({
+        let ping_send = ping_send.clone();
+        move || {
+            for _ in 0..10000 {
+                let _ = block_on(timeout(
+                    Duration::from_secs(REASONABLE_TIMEOUT_S),
+                    sync_recv.changed(),
+                ))
+                .unwrap();
+                ping_send.update(5);
+
+                let _ = block_on(timeout(
+                    Duration::from_secs(REASONABLE_TIMEOUT_S),
+                    sync_recv.changed(),
+                ))
+                .unwrap();
+                ping_send.modify_with(|x| *x += 1);
             }
-        });
-
-        for _ in 0..100 {
-            let unused = black_box(ping_recv.wait_until_changed());
-
-            sync_send.send_replace(());
-            block_on(timeout(
-                Duration::from_secs(REASONABLE_TIMEOUT_S),
-                ping_recv.wait_until_changed(),
-            ))
-            .unwrap()
-            .unwrap();
-
-            assert!(ping_recv.has_changed());
-            assert_eq!(*ping_recv.pull(), 5);
-            drop(unused);
-
-            sync_send.send_replace(());
-            if block_on(timeout(
-                Duration::from_secs(REASONABLE_TIMEOUT_S),
-                ping_recv.wait_for(|x| *x == 6),
-            ))
-            .unwrap()
-            .is_err()
-            {
-                panic!();
-            }
-
-            assert!(!ping_recv.has_changed());
-            assert_eq!(*ping_recv.borrow(), 6);
         }
-        handle.join().unwrap();
+    });
+
+    for _ in 0..10000 {
+        let unused = black_box(ping_recv.wait_until_changed());
+
+        sync_send.send_replace(());
+        block_on(timeout(
+            Duration::from_secs(REASONABLE_TIMEOUT_S),
+            ping_recv.wait_until_changed(),
+        ))
+        .unwrap()
+        .unwrap();
+
+        assert!(ping_recv.has_changed());
+        assert_eq!(*ping_recv.pull(), 5);
+        drop(unused);
+
+        sync_send.send_replace(());
+        if block_on(timeout(
+            Duration::from_secs(REASONABLE_TIMEOUT_S),
+            ping_recv.wait_for(|x| *x == 6),
+        ))
+        .unwrap()
+        .is_err()
+        {
+            panic!();
+        }
+
+        assert!(!ping_recv.has_changed());
+        assert_eq!(*ping_recv.borrow(), 6);
     }
+    handle.join().unwrap();
 }
 
 fn test_callbacks<S>()

@@ -94,12 +94,12 @@ impl<T, L> ExecManager<L> for StdExec<T>
 where
     L: DataWriteLock<Target = T>,
 {
-    fn execute<'a, F: FnOnce() -> L::WriteGuard<'a>>(&'a self, commit: F)
+    fn execute<'a, C: FnOnce() -> L::WriteGuard<'a>>(&'a self, commit: C)
     where
         L: 'a,
     {
         unsafe {
-            self.execute_unsafe::<L, F>(commit);
+            self.execute_unsafe::<L, C>(commit);
         }
     }
 }
@@ -110,7 +110,7 @@ where
     F: 'static + Send + FnMut(&T) -> bool,
 {
     #[inline]
-    fn register<C: FnOnce() -> Option<Box<F>>>(&self, condition: C, _: &L) -> bool {
+    fn register<C: FnOnce() -> Option<Box<F>>>(&self, condition: C) -> bool {
         let guard = self.registration_mtx.lock();
         let res = match condition() {
             Some(f) => {
@@ -131,7 +131,7 @@ where
     L: DataWriteLock<Target = T>,
 {
     #[inline]
-    fn register<C: FnOnce() -> Option<BoxedFn<T>>>(&self, condition: C, _: &L) -> bool {
+    fn register<C: FnOnce() -> Option<BoxedFn<T>>>(&self, condition: C) -> bool {
         let guard = self.registration_mtx.lock();
         let res = match condition() {
             Some(f) => {
@@ -153,7 +153,7 @@ where
     L: DataWriteLock<Target = T>,
 {
     #[inline]
-    fn register<C: FnOnce() -> Option<&'b Waker>>(&self, condition: C, _: &L) -> bool {
+    fn register<C: FnOnce() -> Option<&'b Waker>>(&self, condition: C) -> bool {
         let guard = self.registration_mtx.lock();
         let res = match condition() {
             Some(w) => {

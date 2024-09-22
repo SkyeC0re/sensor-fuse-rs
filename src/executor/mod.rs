@@ -13,7 +13,7 @@ where
     /// Execute all executables registered on the executor by giving it access to a write guard through a commit function.
     /// The executor must call the commit function once it is ready to commit to the next execution cycle, such that
     /// it becomes impossible to register additional executables for the newly initiated execution cycle.
-    fn execute<'a, F: FnOnce() -> L::WriteGuard<'a>>(&'a self, commit: F)
+    fn execute<'a, C: FnOnce() -> L::WriteGuard<'a>>(&'a self, commit: C)
     where
         L: 'a;
 }
@@ -24,9 +24,9 @@ where
     L: DataWriteLock,
 {
     /// Register an executable unit on the executor's execution set. The executor calls `C` and registers `F` if `Some(F)`
-    /// is returned, and returns true if `F` was registered. The executor must guarantee that evaluation and registration step is atomic
+    /// is returned, and returns true if `F` was registered. The executor must guarantee that the evaluation and registration step is atomic
     /// with respect to `commit` functions.
-    fn register<C: FnOnce() -> Option<F>>(&self, condition: C, lock: &L) -> bool;
+    fn register<C: FnOnce() -> Option<F>>(&self, condition: C) -> bool;
 }
 
 impl<L> ExecManager<L> for ()
