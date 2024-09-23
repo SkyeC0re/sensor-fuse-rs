@@ -26,8 +26,8 @@ macro_rules! test_core {
     ($prefix:ident, $sensor_writer:ty) => {
         paste! {
             #[test]
-            fn [<$prefix _basic_sensor_observation>]() {
-                test_basic_sensor_observation::<$sensor_writer>();
+            fn [<$prefix _sensor_observation>]() {
+                test_sensor_observation::<$sensor_writer>();
             }
 
             #[test]
@@ -36,13 +36,13 @@ macro_rules! test_core {
             }
 
             #[test]
-            fn [<$prefix _mapped_sensor>]() {
-                test_mapped_sensor::<$sensor_writer>();
+            fn [<$prefix _mapped_sensor_observation>]() {
+                test_mapped_sensor_observation::<$sensor_writer>();
             }
 
             #[test]
-            fn [<$prefix _fused_sensor_sensor>]() {
-                test_fused_sensor::<$sensor_writer>();
+            fn [<$prefix _fused_sensor_sensor_observation>]() {
+                test_fused_sensor_observation::<$sensor_writer>();
             }
 
         }
@@ -58,6 +58,16 @@ macro_rules! test_core_exec {
             }
 
             #[test]
+            fn [<$prefix _test_mapped_async_waiting>]() {
+                test_mapped_async_waiting::<$sensor_writer>();
+            }
+
+            #[test]
+            fn [<$prefix _test_fused_async_waiting>]() {
+                test_fused_async_waiting::<$sensor_writer>();
+            }
+
+            #[test]
             fn [<$prefix _test_callbacks>]() {
                 test_callbacks::<$sensor_writer>();
             }
@@ -65,7 +75,7 @@ macro_rules! test_core_exec {
     };
 }
 
-fn test_basic_sensor_observation<S>()
+fn test_sensor_observation<S>()
 where
     S: SharedSensorData<Target = usize>,
     for<'a> &'a S: ShareStrategy<'a, Lock = S::Lock, Executor = S::Executor>,
@@ -148,7 +158,7 @@ where
     });
 }
 
-fn test_mapped_sensor<S>()
+fn test_mapped_sensor_observation<S>()
 where
     S: SharedSensorData<Target = usize>,
     for<'a> &'a S: ShareStrategy<'a, Lock = S::Lock, Executor = S::Executor>,
@@ -174,7 +184,7 @@ where
     assert_eq!(new, 3);
 }
 
-fn test_fused_sensor<S>()
+fn test_fused_sensor_observation<S>()
 where
     S: SharedSensorData<Target = usize>,
     for<'a> &'a S: ShareStrategy<'a, Lock = S::Lock, Executor = S::Executor>,
@@ -275,7 +285,126 @@ where
             .unwrap();
 
             if *pong_recv.pull() != i {
-                pong_send.update(0);
+                ping_send.update(0);
+                panic!();
+            }
+        }
+        handle.join().unwrap();
+    });
+}
+
+fn test_mapped_async_waiting<S>()
+where
+    S: SharedSensorData<Target = usize>,
+    for<'a> &'a S: ShareStrategy<'a, Lock = S::Lock, Executor = S::Executor>,
+    for<'a> <&'a S as ShareStrategy<'a>>::Shared: Send,
+    for<'a> S::Executor: ExecRegister<S::Lock, &'a Waker>,
+    SensorWriter<usize, S>: 'static + Send + Sync + From<usize>,
+{
+    let ping_send = Arc::new(SensorWriter::<usize, S>::from(1));
+    let pong_send = Arc::new(SensorWriter::<usize, S>::from(1));
+    let ping_recv = ping_send.spawn_observer().map(|x| 2 * x);
+    let pong_recv = pong_send.spawn_observer().map(|x| 2 * x);
+    thread::scope(|s| {
+        let handle = s.spawn({
+            let pong_send = pong_send.clone();
+            move || {
+                for i in 2..10000 {
+                    let _ = block_on(timeout(
+                        Duration::from_secs(REASONABLE_TIMEOUT_S),
+                        ping_recv.wait_until_changed(),
+                    ))
+                    .unwrap();
+
+                    if *ping_recv.pull() != 2 * i {
+                        pong_send.update(0);
+                        panic!();
+                    }
+
+                    pong_send.update(i);
+                }
+            }
+        });
+
+        for i in 2..10000 {
+            ping_send.update(i);
+
+            let _ = block_on(timeout(
+                Duration::from_secs(REASONABLE_TIMEOUT_S),
+                pong_recv.wait_until_changed(),
+            ))
+            .unwrap();
+
+            if *pong_recv.pull() != 2 * i {
+                ping_send.update(0);
+                panic!();
+            }
+        }
+        handle.join().unwrap();
+    });
+}
+
+fn test_fused_async_waiting<S>()
+where
+    S: SharedSensorData<Target = usize>,
+    for<'a> &'a S: ShareStrategy<'a, Lock = S::Lock, Executor = S::Executor>,
+    for<'a> <&'a S as ShareStrategy<'a>>::Shared: Send,
+    for<'a> S::Executor: ExecRegister<S::Lock, &'a Waker>,
+    SensorWriter<usize, S>: 'static + Send + Sync + From<usize>,
+{
+    let ping1_send = Arc::new(SensorWriter::<usize, S>::from(1));
+    let ping2_send = Arc::new(SensorWriter::<usize, S>::from(1));
+    let pong1_send = Arc::new(SensorWriter::<usize, S>::from(1));
+    let pong2_send = Arc::new(SensorWriter::<usize, S>::from(1));
+    let ping_recv = ping1_send
+        .spawn_observer()
+        .fuse(ping2_send.spawn_observer(), |x, y| *x + *y - 1);
+    let pong_recv = pong1_send
+        .spawn_observer()
+        .fuse(pong2_send.spawn_observer(), |x, y| *x + *y - 1);
+    thread::scope(|s| {
+        let handle = s.spawn({
+            let pong1_send = pong1_send.clone();
+            let pong2_send = pong2_send.clone();
+            move || {
+                for i in 2..10000 {
+                    let _ = block_on(timeout(
+                        Duration::from_secs(REASONABLE_TIMEOUT_S),
+                        ping_recv.wait_until_changed(),
+                    ))
+                    .unwrap();
+
+                    if *ping_recv.pull() != i {
+                        pong1_send.update(0);
+                        pong2_send.update(0);
+                        panic!();
+                    }
+
+                    if i % 2 == 0 {
+                        pong1_send.modify_with(|x| *x += 1);
+                    } else {
+                        pong2_send.modify_with(|x| *x += 1);
+                    }
+                }
+            }
+        });
+
+        for i in 2..10000 {
+            if i % 2 == 0 {
+                ping1_send.modify_with(|x| *x += 1);
+            } else {
+                ping2_send.modify_with(|x| *x += 1);
+            }
+
+            let _ = block_on(timeout(
+                Duration::from_secs(REASONABLE_TIMEOUT_S),
+                pong_recv.wait_until_changed(),
+            ))
+            .unwrap();
+
+            if *pong_recv.pull() != i {
+                ping1_send.update(0);
+                ping2_send.update(0);
                 panic!();
             }
         }
