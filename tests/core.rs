@@ -5,10 +5,9 @@ use sensor_fuse::{
     executor::{BoxedFn, ExecRegister},
     lock,
     prelude::*,
-    DerefSensorData, RawSensorData, SensorWriter, ShareStrategy, SharedSensorData,
+    DerefSensorData, SensorWriter, ShareStrategy, SharedSensorData,
 };
-use std::{hint::black_box, sync::Arc, task::Waker, thread, time::Duration};
-use tokio::sync::watch;
+use std::{sync::Arc, task::Waker, thread, time::Duration};
 
 static REASONABLE_TIMEOUT_S: u64 = 5;
 
@@ -68,8 +67,8 @@ macro_rules! test_core_exec {
 
 fn test_basic_sensor_observation<S>()
 where
-    S: SharedSensorData<usize>,
-    for<'a> &'a S: ShareStrategy<'a, Data = RawSensorData<S::Lock, S::Executor>>,
+    S: SharedSensorData<Target = usize>,
+    for<'a> &'a S: ShareStrategy<'a, Lock = S::Lock, Executor = S::Executor>,
     SensorWriter<usize, S>: From<usize>,
     for<'a> <&'a S as ShareStrategy<'a>>::Shared: Clone,
 {
@@ -112,8 +111,8 @@ where
 
 fn test_basic_sensor_observation_parallel_unsynced<S>(num_threads: usize, num_updates: usize)
 where
-    S: SharedSensorData<usize>,
-    for<'a> &'a S: ShareStrategy<'a, Data = RawSensorData<S::Lock, S::Executor>>,
+    S: SharedSensorData<Target = usize>,
+    for<'a> &'a S: ShareStrategy<'a, Lock = S::Lock, Executor = S::Executor>,
     SensorWriter<usize, S>: From<usize> + Send + Sync + 'static,
     for<'a> <&'a S as ShareStrategy<'a>>::Shared: Clone,
 {
@@ -151,8 +150,8 @@ where
 
 fn test_mapped_sensor<S>()
 where
-    S: SharedSensorData<usize>,
-    for<'a> &'a S: ShareStrategy<'a, Data = RawSensorData<S::Lock, S::Executor>>,
+    S: SharedSensorData<Target = usize>,
+    for<'a> &'a S: ShareStrategy<'a, Lock = S::Lock, Executor = S::Executor>,
     SensorWriter<usize, S>: From<usize>,
 {
     let sensor_writer = SensorWriter::<usize, S>::from(0);
@@ -177,8 +176,8 @@ where
 
 fn test_fused_sensor<S>()
 where
-    S: SharedSensorData<usize>,
-    for<'a> &'a S: ShareStrategy<'a, Data = RawSensorData<S::Lock, S::Executor>>,
+    S: SharedSensorData<Target = usize>,
+    for<'a> &'a S: ShareStrategy<'a, Lock = S::Lock, Executor = S::Executor>,
     SensorWriter<usize, S>: From<usize>,
 {
     let sensor_writer_1 = SensorWriter::<usize, S>::from(1);
@@ -221,9 +220,9 @@ where
 
 fn test_closed<S, R>()
 where
-    R: DerefSensorData<usize, Lock = S::Lock, Executor = S::Executor>,
-    S: SharedSensorData<usize>,
-    for<'a> &'a S: ShareStrategy<'a, Data = RawSensorData<S::Lock, S::Executor>, Shared = R>,
+    R: DerefSensorData<Target = usize, Lock = S::Lock, Executor = S::Executor>,
+    S: SharedSensorData<Target = usize>,
+    for<'a> &'a S: ShareStrategy<'a, Lock = S::Lock, Executor = S::Executor, Shared = R>,
     SensorWriter<usize, S>: From<usize>,
 {
     let sensor_writer = SensorWriter::<usize, S>::from(1);
@@ -235,74 +234,59 @@ where
 
 fn test_async_waiting<S>()
 where
-    S: SharedSensorData<usize>,
-    for<'a> &'a S: ShareStrategy<'a, Data = RawSensorData<S::Lock, S::Executor>>,
+    S: SharedSensorData<Target = usize>,
+    for<'a> &'a S: ShareStrategy<'a, Lock = S::Lock, Executor = S::Executor>,
+    for<'a> <&'a S as ShareStrategy<'a>>::Shared: Send,
     for<'a> S::Executor: ExecRegister<S::Lock, &'a Waker>,
     SensorWriter<usize, S>: 'static + Send + Sync + From<usize>,
 {
-    let sync_send = watch::Sender::new(());
     let ping_send = Arc::new(SensorWriter::<usize, S>::from(1));
-    let ping_recv = ping_send.as_ref().spawn_observer();
-    let mut sync_recv = sync_send.subscribe();
-    sync_recv.mark_unchanged();
+    let pong_send = Arc::new(SensorWriter::<usize, S>::from(1));
+    let ping_recv = ping_send.spawn_observer();
+    let pong_recv = pong_send.spawn_observer();
+    thread::scope(|s| {
+        let handle = s.spawn({
+            let pong_send = pong_send.clone();
+            move || {
+                for i in 2..10000 {
+                    let _ = block_on(timeout(
+                        Duration::from_secs(REASONABLE_TIMEOUT_S),
+                        ping_recv.wait_until_changed(),
+                    ))
+                    .unwrap();
 
-    let handle = thread::spawn({
-        let ping_send = ping_send.clone();
-        move || {
-            for _ in 0..10000 {
-                let _ = block_on(timeout(
-                    Duration::from_secs(REASONABLE_TIMEOUT_S),
-                    sync_recv.changed(),
-                ))
-                .unwrap();
-                ping_send.update(5);
+                    if *ping_recv.pull() != i {
+                        pong_send.update(0);
+                        panic!();
+                    }
 
-                let _ = block_on(timeout(
-                    Duration::from_secs(REASONABLE_TIMEOUT_S),
-                    sync_recv.changed(),
-                ))
-                .unwrap();
-                ping_send.modify_with(|x| *x += 1);
+                    pong_send.update(i);
+                }
+            }
+        });
+
+        for i in 2..10000 {
+            ping_send.update(i);
+
+            let _ = block_on(timeout(
+                Duration::from_secs(REASONABLE_TIMEOUT_S),
+                pong_recv.wait_until_changed(),
+            ))
+            .unwrap();
+
+            if *pong_recv.pull() != i {
+                pong_send.update(0);
+                panic!();
             }
         }
+        handle.join().unwrap();
     });
-
-    for _ in 0..10000 {
-        let unused = black_box(ping_recv.wait_until_changed());
-
-        sync_send.send_replace(());
-        block_on(timeout(
-            Duration::from_secs(REASONABLE_TIMEOUT_S),
-            ping_recv.wait_until_changed(),
-        ))
-        .unwrap()
-        .unwrap();
-
-        assert!(ping_recv.has_changed());
-        assert_eq!(*ping_recv.pull(), 5);
-        drop(unused);
-
-        sync_send.send_replace(());
-        if block_on(timeout(
-            Duration::from_secs(REASONABLE_TIMEOUT_S),
-            ping_recv.wait_for(|x| *x == 6),
-        ))
-        .unwrap()
-        .is_err()
-        {
-            panic!();
-        }
-
-        assert!(!ping_recv.has_changed());
-        assert_eq!(*ping_recv.borrow(), 6);
-    }
-    handle.join().unwrap();
 }
 
 fn test_callbacks<S>()
 where
-    S: SharedSensorData<usize>,
-    for<'a> &'a S: ShareStrategy<'a, Data = RawSensorData<S::Lock, S::Executor>>,
+    S: SharedSensorData<Target = usize>,
+    for<'a> &'a S: ShareStrategy<'a, Lock = S::Lock, Executor = S::Executor>,
     S::Executor: ExecRegister<S::Lock, BoxedFn<usize>>,
     SensorWriter<usize, S>: 'static + Send + Sync + From<usize>,
 {

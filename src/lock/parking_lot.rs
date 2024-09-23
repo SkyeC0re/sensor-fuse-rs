@@ -82,8 +82,8 @@ impl<T> DataReadLock for parking_lot::Mutex<T> {
 }
 
 pub type RwSensorData<T> = RawSensorData<parking_lot::RwLock<T>, ()>;
-pub type RwSensor<'a, T> = SensorObserver<T, &'a RawSensorData<parking_lot::RwLock<T>, ()>>;
-pub type RwSensorWriter<T> = SensorWriter<T, RawSensorData<parking_lot::RwLock<T>, ()>>;
+pub type RwSensor<'a, T> = SensorObserver<T, &'a RwSensorData<T>>;
+pub type RwSensorWriter<T> = SensorWriter<T, RwSensorData<T>>;
 
 impl<T> RwSensorWriter<T> {
     #[inline(always)]
@@ -99,8 +99,8 @@ impl<T> From<T> for RwSensorWriter<T> {
 }
 
 pub type MutexSensorData<T> = RawSensorData<parking_lot::Mutex<T>, ()>;
-pub type MutexSensor<'a, T> = SensorObserver<T, &'a RawSensorData<parking_lot::Mutex<T>, ()>>;
-pub type MutexSensorWriter<T> = SensorWriter<T, RawSensorData<parking_lot::Mutex<T>, ()>>;
+pub type MutexSensor<'a, T> = SensorObserver<T, &'a MutexSensorData<T>>;
+pub type MutexSensorWriter<T> = SensorWriter<T, MutexSensorData<T>>;
 
 impl<T> MutexSensorWriter<T> {
     #[inline(always)]
@@ -126,10 +126,8 @@ mod alloc_req {
     use crate::{executor::standard::StdExec, RawSensorData, SensorObserver, SensorWriter};
 
     pub type RwSensorDataExec<T> = RawSensorData<parking_lot::RwLock<T>, StdExec<T>>;
-    pub type RwSensorExec<'a, T> =
-        SensorObserver<T, &'a RawSensorData<parking_lot::RwLock<T>, StdExec<T>>>;
-    pub type RwSensorWriterExec<T> =
-        SensorWriter<T, RawSensorData<parking_lot::RwLock<T>, StdExec<T>>>;
+    pub type RwSensorExec<'a, T> = SensorObserver<T, &'a RwSensorDataExec<T>>;
+    pub type RwSensorWriterExec<T> = SensorWriter<T, RwSensorDataExec<T>>;
     impl<T> RwSensorWriterExec<T> {
         #[inline(always)]
         pub const fn new(init: T) -> Self {
@@ -145,10 +143,8 @@ mod alloc_req {
     }
 
     pub type MutexSensorDataExec<T> = RawSensorData<parking_lot::Mutex<T>, StdExec<T>>;
-    pub type MutexSensorExec<'a, T> =
-        SensorObserver<T, &'a RawSensorData<parking_lot::Mutex<T>, StdExec<T>>>;
-    pub type MutexSensorWriterExec<T> =
-        SensorWriter<T, RawSensorData<parking_lot::Mutex<T>, StdExec<T>>>;
+    pub type MutexSensorExec<'a, T> = SensorObserver<T, &'a MutexSensorDataExec<T>>;
+    pub type MutexSensorWriterExec<T> = SensorWriter<T, MutexSensorDataExec<T>>;
     impl<T> MutexSensorWriterExec<T> {
         #[inline(always)]
         pub const fn new(init: T) -> Self {
@@ -164,8 +160,8 @@ mod alloc_req {
     }
 
     pub type ArcRwSensorData<T> = Arc<RawSensorData<parking_lot::RwLock<T>, ()>>;
-    pub type ArcRwSensor<T> = SensorObserver<T, Arc<RawSensorData<parking_lot::RwLock<T>, ()>>>;
-    pub type ArcRwSensorWriter<T> = SensorWriter<T, Arc<RawSensorData<parking_lot::RwLock<T>, ()>>>;
+    pub type ArcRwSensor<T> = SensorObserver<T, ArcRwSensorData<T>>;
+    pub type ArcRwSensorWriter<T> = SensorWriter<T, ArcRwSensorData<T>>;
     impl<T> ArcRwSensorWriter<T> {
         #[inline(always)]
         pub fn new(init: T) -> Self {
@@ -181,9 +177,8 @@ mod alloc_req {
     }
 
     pub type ArcMutexSensorData<T> = Arc<RawSensorData<parking_lot::Mutex<T>, ()>>;
-    pub type ArcMutexSensor<T> = SensorObserver<T, Arc<RawSensorData<parking_lot::Mutex<T>, ()>>>;
-    pub type ArcMutexSensorWriter<T> =
-        SensorWriter<T, Arc<RawSensorData<parking_lot::Mutex<T>, ()>>>;
+    pub type ArcMutexSensor<T> = SensorObserver<T, ArcMutexSensorData<T>>;
+    pub type ArcMutexSensorWriter<T> = SensorWriter<T, ArcMutexSensorData<T>>;
     impl<T> ArcMutexSensorWriter<T> {
         #[inline(always)]
         pub fn new(init: T) -> Self {
@@ -199,10 +194,8 @@ mod alloc_req {
     }
 
     pub type ArcRwSensorDataExec<T> = Arc<RawSensorData<parking_lot::RwLock<T>, StdExec<T>>>;
-    pub type ArcRwSensorExec<T> =
-        SensorObserver<T, Arc<RawSensorData<parking_lot::RwLock<T>, StdExec<T>>>>;
-    pub type ArcRwSensorWriterExec<T> =
-        SensorWriter<T, Arc<RawSensorData<parking_lot::RwLock<T>, StdExec<T>>>>;
+    pub type ArcRwSensorExec<T> = SensorObserver<T, ArcRwSensorDataExec<T>>;
+    pub type ArcRwSensorWriterExec<T> = SensorWriter<T, ArcRwSensorDataExec<T>>;
     impl<T> ArcRwSensorWriterExec<T> {
         #[inline(always)]
         pub fn new(init: T) -> Self {
@@ -218,10 +211,8 @@ mod alloc_req {
     }
 
     pub type ArcMutexSensorDataExec<T> = Arc<RawSensorData<parking_lot::Mutex<T>, StdExec<T>>>;
-    pub type ArcMutexSensorExec<T> =
-        SensorObserver<T, Arc<RawSensorData<parking_lot::Mutex<T>, StdExec<T>>>>;
-    pub type ArcMutexSensorWriterExec<T> =
-        SensorWriter<T, Arc<RawSensorData<parking_lot::Mutex<T>, StdExec<T>>>>;
+    pub type ArcMutexSensorExec<T> = SensorObserver<T, ArcMutexSensorDataExec<T>>;
+    pub type ArcMutexSensorWriterExec<T> = SensorWriter<T, ArcMutexSensorDataExec<T>>;
     impl<T> ArcMutexSensorWriterExec<T> {
         #[inline(always)]
         pub fn new(init: T) -> Self {

@@ -1,12 +1,7 @@
-#[cfg(feature = "alloc")]
-extern crate alloc;
-
 pub mod parking_lot;
 #[cfg(feature = "std")]
 pub mod std_sync;
 
-#[cfg(feature = "alloc")]
-use alloc::sync::Arc;
 use core::{
     marker::PhantomData,
     ops::{Deref, DerefMut},

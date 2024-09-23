@@ -100,9 +100,9 @@ where
     observers: AtomicUsize,
 }
 
-impl<L, E> RawSensorData<L, E>
+impl<T, L, E> RawSensorData<L, E>
 where
-    L: DataWriteLock,
+    L: DataWriteLock<Target = T>,
     E: ExecManager<L>,
 {
     #[inline(always)]
@@ -118,37 +118,53 @@ where
 }
 /// Trait for sharing a (most likely heap pointer) wrapped `struct@RawSensorData` with a locking strategy.
 pub trait ShareStrategy<'a> {
-    /// The underlying data that is being shared.
-    type Data;
+    /// The locking mechanism for the sensor's data.
+    type Lock: DataWriteLock;
+    /// The executor associated with the sensor.
+    type Executor: ExecManager<Self::Lock>;
     /// The wrapping container for the sensor state.
-    type Shared: Deref<Target = Self::Data>;
+    type Shared: Deref<Target = RawSensorData<Self::Lock, Self::Executor>>;
 
     /// Share the sensor state for the largest possible lifetime.
     fn share_data(self) -> Self::Shared;
 
     /// Create an immutable borrow to the sensor state, elided by the lifetime of
     /// wrapping container.
-    fn share_elided_ref(self) -> &'a Self::Data;
+    fn share_elided_ref(self) -> &'a RawSensorData<Self::Lock, Self::Executor>;
 }
 
 /// QOL trait to encapsulate sensor writer's data wrapper, locking strategy and executor type.
-pub trait SharedSensorData<T>
+pub trait SharedSensorData
 where
-    for<'a> &'a Self: ShareStrategy<'a, Data = RawSensorData<Self::Lock, Self::Executor>>,
+    for<'a> &'a Self: ShareStrategy<'a, Lock = Self::Lock, Executor = Self::Executor>,
 {
+    type Target;
     /// The locking mechanism for the sensor's data.
-    type Lock: DataWriteLock<Target = T>;
+    type Lock: DataWriteLock<Target = <Self as SharedSensorData>::Target>;
     /// The executor associated with the sensor.
     type Executor: ExecManager<Self::Lock>;
 }
 
-impl<'a, T, L, E> ShareStrategy<'a> for &'a RawSensorData<L, E>
+impl<L, E, S> SharedSensorData for S
 where
-    L: DataWriteLock<Target = T>,
+    L: DataWriteLock,
+    E: ExecManager<L>,
+    for<'a> &'a Self: ShareStrategy<'a, Lock = L, Executor = E>,
+{
+    type Target = L::Target;
+    type Lock = L;
+    type Executor = E;
+}
+
+impl<'a, L, E> ShareStrategy<'a> for &'a RawSensorData<L, E>
+where
+    L: DataWriteLock,
     E: ExecManager<L>,
 {
-    type Data = RawSensorData<L, E>;
+    type Lock = L;
+    type Executor = E;
     type Shared = Self;
+
     #[inline(always)]
     fn share_data(self) -> Self {
         self
@@ -161,40 +177,42 @@ where
 }
 
 /// QOL trait to encapsulate sensor observer's data wrapper, locking strategy and executor type.
-pub trait DerefSensorData<T>: Deref<Target = RawSensorData<Self::Lock, Self::Executor>> {
+pub trait DerefSensorData: Deref<Target = RawSensorData<Self::Lock, Self::Executor>> {
+    type Target;
     /// The locking mechanism for the sensor's data.
-    type Lock: DataWriteLock<Target = T>;
+    type Lock: DataWriteLock<Target = <Self as DerefSensorData>::Target>;
     /// The executor associated with the sensor.
     type Executor: ExecManager<Self::Lock>;
 }
 
-impl<T, L, E> SharedSensorData<T> for RawSensorData<L, E>
-where
-    L: DataWriteLock<Target = T>,
-    E: ExecManager<L>,
-{
-    type Lock = L;
-    type Executor = E;
-}
+// impl<T, L, E> SharedSensorData<T> for RawSensorData<L, E>
+// where
+//     L: DataWriteLock<Target = T>,
+//     E: ExecManager<L>,
+// {
+//     type Lock = L;
+//     type Executor = E;
+// }
 
-impl<T, L, E, R> DerefSensorData<T> for R
+impl<L, E, R> DerefSensorData for R
 where
-    L: DataWriteLock<Target = T>,
+    L: DataWriteLock,
     E: ExecManager<L>,
     R: Deref<Target = RawSensorData<L, E>>,
 {
+    type Target = L::Target;
     type Lock = L;
-
     type Executor = E;
 }
 
 #[cfg(feature = "alloc")]
-impl<'a, T, L, E> ShareStrategy<'a> for &'a Arc<RawSensorData<L, E>>
+impl<'a, L, E> ShareStrategy<'a> for &'a Arc<RawSensorData<L, E>>
 where
-    L: DataWriteLock<Target = T>,
+    L: DataWriteLock,
     E: ExecManager<L>,
 {
-    type Data = RawSensorData<L, E>;
+    type Lock = L;
+    type Executor = E;
     type Shared = Arc<RawSensorData<L, E>>;
 
     #[inline(always)]
@@ -208,60 +226,57 @@ where
     }
 }
 
-#[cfg(feature = "alloc")]
-impl<T, L, E> SharedSensorData<T> for Arc<RawSensorData<L, E>>
-where
-    L: DataWriteLock<Target = T>,
-    E: ExecManager<L>,
-{
-    type Lock = L;
-    type Executor = E;
-}
+// #[cfg(feature = "alloc")]
+// impl<T, L, E> SharedSensorData<T> for Arc<RawSensorData<L, E>>
+// where
+//     L: DataWriteLock<Target = T>,
+//     E: ExecManager<L>,
+// {
+//     type Lock = L;
+//     type Executor = E;
+// }
 
 /*** Sensor Writing ***/
 
 /// The generalized sensor writer.
 #[repr(transparent)]
-pub struct SensorWriter<T, S>(S, PhantomData<T>)
+pub struct SensorWriter<T, S>(S)
 where
-    S: SharedSensorData<T>,
-    for<'a> &'a S: ShareStrategy<'a, Data = RawSensorData<S::Lock, S::Executor>>;
+    S: SharedSensorData<Target = T>,
+    for<'a> &'a S: ShareStrategy<'a, Lock = S::Lock, Executor = S::Executor>;
 
-impl<T, L, E> SensorWriter<T, RawSensorData<L, E>>
+impl<L, E> SensorWriter<L::Target, RawSensorData<L, E>>
 where
-    L: DataWriteLock<Target = T>,
+    L: DataWriteLock,
     E: ExecManager<L>,
 {
     /// Create a new sensor writer by wrapping the appropriate shared data.
     #[inline(always)]
     pub const fn from_parts(lock: L, executor: E) -> Self {
-        Self(RawSensorData::new_for_writer(lock, executor), PhantomData)
+        Self(RawSensorData::new_for_writer(lock, executor))
     }
 }
 
 #[cfg(feature = "alloc")]
-impl<T, L, E> SensorWriter<T, Arc<RawSensorData<L, E>>>
+impl<L, E> SensorWriter<L::Target, Arc<RawSensorData<L, E>>>
 where
-    L: DataWriteLock<Target = T>,
+    L: DataWriteLock,
     E: ExecManager<L>,
 {
     /// Create a new sensor writer by wrapping the appropriate shared data.
     #[inline(always)]
     pub fn from_parts_arc(lock: L, executor: E) -> Self {
-        Self(
-            Arc::new(RawSensorData::new_for_writer(lock, executor)),
-            PhantomData,
-        )
+        Self(Arc::new(RawSensorData::new_for_writer(lock, executor)))
     }
 }
 
 impl<T, S> Drop for SensorWriter<T, S>
 where
-    S: SharedSensorData<T>,
-    for<'a> &'a S: ShareStrategy<'a, Data = RawSensorData<S::Lock, S::Executor>>,
+    S: SharedSensorData<Target = T>,
+    for<'a> &'a S: ShareStrategy<'a, Lock = S::Lock, Executor = S::Executor>,
 {
     fn drop(&mut self) {
-        let data = self.0.share_elided_ref();
+        let data = <&S as ShareStrategy<'_>>::share_elided_ref(&self.0);
         if data.writers.fetch_sub(1, Ordering::Relaxed) == 1 {
             let _ = data.version.fetch_or(CLOSED_BIT, Ordering::Release);
         }
@@ -270,8 +285,8 @@ where
 
 impl<T, S> Clone for SensorWriter<T, S>
 where
-    S: SharedSensorData<T> + Clone,
-    for<'a> &'a S: ShareStrategy<'a, Data = RawSensorData<S::Lock, S::Executor>>,
+    S: SharedSensorData<Target = T> + Clone,
+    for<'a> &'a S: ShareStrategy<'a, Lock = S::Lock, Executor = S::Executor>,
 {
     fn clone(&self) -> Self {
         let _ = self
@@ -279,14 +294,14 @@ where
             .share_elided_ref()
             .writers
             .fetch_add(1, Ordering::Relaxed);
-        Self(self.0.clone(), PhantomData)
+        Self(self.0.clone())
     }
 }
 
 impl<T, S> SensorWriter<T, S>
 where
-    S: SharedSensorData<T>,
-    for<'a> &'a S: ShareStrategy<'a, Data = RawSensorData<S::Lock, S::Executor>>,
+    S: SharedSensorData<Target = T>,
+    for<'a> &'a S: ShareStrategy<'a, Lock = S::Lock, Executor = S::Executor>,
 {
     /// Acquire a read lock on the underlying data.
     #[inline(always)]
@@ -446,7 +461,7 @@ pub trait SensorObserveAsync: SensorObserve {
 /// The generalized sensor observer.
 pub struct SensorObserver<T, R>
 where
-    R: DerefSensorData<T>,
+    R: DerefSensorData<Target = T>,
 {
     inner: R,
     version: UnsafeCell<usize>,
@@ -455,7 +470,7 @@ where
 
 impl<T, R> Drop for SensorObserver<T, R>
 where
-    R: DerefSensorData<T>,
+    R: DerefSensorData<Target = T>,
 {
     fn drop(&mut self) {
         let _ = self.inner.observers.fetch_sub(1, Ordering::Relaxed);
@@ -464,7 +479,7 @@ where
 
 impl<T, R> Clone for SensorObserver<T, R>
 where
-    R: DerefSensorData<T> + Clone,
+    R: DerefSensorData<Target = T> + Clone,
 {
     fn clone(&self) -> Self {
         let _ = self.inner.observers.fetch_add(1, Ordering::Relaxed);
@@ -478,7 +493,7 @@ where
 
 impl<T, R> SensorObserve for SensorObserver<T, R>
 where
-    R: DerefSensorData<T>,
+    R: DerefSensorData<Target = T>,
 {
     type Lock = R::Lock;
 
@@ -535,7 +550,7 @@ where
 impl<T, R> SensorObserveAsync for SensorObserver<T, R>
 where
     for<'a> R::Executor: ExecRegister<R::Lock, &'a Waker>,
-    R: DerefSensorData<T>,
+    R: DerefSensorData<Target = T>,
 {
     fn wait_until_changed(&self) -> impl Future<Output = SymResult<()>> + Unpin {
         poll_fn(move |cx| {
@@ -767,8 +782,8 @@ pub trait RegisterFunction<F> {
 
 impl<T, S, F> RegisterFunction<F> for SensorWriter<T, S>
 where
-    S: SharedSensorData<T>,
-    for<'a> &'a S: ShareStrategy<'a, Data = RawSensorData<S::Lock, S::Executor>>,
+    S: SharedSensorData<Target = T>,
+    for<'a> &'a S: ShareStrategy<'a, Lock = S::Lock, Executor = S::Executor>,
     S::Executor: ExecRegister<S::Lock, F>,
 {
     #[inline]
@@ -780,7 +795,7 @@ where
 
 impl<T, R, F> RegisterFunction<F> for SensorObserver<T, R>
 where
-    R: DerefSensorData<T>,
+    R: DerefSensorData<Target = T>,
     R::Executor: ExecRegister<R::Lock, F>,
 {
     #[inline]
