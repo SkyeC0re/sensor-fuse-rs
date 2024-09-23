@@ -130,7 +130,7 @@ where
     let handles = Vec::from_iter((0..num_threads).map(|_| {
         let sensor_writer = sensor_writer.clone();
         thread::spawn(move || {
-            let sensor_observer = sensor_writer.spawn_observer();
+            let mut sensor_observer = sensor_writer.spawn_observer();
             let mut last_seen_value = 0;
             sensor_observer.mark_unseen();
 
@@ -163,7 +163,7 @@ where
     SensorWriter<usize, S>: From<usize>,
 {
     let sensor_writer = SensorWriter::<usize, S>::from(0);
-    let observer = sensor_writer.spawn_observer().map(|x| x + 1);
+    let mut observer = sensor_writer.spawn_observer().map(|x| x + 1);
 
     assert_eq!(*observer.borrow(), 1);
 
@@ -190,7 +190,7 @@ where
     let sensor_writer_1 = SensorWriter::<usize, S>::from(1);
     let sensor_writer_2 = SensorWriter::<usize, S>::from(2);
 
-    let observer = sensor_writer_1
+    let mut observer = sensor_writer_1
         .spawn_observer()
         .fuse(sensor_writer_2.spawn_observer(), |x, y| x * y);
 
@@ -248,8 +248,8 @@ where
 {
     let ping_send = Arc::new(SensorWriter::<usize, S>::from(1));
     let pong_send = Arc::new(SensorWriter::<usize, S>::from(1));
-    let ping_recv = ping_send.spawn_observer();
-    let pong_recv = pong_send.spawn_observer();
+    let mut ping_recv = ping_send.spawn_observer();
+    let mut pong_recv = pong_send.spawn_observer();
     thread::scope(|s| {
         let handle = s.spawn({
             let pong_send = pong_send.clone();
@@ -298,8 +298,8 @@ where
 {
     let ping_send = Arc::new(SensorWriter::<usize, S>::from(1));
     let pong_send = Arc::new(SensorWriter::<usize, S>::from(1));
-    let ping_recv = ping_send.spawn_observer().map(|x| 2 * x);
-    let pong_recv = pong_send.spawn_observer().map(|x| 2 * x);
+    let mut ping_recv = ping_send.spawn_observer().map(|x| 2 * x);
+    let mut pong_recv = pong_send.spawn_observer().map(|x| 2 * x);
     thread::scope(|s| {
         let handle = s.spawn({
             let pong_send = pong_send.clone();
@@ -350,10 +350,10 @@ where
     let ping2_send = Arc::new(SensorWriter::<usize, S>::from(1));
     let pong1_send = Arc::new(SensorWriter::<usize, S>::from(1));
     let pong2_send = Arc::new(SensorWriter::<usize, S>::from(1));
-    let ping_recv = ping1_send
+    let mut ping_recv = ping1_send
         .spawn_observer()
         .fuse(ping2_send.spawn_observer(), |x, y| *x + *y - 1);
-    let pong_recv = pong1_send
+    let mut pong_recv = pong1_send
         .spawn_observer()
         .fuse(pong2_send.spawn_observer(), |x, y| *x + *y - 1);
     thread::scope(|s| {

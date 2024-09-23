@@ -66,7 +66,6 @@ pub mod prelude;
 
 #[cfg(feature = "alloc")]
 use alloc::sync::Arc;
-use core::marker::PhantomData;
 use core::{
     cell::UnsafeCell,
     future::{poll_fn, Future},
@@ -76,6 +75,7 @@ use core::{
     task::{Poll, Waker},
 };
 use executor::{ExecManager, ExecRegister};
+use std::marker::PhantomData;
 
 use crate::lock::{DataReadLock, DataWriteLock, OwnedData, OwnedFalseLock, ReadGuardSpecifier};
 
@@ -315,7 +315,6 @@ where
         SensorObserver {
             inner,
             version: UnsafeCell::new(inner.version.load(Ordering::Acquire)),
-            _type: PhantomData,
         }
     }
 
@@ -328,7 +327,6 @@ where
         SensorObserver {
             version: UnsafeCell::new(inner.version.load(Ordering::Acquire)),
             inner,
-            _type: PhantomData,
         }
     }
 }
@@ -341,13 +339,13 @@ pub trait SensorObserve {
     type Lock: ReadGuardSpecifier;
 
     /// Returns the latest value obtainable by the sensor and marks it as seen.
-    fn pull(&self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_>;
+    fn pull(&mut self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_>;
     /// Returns the latest value obtainable by the sensor without marking it as seen.
     fn borrow(&self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_>;
     /// Mark the current sensor data as seen.
-    fn mark_seen(&self);
+    fn mark_seen(&mut self);
     /// Mark the current sensor data as unseen.
-    fn mark_unseen(&self);
+    fn mark_unseen(&mut self);
     /// Returns true if the sensor data has been marked as unseen.
     fn has_changed(&self) -> bool;
     /// Returns true if all upstream writers has been dropped and no more updates can occur.
@@ -389,35 +387,76 @@ pub trait SensorObserve {
     }
 }
 
+struct WaitForFut<
+    'a,
+    R: SensorObserveAsync + ?Sized,
+    C: Send + FnMut(&<R::Lock as ReadGuardSpecifier>::Target) -> bool,
+    F: Future<Output = SymResult<()>> + Unpin,
+    G: Unpin + FnMut(&'a mut R) -> F,
+> where
+    R::Lock: 'a,
+{
+    observer: *mut R,
+    condition: C,
+    wait_changed_generator: G,
+    wait_changed: Option<F>,
+    is_closed: bool,
+    _lifetime: PhantomData<&'a mut R>,
+}
+
+impl<
+        'a,
+        R: SensorObserveAsync + ?Sized,
+        C: Send + FnMut(&<R::Lock as ReadGuardSpecifier>::Target) -> bool,
+        F: Future<Output = SymResult<()>> + Unpin,
+        G: Unpin + FnMut(&'a mut R) -> F,
+    > Future for WaitForFut<'a, R, C, F, G>
+{
+    type Output = SymResult<<R::Lock as ReadGuardSpecifier>::ReadGuard<'a>>;
+
+    fn poll(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
+        // Safety: Only the condition function `C` can be `Unpin`, and none of its data gets moved out.
+        let s = unsafe { self.get_unchecked_mut() };
+
+        if let Some(future) = &mut s.wait_changed {
+            if let Poll::Ready(res) = pin!(future).poll(cx) {
+                // Should get compiled into a value assignment.
+                s.is_closed = if res.is_err() { true } else { false };
+            } else {
+                return Poll::Pending;
+            }
+        }
+
+        let guard = unsafe { (*s.observer).pull() };
+        if (s.condition)(&guard) {
+            // Should get compiled into a value assignment.
+            return Poll::Ready(if s.is_closed { Err(guard) } else { Ok(guard) });
+        }
+        s.wait_changed = Some((s.wait_changed_generator)(unsafe { &mut *s.observer }));
+        return Poll::Pending;
+    }
+}
+
 /// Async observer functionality.
 pub trait SensorObserveAsync: SensorObserve {
     /// Asynchronously wait until the sensor value is updated. This call will **not** update the observer's version,
     /// as such an additional call to `pull` or `pull_updated` is required.
-    fn wait_until_changed(&self) -> impl Future<Output = SymResult<()>> + Unpin;
+    fn wait_until_changed(&mut self) -> impl Future<Output = SymResult<()>> + Unpin + Sized;
 
     /// Asynchronously wait until the sensor value has been updated with a value that satisfies a condition. This call **will** update the observer's version
     /// and evaluate the condition function on values obtained by `pull_updated`.
-    #[inline]
     fn wait_for<F: Send + FnMut(&<Self::Lock as ReadGuardSpecifier>::Target) -> bool>(
-        &self,
-        mut condition: F,
+        &mut self,
+        condition: F,
     ) -> impl Future<Output = SymResult<<Self::Lock as ReadGuardSpecifier>::ReadGuard<'_>>> {
-        async move {
-            let mut is_closed = self.is_locally_closed();
-            loop {
-                let guard = self.pull();
-                if condition(&guard) {
-                    // Should get compiled into a value assignment.
-                    return if is_closed { Err(guard) } else { Ok(guard) };
-                }
-                drop(guard);
-                // Should get compiled into a value assignment.
-                is_closed = match self.wait_until_changed().await {
-                    Ok(()) => false,
-                    Err(()) => true,
-                }
-            }
-        }
+        return WaitForFut {
+            observer: self,
+            condition,
+            is_closed: self.is_locally_closed(),
+            wait_changed_generator: |r| Self::wait_until_changed(r),
+            wait_changed: None,
+            _lifetime: PhantomData,
+        };
     }
 }
 
@@ -428,7 +467,6 @@ where
 {
     inner: R,
     version: UnsafeCell<usize>,
-    _type: PhantomData<T>,
 }
 
 impl<T, R> Drop for SensorObserver<T, R>
@@ -449,7 +487,6 @@ where
         Self {
             inner: self.inner.clone(),
             version: UnsafeCell::new(unsafe { *self.version.get() }),
-            _type: PhantomData,
         }
     }
 }
@@ -466,26 +503,24 @@ where
     }
 
     #[inline(always)]
-    fn pull(&self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_> {
+    fn pull(&mut self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_> {
         let guard = self.inner.lock.read();
-        self.mark_seen();
+        *self.version.get_mut() = self.inner.version.load(Ordering::Acquire);
         guard
     }
 
     #[inline(always)]
-    fn mark_seen(&self) {
-        unsafe { *self.version.get() = self.inner.version.load(Ordering::Acquire) };
+    fn mark_seen(&mut self) {
+        *self.version.get_mut() = self.inner.version.load(Ordering::Acquire);
     }
 
     #[inline(always)]
-    fn mark_unseen(&self) {
-        unsafe {
-            *self.version.get() = self
-                .inner
-                .version
-                .load(Ordering::Acquire)
-                .wrapping_sub(STEP_SIZE)
-        };
+    fn mark_unseen(&mut self) {
+        *self.version.get_mut() = self
+            .inner
+            .version
+            .load(Ordering::Acquire)
+            .wrapping_sub(STEP_SIZE);
     }
 
     #[inline(always)]
@@ -515,7 +550,7 @@ where
     for<'a> R::Executor: ExecRegister<&'a Waker>,
     R: DerefSensorData<Target = T>,
 {
-    fn wait_until_changed(&self) -> impl Future<Output = SymResult<()>> + Unpin {
+    fn wait_until_changed(&mut self) -> impl Future<Output = SymResult<()>> + Unpin + Sized {
         poll_fn(move |cx| {
             let mut has_changed = self.has_changed();
             let mut closed = self.is_locally_closed();
@@ -542,6 +577,7 @@ where
 }
 
 /*** Mapped and Fused Observers ***/
+
 /// A mapped sensor observer.
 pub struct MappedSensorObserver<
     A: SensorObserve,
@@ -576,8 +612,8 @@ where
     type Lock = OwnedFalseLock<T>;
 
     #[inline]
-    fn pull(&self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_> {
-        unsafe { OwnedData((*self.map.get())(&self.inner.pull())) }
+    fn pull(&mut self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_> {
+        OwnedData((*self.map.get_mut())(&self.inner.pull()))
     }
 
     #[inline(always)]
@@ -586,12 +622,12 @@ where
     }
 
     #[inline(always)]
-    fn mark_seen(&self) {
+    fn mark_seen(&mut self) {
         self.inner.mark_seen();
     }
 
     #[inline(always)]
-    fn mark_unseen(&self) {
+    fn mark_unseen(&mut self) {
         self.inner.mark_unseen();
     }
 
@@ -616,7 +652,7 @@ where
     A: SensorObserve + SensorObserveAsync,
     F: FnMut(&<A::Lock as ReadGuardSpecifier>::Target) -> T,
 {
-    fn wait_until_changed(&self) -> impl Future<Output = SymResult<()>> + Unpin {
+    fn wait_until_changed(&mut self) -> impl Future<Output = SymResult<()>> + Unpin {
         self.inner.wait_until_changed()
     }
 }
@@ -667,7 +703,7 @@ where
     type Lock = OwnedFalseLock<T>;
 
     #[inline(always)]
-    fn pull(&self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_> {
+    fn pull(&mut self) -> <Self::Lock as ReadGuardSpecifier>::ReadGuard<'_> {
         unsafe { OwnedData((*self.fuse.get())(&self.a.pull(), &self.b.pull())) }
     }
 
@@ -677,13 +713,13 @@ where
     }
 
     #[inline(always)]
-    fn mark_seen(&self) {
+    fn mark_seen(&mut self) {
         self.a.mark_seen();
         self.b.mark_seen();
     }
 
     #[inline(always)]
-    fn mark_unseen(&self) {
+    fn mark_unseen(&mut self) {
         self.a.mark_unseen();
         self.b.mark_unseen();
     }
@@ -713,7 +749,7 @@ where
         &<B::Lock as ReadGuardSpecifier>::Target,
     ) -> T,
 {
-    fn wait_until_changed(&self) -> impl Future<Output = SymResult<()>> + Unpin {
+    fn wait_until_changed(&mut self) -> impl Future<Output = SymResult<()>> + Unpin {
         let mut a = self.a.wait_until_changed();
         let mut b = self.b.wait_until_changed();
         poll_fn(move |cx| {
