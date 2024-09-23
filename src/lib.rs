@@ -427,12 +427,23 @@ impl<
             }
         }
 
-        let guard = unsafe { (*s.observer).pull() };
-        if (s.condition)(&guard) {
-            // Should get compiled into a value assignment.
-            return Poll::Ready(if s.is_closed { Err(guard) } else { Ok(guard) });
+        loop {
+            let guard = unsafe { (*s.observer).pull() };
+            if (s.condition)(&guard) {
+                // Should get compiled into a value assignment.
+                return Poll::Ready(if s.is_closed { Err(guard) } else { Ok(guard) });
+            }
+            let mut future = (s.wait_changed_generator)(unsafe { &mut *s.observer });
+            if let Poll::Ready(res) = pin!(&mut future).poll(cx) {
+                // Should get compiled into a value assignment.
+                s.is_closed = if res.is_err() { true } else { false };
+                continue;
+            } else {
+                s.wait_changed = Some(future);
+                break;
+            }
         }
-        s.wait_changed = Some((s.wait_changed_generator)(unsafe { &mut *s.observer }));
+
         return Poll::Pending;
     }
 }
