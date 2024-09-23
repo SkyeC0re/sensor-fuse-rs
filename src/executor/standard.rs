@@ -104,9 +104,8 @@ where
     }
 }
 
-impl<T, L, F> ExecRegister<L, Box<F>> for StdExec<T>
+impl<T, F> ExecRegister<Box<F>> for StdExec<T>
 where
-    L: DataWriteLock<Target = T>,
     F: 'static + Send + FnMut(&T) -> bool,
 {
     #[inline]
@@ -126,10 +125,7 @@ where
     }
 }
 
-impl<T, L> ExecRegister<L, BoxedFn<T>> for StdExec<T>
-where
-    L: DataWriteLock<Target = T>,
-{
+impl<T> ExecRegister<BoxedFn<T>> for StdExec<T> {
     #[inline]
     fn register<C: FnOnce() -> Option<BoxedFn<T>>>(&self, condition: C) -> bool {
         let guard = self.registration_mtx.lock();
@@ -147,13 +143,9 @@ where
     }
 }
 
-impl<'b, T, L> ExecRegister<L, &'b Waker> for StdExec<T>
-where
-    // Self: 'b,
-    L: DataWriteLock<Target = T>,
-{
+impl<'a, T> ExecRegister<&'a Waker> for StdExec<T> {
     #[inline]
-    fn register<C: FnOnce() -> Option<&'b Waker>>(&self, condition: C) -> bool {
+    fn register<C: FnOnce() -> Option<&'a Waker>>(&self, condition: C) -> bool {
         let guard = self.registration_mtx.lock();
         let res = match condition() {
             Some(w) => {

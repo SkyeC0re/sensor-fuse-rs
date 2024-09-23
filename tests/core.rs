@@ -5,7 +5,7 @@ use sensor_fuse::{
     executor::{BoxedFn, ExecRegister},
     lock,
     prelude::*,
-    DerefSensorData, SensorWriter, ShareStrategy, SharedSensorData,
+    DerefSensorData, SensorWriter, ShareStrategy,
 };
 use std::{sync::Arc, task::Waker, thread, time::Duration};
 
@@ -77,14 +77,14 @@ macro_rules! test_core_exec {
 
 fn test_sensor_observation<S>()
 where
-    S: SharedSensorData<Target = usize>,
-    for<'a> &'a S: ShareStrategy<'a, Lock = S::Lock, Executor = S::Executor>,
+    for<'a> &'a S: ShareStrategy<'a, Target = usize>,
     SensorWriter<usize, S>: From<usize>,
     for<'a> <&'a S as ShareStrategy<'a>>::Shared: Clone,
 {
     let sensor_writer = SensorWriter::<usize, S>::from(0);
 
-    let mut observers: Vec<Box<dyn SensorObserve<Lock = S::Lock>>> = Vec::new();
+    let mut observers: Vec<Box<dyn SensorObserve<Lock = <&'_ S as ShareStrategy<'_>>::Lock>>> =
+        Vec::new();
 
     let observer = sensor_writer.spawn_observer();
     observers.push(Box::new(observer.clone()));
@@ -121,10 +121,9 @@ where
 
 fn test_basic_sensor_observation_parallel_unsynced<S>(num_threads: usize, num_updates: usize)
 where
-    S: SharedSensorData<Target = usize>,
-    for<'a> &'a S: ShareStrategy<'a, Lock = S::Lock, Executor = S::Executor>,
-    SensorWriter<usize, S>: From<usize> + Send + Sync + 'static,
+    for<'a> &'a S: ShareStrategy<'a, Target = usize>,
     for<'a> <&'a S as ShareStrategy<'a>>::Shared: Clone,
+    SensorWriter<usize, S>: From<usize> + Send + Sync + 'static,
 {
     let sensor_writer = Arc::new(SensorWriter::<usize, S>::from(1));
 
@@ -160,8 +159,7 @@ where
 
 fn test_mapped_sensor_observation<S>()
 where
-    S: SharedSensorData<Target = usize>,
-    for<'a> &'a S: ShareStrategy<'a, Lock = S::Lock, Executor = S::Executor>,
+    for<'a> &'a S: ShareStrategy<'a, Target = usize>,
     SensorWriter<usize, S>: From<usize>,
 {
     let sensor_writer = SensorWriter::<usize, S>::from(0);
@@ -186,8 +184,7 @@ where
 
 fn test_fused_sensor_observation<S>()
 where
-    S: SharedSensorData<Target = usize>,
-    for<'a> &'a S: ShareStrategy<'a, Lock = S::Lock, Executor = S::Executor>,
+    for<'a> &'a S: ShareStrategy<'a, Target = usize>,
     SensorWriter<usize, S>: From<usize>,
 {
     let sensor_writer_1 = SensorWriter::<usize, S>::from(1);
@@ -230,9 +227,9 @@ where
 
 fn test_closed<S, R>()
 where
-    R: DerefSensorData<Target = usize, Lock = S::Lock, Executor = S::Executor>,
-    S: SharedSensorData<Target = usize>,
-    for<'a> &'a S: ShareStrategy<'a, Lock = S::Lock, Executor = S::Executor, Shared = R>,
+    R: DerefSensorData<Target = usize>,
+    for<'a> &'a S:
+        ShareStrategy<'a, Target = usize, Lock = R::Lock, Executor = R::Executor, Shared = R>,
     SensorWriter<usize, S>: From<usize>,
 {
     let sensor_writer = SensorWriter::<usize, S>::from(1);
@@ -244,10 +241,9 @@ where
 
 fn test_async_waiting<S>()
 where
-    S: SharedSensorData<Target = usize>,
-    for<'a> &'a S: ShareStrategy<'a, Lock = S::Lock, Executor = S::Executor>,
+    for<'a> &'a S: ShareStrategy<'a, Target = usize>,
     for<'a> <&'a S as ShareStrategy<'a>>::Shared: Send,
-    for<'a> S::Executor: ExecRegister<S::Lock, &'a Waker>,
+    for<'a, 'b> <&'a S as ShareStrategy<'a>>::Executor: ExecRegister<&'b Waker>,
     SensorWriter<usize, S>: 'static + Send + Sync + From<usize>,
 {
     let ping_send = Arc::new(SensorWriter::<usize, S>::from(1));
@@ -295,10 +291,9 @@ where
 
 fn test_mapped_async_waiting<S>()
 where
-    S: SharedSensorData<Target = usize>,
-    for<'a> &'a S: ShareStrategy<'a, Lock = S::Lock, Executor = S::Executor>,
+    for<'a> &'a S: ShareStrategy<'a, Target = usize>,
     for<'a> <&'a S as ShareStrategy<'a>>::Shared: Send,
-    for<'a> S::Executor: ExecRegister<S::Lock, &'a Waker>,
+    for<'a, 'b> <&'a S as ShareStrategy<'a>>::Executor: ExecRegister<&'b Waker>,
     SensorWriter<usize, S>: 'static + Send + Sync + From<usize>,
 {
     let ping_send = Arc::new(SensorWriter::<usize, S>::from(1));
@@ -346,10 +341,9 @@ where
 
 fn test_fused_async_waiting<S>()
 where
-    S: SharedSensorData<Target = usize>,
-    for<'a> &'a S: ShareStrategy<'a, Lock = S::Lock, Executor = S::Executor>,
+    for<'a> &'a S: ShareStrategy<'a, Target = usize>,
     for<'a> <&'a S as ShareStrategy<'a>>::Shared: Send,
-    for<'a> S::Executor: ExecRegister<S::Lock, &'a Waker>,
+    for<'a, 'b> <&'a S as ShareStrategy<'a>>::Executor: ExecRegister<&'b Waker>,
     SensorWriter<usize, S>: 'static + Send + Sync + From<usize>,
 {
     let ping1_send = Arc::new(SensorWriter::<usize, S>::from(1));
@@ -414,9 +408,8 @@ where
 
 fn test_callbacks<S>()
 where
-    S: SharedSensorData<Target = usize>,
-    for<'a> &'a S: ShareStrategy<'a, Lock = S::Lock, Executor = S::Executor>,
-    S::Executor: ExecRegister<S::Lock, BoxedFn<usize>>,
+    for<'a> &'a S: ShareStrategy<'a, Target = usize>,
+    for<'a> <&'a S as ShareStrategy<'a>>::Executor: ExecRegister<BoxedFn<usize>>,
     SensorWriter<usize, S>: 'static + Send + Sync + From<usize>,
 {
     let sensor_writer = SensorWriter::<usize, S>::from(1);

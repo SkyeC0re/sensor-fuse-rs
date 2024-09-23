@@ -19,10 +19,7 @@ where
 }
 
 /// Signifies that an execution manager may register an executable using immutable access.
-pub trait ExecRegister<L, F>: ExecManager<L>
-where
-    L: DataWriteLock,
-{
+pub trait ExecRegister<F> {
     /// Register an executable unit on the executor's execution set. The executor calls `C` and registers `F` if `Some(F)`
     /// is returned, and returns true if `F` was registered. The executor must guarantee that the evaluation and registration step is atomic
     /// with respect to `commit` functions.
