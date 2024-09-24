@@ -66,8 +66,10 @@ impl<T> StdExec<T> {
             callbacks_out.push(callback);
         }
         mem::swap(wakers_in, wakers_out);
-        let value = L::atomic_downgrade(commit());
+        let value = commit();
         drop(guard);
+        // TODO Atomic downgrading causes significant slowdown.
+        // let value = L::atomic_downgrade(value);
 
         for waker in (wakers_out).drain(..) {
             waker.wake();
