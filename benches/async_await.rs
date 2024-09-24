@@ -37,7 +37,7 @@ impl WatchContentionEnvironment {
         let runtime = runtime::Builder::new_multi_thread().build().unwrap();
 
         let mut reader_handles = Vec::new();
-        for _ in black_box(0..reader_count) {
+        for _ in 0..reader_count {
             let mut reader = writer.subscribe();
             reader_handles.push(runtime.spawn(async move {
                 let mut test_version = 0;
@@ -73,20 +73,18 @@ impl WatchContentionEnvironment {
                             guard.observers_completed.fetch_add(1, Ordering::Relaxed);
                         }
                     }
-
-                    black_box(drop(guard));
                 }
             }));
         }
 
         let mut writer_handles = Vec::new();
-        for _ in black_box(0..writer_count) {
+        for _ in 0..writer_count {
             let writer = writer.clone();
             writer_handles.push(runtime.spawn_blocking(move || {
                 let mut test_version = 0;
                 let mut writes = 0;
                 loop {
-                    black_box(writer.send_modify(|state| {
+                    writer.send_modify(|state| {
                         if test_version != state.test_version {
                             writes = 0;
                             test_version = state.test_version;
@@ -98,7 +96,7 @@ impl WatchContentionEnvironment {
                                 state.writers_completed += 1;
                             }
                         }
-                    }));
+                    });
 
                     if test_version == usize::MAX {
                         break;
@@ -129,6 +127,22 @@ impl WatchContentionEnvironment {
         let _ = black_box(block_on(
             observer.wait_for(|state| state.writers_completed == writers_len),
         ));
+    }
+
+    fn bench_individual_observations_req(&self, required_observations: usize) {
+        let mut observer = self.writer.subscribe();
+        self.writer.send_modify(|state| {
+            state.test_version += 1;
+            state.observers_completed.fetch_and(0, Ordering::Relaxed);
+            state.writers_completed = 0;
+            state.individual_observations_required = required_observations;
+        });
+
+        let readers_len = self.reader_handles.len();
+
+        let _ = black_box(block_on(observer.wait_for(|state| {
+            state.observers_completed.load(Ordering::Relaxed) == readers_len
+        })));
     }
 }
 
@@ -190,7 +204,7 @@ where
         let runtime = runtime::Builder::new_multi_thread().build().unwrap();
 
         let mut reader_handles = Vec::new();
-        for _ in black_box(0..reader_count) {
+        for _ in 0..reader_count {
             let mut reader = writer.spawn_observer();
             reader_handles.push(runtime.spawn(async move {
                 let mut test_version = 0;
@@ -229,20 +243,18 @@ where
                             guard.observers_completed.fetch_add(1, Ordering::Relaxed);
                         }
                     }
-
-                    black_box(drop(guard));
                 }
             }));
         }
 
         let mut writer_handles = Vec::new();
-        for _ in black_box(0..writer_count) {
+        for _ in 0..writer_count {
             let writer = writer.clone();
             writer_handles.push(runtime.spawn_blocking(move || {
                 let mut test_version = 0;
                 let mut writes = 0;
                 loop {
-                    black_box(writer.modify_with(|state| {
+                    writer.modify_with(|state| {
                         if test_version != state.test_version {
                             writes = 0;
                             test_version = state.test_version;
@@ -254,7 +266,7 @@ where
                                 state.writers_completed += 1;
                             }
                         }
-                    }));
+                    });
 
                     if test_version == usize::MAX {
                         break;
@@ -286,6 +298,22 @@ where
             observer.wait_for(|state| state.writers_completed == writers_len),
         ));
     }
+
+    fn bench_individual_observations_req(&self, required_observations: usize) {
+        let mut observer = self.writer.spawn_observer();
+        self.writer.modify_with(|state| {
+            state.test_version += 1;
+            state.observers_completed.fetch_and(0, Ordering::Relaxed);
+            state.writers_completed = 0;
+            state.individual_observations_required = required_observations;
+        });
+
+        let readers_len = self.reader_handles.len();
+
+        let _ = black_box(block_on(observer.wait_for(|state| {
+            state.observers_completed.load(Ordering::Relaxed) == readers_len
+        })));
+    }
 }
 
 impl<S, R> Drop for ContentionEnvironment<S, R>
@@ -315,73 +343,139 @@ where
     }
 }
 
-fn pl_rw(c: &mut Criterion) {
+fn pl_rw_write(c: &mut Criterion) {
     let env = ContentionEnvironment::<pl::ArcRwSensorDataExec<ContentionData>, _>::new(100, 10);
 
-    c.bench_function("pl_r100_w10_2000", |b| {
+    c.bench_function("pl_r100_w10_2000_write", |b| {
         b.iter(|| {
             env.bench_individual_writes_req(2000);
         });
     });
 }
 
-fn pl_rw_low_contention(c: &mut Criterion) {
+fn pl_rw_low_contention_write(c: &mut Criterion) {
     let env = ContentionEnvironment::<pl::ArcRwSensorDataExec<ContentionData>, _>::new(5, 5);
 
-    c.bench_function("pl_r5_w5_2000", |b| {
+    c.bench_function("pl_r5_w5_2000_write", |b| {
         b.iter(|| {
             env.bench_individual_writes_req(2000);
         });
     });
 }
 
-fn ss_rw(c: &mut Criterion) {
+fn ss_rw_write(c: &mut Criterion) {
     let env = ContentionEnvironment::<ss::ArcRwSensorDataExec<ContentionData>, _>::new(100, 10);
 
-    c.bench_function("ss_r100_w10_2000", |b| {
+    c.bench_function("ss_r100_w10_2000_write", |b| {
         b.iter(|| {
             env.bench_individual_writes_req(2000);
         });
     });
 }
 
-fn ss_rw_low_contention(c: &mut Criterion) {
+fn ss_rw_low_contention_write(c: &mut Criterion) {
     let env = ContentionEnvironment::<ss::ArcRwSensorDataExec<ContentionData>, _>::new(5, 5);
 
-    c.bench_function("ss_r5_w5_2000", |b| {
+    c.bench_function("ss_r5_w5_2000_write", |b| {
         b.iter(|| {
             env.bench_individual_writes_req(2000);
         });
     });
 }
 
-fn tw(c: &mut Criterion) {
+fn tw_write(c: &mut Criterion) {
     let env = WatchContentionEnvironment::new(100, 10);
 
-    c.bench_function("tw_r100_w10_2000", |b| {
+    c.bench_function("tw_r100_w10_2000_write", |b| {
         b.iter(|| {
             env.bench_individual_writes_req(2000);
         });
     });
 }
 
-fn tw_low_contention(c: &mut Criterion) {
+fn tw_low_contention_write(c: &mut Criterion) {
     let env = WatchContentionEnvironment::new(5, 5);
 
-    c.bench_function("tw_r5_w5_2000", |b| {
+    c.bench_function("tw_r5_w5_2000_write", |b| {
         b.iter(|| {
             env.bench_individual_writes_req(2000);
+        });
+    });
+}
+
+fn pl_rw_observation(c: &mut Criterion) {
+    let env = ContentionEnvironment::<pl::ArcRwSensorDataExec<ContentionData>, _>::new(100, 10);
+
+    c.bench_function("pl_r100_w10_2000_observation", |b| {
+        b.iter(|| {
+            env.bench_individual_observations_req(2000);
+        });
+    });
+}
+
+fn pl_rw_low_contention_observation(c: &mut Criterion) {
+    let env = ContentionEnvironment::<pl::ArcRwSensorDataExec<ContentionData>, _>::new(5, 5);
+
+    c.bench_function("pl_r5_w5_2000_observation", |b| {
+        b.iter(|| {
+            env.bench_individual_observations_req(2000);
+        });
+    });
+}
+
+fn ss_rw_observation(c: &mut Criterion) {
+    let env = ContentionEnvironment::<ss::ArcRwSensorDataExec<ContentionData>, _>::new(100, 10);
+
+    c.bench_function("ss_r100_w10_2000_observation", |b| {
+        b.iter(|| {
+            env.bench_individual_observations_req(2000);
+        });
+    });
+}
+
+fn ss_rw_low_contention_observation(c: &mut Criterion) {
+    let env = ContentionEnvironment::<ss::ArcRwSensorDataExec<ContentionData>, _>::new(5, 5);
+
+    c.bench_function("ss_r5_w5_2000_observation", |b| {
+        b.iter(|| {
+            env.bench_individual_observations_req(2000);
+        });
+    });
+}
+
+fn tw_observation(c: &mut Criterion) {
+    let env = WatchContentionEnvironment::new(100, 10);
+
+    c.bench_function("tw_r100_w10_2000_observation", |b| {
+        b.iter(|| {
+            env.bench_individual_observations_req(2000);
+        });
+    });
+}
+
+fn tw_low_contention_observation(c: &mut Criterion) {
+    let env = WatchContentionEnvironment::new(5, 5);
+
+    c.bench_function("tw_r5_w5_2000_observation", |b| {
+        b.iter(|| {
+            env.bench_individual_observations_req(2000);
         });
     });
 }
 
 criterion_group!(
     benches,
-    pl_rw,
-    ss_rw,
-    tw,
-    pl_rw_low_contention,
-    ss_rw_low_contention,
-    tw_low_contention,
+    pl_rw_write,
+    ss_rw_write,
+    tw_write,
+    pl_rw_low_contention_write,
+    ss_rw_low_contention_write,
+    tw_low_contention_write,
+    pl_rw_observation,
+    ss_rw_observation,
+    tw_observation,
+    pl_rw_low_contention_observation,
+    ss_rw_low_contention_observation,
+    tw_low_contention_observation,
 );
 criterion_main!(benches);
