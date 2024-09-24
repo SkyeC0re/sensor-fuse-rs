@@ -1,6 +1,7 @@
 use async_std::future::timeout;
 use futures::executor::block_on;
 use paste::paste;
+use rand::random;
 use sensor_fuse::{
     executor::{BoxedFn, ExecRegister},
     lock,
@@ -269,7 +270,7 @@ where
         let handle = s.spawn({
             let pong_send = pong_send.clone();
             move || {
-                for i in 2..10000 {
+                for i in 2..1000 {
                     let _ = block_on(timeout(
                         Duration::from_secs(REASONABLE_TIMEOUT_S),
                         ping_recv.wait_until_changed(),
@@ -281,12 +282,18 @@ where
                         panic!();
                     }
 
+                    if random::<bool>() {
+                        thread::sleep(Duration::from_millis(1));
+                    }
                     pong_send.update(i);
                 }
             }
         });
 
-        for i in 2..10000 {
+        for i in 2..1000 {
+            if random::<bool>() {
+                thread::sleep(Duration::from_millis(1));
+            }
             ping_send.update(i);
 
             let _ = block_on(timeout(
@@ -319,7 +326,7 @@ where
         let handle = s.spawn({
             let pong_send = pong_send.clone();
             move || {
-                for i in 2..10000 {
+                for i in 2..1000 {
                     let _ = block_on(timeout(
                         Duration::from_secs(REASONABLE_TIMEOUT_S),
                         ping_recv.wait_until_changed(),
@@ -331,12 +338,18 @@ where
                         panic!();
                     }
 
+                    if random::<bool>() {
+                        thread::sleep(Duration::from_millis(1));
+                    }
                     pong_send.update(i);
                 }
             }
         });
 
-        for i in 2..10000 {
+        for i in 2..1000 {
+            if random::<bool>() {
+                thread::sleep(Duration::from_millis(1));
+            }
             ping_send.update(i);
 
             let _ = block_on(timeout(
@@ -376,7 +389,7 @@ where
             let pong1_send = pong1_send.clone();
             let pong2_send = pong2_send.clone();
             move || {
-                for i in 2..10000 {
+                for i in 2..1000 {
                     let _ = block_on(timeout(
                         Duration::from_secs(REASONABLE_TIMEOUT_S),
                         ping_recv.wait_until_changed(),
@@ -389,6 +402,9 @@ where
                         panic!();
                     }
 
+                    if random::<bool>() {
+                        thread::sleep(Duration::from_millis(1));
+                    }
                     if i % 2 == 0 {
                         pong1_send.modify_with(|x| *x += 1);
                     } else {
@@ -398,7 +414,10 @@ where
             }
         });
 
-        for i in 2..10000 {
+        for i in 2..1000 {
+            if random::<bool>() {
+                thread::sleep(Duration::from_millis(1));
+            }
             if i % 2 == 0 {
                 ping1_send.modify_with(|x| *x += 1);
             } else {
@@ -436,19 +455,25 @@ where
         let handle = s.spawn({
             let pong_send = pong_send.clone();
             move || {
-                for i in 2..10000 {
+                for i in 2..1000 {
                     let _ = block_on(timeout(
                         Duration::from_secs(REASONABLE_TIMEOUT_S),
                         ping_recv.wait_for(|x| *x == i),
                     ))
                     .unwrap();
 
+                    if random::<bool>() {
+                        thread::sleep(Duration::from_millis(1));
+                    }
                     pong_send.update(i);
                 }
             }
         });
 
-        for i in 2..10000 {
+        for i in 2..1000 {
+            if random::<bool>() {
+                thread::sleep(Duration::from_millis(1));
+            }
             ping_send.update(i);
 
             let _ = block_on(timeout(
@@ -476,7 +501,10 @@ where
         let handle = s.spawn({
             let pong_send = pong_send.clone();
             move || {
-                for i in 2..10000 {
+                if random::<bool>() {
+                    thread::sleep(Duration::from_millis(1));
+                }
+                for i in 2..1000 {
                     let _ = block_on(timeout(
                         Duration::from_secs(REASONABLE_TIMEOUT_S),
                         ping_recv.wait_for(|x| *x == 2 * i),
@@ -488,7 +516,10 @@ where
             }
         });
 
-        for i in 2..10000 {
+        for i in 2..1000 {
+            if random::<bool>() {
+                thread::sleep(Duration::from_millis(1));
+            }
             ping_send.update(i);
 
             let _ = block_on(timeout(
@@ -523,13 +554,16 @@ where
             let pong1_send = pong1_send.clone();
             let pong2_send = pong2_send.clone();
             move || {
-                for i in 2..10000 {
+                for i in 2..1000 {
                     let _ = block_on(timeout(
                         Duration::from_secs(REASONABLE_TIMEOUT_S),
                         ping_recv.wait_for(|x| *x == i),
                     ))
                     .unwrap();
 
+                    if random::<bool>() {
+                        thread::sleep(Duration::from_millis(1));
+                    }
                     if i % 2 == 0 {
                         pong1_send.modify_with(|x| *x += 1);
                     } else {
@@ -539,7 +573,10 @@ where
             }
         });
 
-        for i in 2..10000 {
+        for i in 2..1000 {
+            if random::<bool>() {
+                thread::sleep(Duration::from_millis(1));
+            }
             if i % 2 == 0 {
                 ping1_send.modify_with(|x| *x += 1);
             } else {

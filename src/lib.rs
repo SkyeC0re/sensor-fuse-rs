@@ -74,6 +74,7 @@ use core::{
     sync::atomic::{AtomicUsize, Ordering},
     task::{Poll, Waker},
 };
+use derived_deref::{Deref, DerefMut};
 use executor::{ExecManager, ExecRegister};
 use std::marker::PhantomData;
 
@@ -387,6 +388,12 @@ pub trait SensorObserve {
     }
 }
 
+#[repr(transparent)]
+#[derive(Deref, DerefMut)]
+struct SendSafe<T>(T);
+
+unsafe impl<T> Send for SendSafe<T> {}
+
 struct WaitForFut<
     'a,
     R: SensorObserveAsync + ?Sized,
@@ -396,7 +403,7 @@ struct WaitForFut<
 > where
     R::Lock: 'a,
 {
-    observer: *mut R,
+    observer: SendSafe<*mut R>,
     condition: C,
     wait_changed_generator: G,
     wait_changed: Option<F>,
@@ -428,12 +435,12 @@ impl<
         }
 
         loop {
-            let guard = unsafe { (*s.observer).pull() };
+            let guard = unsafe { (**s.observer).pull() };
             if (s.condition)(&guard) {
                 // Should get compiled into a value assignment.
                 return Poll::Ready(if s.is_closed { Err(guard) } else { Ok(guard) });
             }
-            let mut future = (s.wait_changed_generator)(unsafe { &mut *s.observer });
+            let mut future = (s.wait_changed_generator)(unsafe { &mut **s.observer });
             if let Poll::Ready(res) = pin!(&mut future).poll(cx) {
                 // Should get compiled into a value assignment.
                 s.is_closed = if res.is_err() { true } else { false };
@@ -461,7 +468,7 @@ pub trait SensorObserveAsync: SensorObserve {
         condition: F,
     ) -> impl Future<Output = SymResult<<Self::Lock as ReadGuardSpecifier>::ReadGuard<'_>>> {
         return WaitForFut {
-            observer: self,
+            observer: SendSafe(self),
             condition,
             is_closed: self.is_locally_closed(),
             wait_changed_generator: |r| Self::wait_until_changed(r),
