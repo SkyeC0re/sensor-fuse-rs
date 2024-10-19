@@ -18,6 +18,7 @@ use tokio::{
 #[derive(Default)]
 struct ContentionData {
     test_version: usize,
+    data_version: usize,
     individual_writes_required: usize,
     writers_completed: usize,
     individual_observations_required: usize,
@@ -42,11 +43,21 @@ impl WatchContentionEnvironment {
             reader_handles.push(runtime.spawn(async move {
                 let mut test_version = 0;
                 let mut observations = 0;
+                let mut last_observed_data = 0;
                 loop {
                     let mut iteration = 0;
                     let guard = reader
                         .wait_for(|state| {
-                            let mut ret = state.test_version == usize::MAX || iteration > 1;
+                            if state.test_version == usize::MAX {
+                                return true;
+                            }
+
+                            if iteration > 0 && last_observed_data == state.data_version {
+                                return false;
+                            }
+
+                            last_observed_data = state.data_version;
+                            let mut ret = iteration > 1;
 
                             if iteration == 1 {
                                 ret |= random::<bool>();
@@ -85,6 +96,7 @@ impl WatchContentionEnvironment {
                 let mut writes = 0;
                 loop {
                     writer.send_modify(|state| {
+                        state.data_version = state.data_version.wrapping_add(1);
                         if test_version != state.test_version {
                             writes = 0;
                             test_version = state.test_version;
@@ -96,6 +108,11 @@ impl WatchContentionEnvironment {
                                 state.writers_completed += 1;
                             }
                         }
+                    });
+
+                    // spin_sleep::sleep(Duration::from_micros(10));
+                    black_box(for _ in 0..100 {
+                        std::hint::spin_loop();
                     });
 
                     if test_version == usize::MAX {
@@ -209,11 +226,21 @@ where
             reader_handles.push(runtime.spawn(async move {
                 let mut test_version = 0;
                 let mut observations = 0;
+                let mut last_observed_data = 0;
                 loop {
                     let mut iteration = 0;
                     let guard = match reader
                         .wait_for(|state| {
-                            let mut ret = state.test_version == usize::MAX || iteration > 1;
+                            if state.test_version == usize::MAX {
+                                return true;
+                            }
+
+                            if iteration > 0 && last_observed_data == state.data_version {
+                                return false;
+                            }
+
+                            last_observed_data = state.data_version;
+                            let mut ret = iteration > 1;
 
                             if iteration == 1 {
                                 ret |= random::<bool>();
@@ -255,6 +282,7 @@ where
                 let mut writes = 0;
                 loop {
                     writer.modify_with(|state| {
+                        state.data_version = state.data_version.wrapping_add(1);
                         if test_version != state.test_version {
                             writes = 0;
                             test_version = state.test_version;
@@ -266,6 +294,11 @@ where
                                 state.writers_completed += 1;
                             }
                         }
+                    });
+
+                    // spin_sleep::sleep(Duration::from_micros(10));
+                    black_box(for _ in 0..100 {
+                        std::hint::spin_loop();
                     });
 
                     if test_version == usize::MAX {
@@ -354,7 +387,7 @@ fn pl_rw_write(c: &mut Criterion) {
 }
 
 fn pl_rw_low_contention_write(c: &mut Criterion) {
-    let env = ContentionEnvironment::<pl::ArcRwSensorDataExec<ContentionData>, _>::new(5, 5);
+    let env = ContentionEnvironment::<pl::ArcRwSensorDataExec<ContentionData>, _>::new(15, 7);
 
     c.bench_function("pl_r5_w5_2000_write", |b| {
         b.iter(|| {
@@ -374,7 +407,7 @@ fn ss_rw_write(c: &mut Criterion) {
 }
 
 fn ss_rw_low_contention_write(c: &mut Criterion) {
-    let env = ContentionEnvironment::<ss::ArcRwSensorDataExec<ContentionData>, _>::new(5, 5);
+    let env = ContentionEnvironment::<ss::ArcRwSensorDataExec<ContentionData>, _>::new(15, 7);
 
     c.bench_function("ss_r5_w5_2000_write", |b| {
         b.iter(|| {
@@ -394,7 +427,7 @@ fn tw_write(c: &mut Criterion) {
 }
 
 fn tw_low_contention_write(c: &mut Criterion) {
-    let env = WatchContentionEnvironment::new(5, 5);
+    let env = WatchContentionEnvironment::new(15, 7);
 
     c.bench_function("tw_r5_w5_2000_write", |b| {
         b.iter(|| {
@@ -414,7 +447,7 @@ fn pl_rw_observation(c: &mut Criterion) {
 }
 
 fn pl_rw_low_contention_observation(c: &mut Criterion) {
-    let env = ContentionEnvironment::<pl::ArcRwSensorDataExec<ContentionData>, _>::new(5, 5);
+    let env = ContentionEnvironment::<pl::ArcRwSensorDataExec<ContentionData>, _>::new(15, 7);
 
     c.bench_function("pl_r5_w5_2000_observation", |b| {
         b.iter(|| {
@@ -434,7 +467,7 @@ fn ss_rw_observation(c: &mut Criterion) {
 }
 
 fn ss_rw_low_contention_observation(c: &mut Criterion) {
-    let env = ContentionEnvironment::<ss::ArcRwSensorDataExec<ContentionData>, _>::new(5, 5);
+    let env = ContentionEnvironment::<ss::ArcRwSensorDataExec<ContentionData>, _>::new(15, 7);
 
     c.bench_function("ss_r5_w5_2000_observation", |b| {
         b.iter(|| {
@@ -454,7 +487,7 @@ fn tw_observation(c: &mut Criterion) {
 }
 
 fn tw_low_contention_observation(c: &mut Criterion) {
-    let env = WatchContentionEnvironment::new(5, 5);
+    let env = WatchContentionEnvironment::new(15, 7);
 
     c.bench_function("tw_r5_w5_2000_observation", |b| {
         b.iter(|| {
@@ -465,15 +498,15 @@ fn tw_low_contention_observation(c: &mut Criterion) {
 
 criterion_group!(
     benches,
-    pl_rw_write,
-    ss_rw_write,
-    tw_write,
+    // pl_rw_write,
+    // ss_rw_write,
+    // tw_write,
     pl_rw_low_contention_write,
     ss_rw_low_contention_write,
     tw_low_contention_write,
-    pl_rw_observation,
-    ss_rw_observation,
-    tw_observation,
+    // pl_rw_observation,
+    // ss_rw_observation,
+    // tw_observation,
     pl_rw_low_contention_observation,
     ss_rw_low_contention_observation,
     tw_low_contention_observation,

@@ -3,11 +3,96 @@ extern crate alloc;
 use alloc::{boxed::Box, vec::Vec};
 use core::{ptr, task::Waker};
 use parking_lot::Mutex;
-use std::{cell::UnsafeCell, mem};
+use std::{
+    cell::UnsafeCell,
+    hint::{black_box, spin_loop},
+    marker::PhantomData,
+    mem,
+    ptr::null_mut,
+    sync::atomic::{AtomicPtr, AtomicUsize, Ordering},
+};
 
 use crate::lock::DataWriteLock;
 
 use super::{BoxedFn, ExecManager, ExecRegister};
+
+const LOCKED_BIT: usize = 1;
+
+struct WakerList {
+    head: AtomicPtr<WakerNode>,
+}
+
+impl WakerList {
+    const fn new() -> Self {
+        Self {
+            head: AtomicPtr::new(null_mut()),
+        }
+    }
+
+    fn add_waker(&self, w: Waker) {
+        let node = Box::into_raw(Box::new(WakerNode {
+            waker: w,
+            next_ptr: AtomicUsize::new(LOCKED_BIT),
+        }));
+
+        let prev_head = self.head.swap(node, Ordering::Relaxed);
+        let _ = unsafe { (*node).next_ptr.swap(prev_head as usize, Ordering::Release) };
+    }
+
+    fn drain(&self) -> WakerListDrain {
+        let curr = self.head.swap(null_mut(), Ordering::Relaxed);
+        WakerListDrain { curr }
+    }
+}
+
+impl Drop for WakerList {
+    fn drop(&mut self) {
+        self.drain();
+    }
+}
+
+struct WakerListDrain {
+    curr: *mut WakerNode,
+}
+
+impl Iterator for WakerListDrain {
+    type Item = Waker;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.curr == null_mut() {
+            return None;
+        }
+
+        let curr_box = unsafe { Box::from_raw(self.curr) };
+
+        let mut next: usize;
+        loop {
+            next = curr_box.next_ptr.load(Ordering::Acquire);
+            if next != LOCKED_BIT {
+                break;
+            }
+            spin_loop();
+        }
+
+        let waker = Some(curr_box.waker);
+        self.curr = next as *mut WakerNode;
+
+        waker
+    }
+}
+
+impl Drop for WakerListDrain {
+    fn drop(&mut self) {
+        for waker in self {
+            drop(waker);
+        }
+    }
+}
+
+struct WakerNode {
+    waker: Waker,
+    next_ptr: AtomicUsize,
+}
 
 struct Data<T> {
     callbacks_in: Vec<Box<dyn Send + FnMut(&T) -> bool>>,
@@ -31,7 +116,8 @@ impl<T> Data<T> {
 /// Standard executor that supports registration of functions and wakers.
 pub struct StdExec<T> {
     registration_mtx: Mutex<()>,
-    data: UnsafeCell<Data<T>>,
+    wakers: WakerList,
+    _types: PhantomData<T>,
 }
 
 unsafe impl<T> Sync for StdExec<T> where T: Send {}
@@ -43,7 +129,8 @@ impl<T> StdExec<T> {
     pub const fn new() -> Self {
         Self {
             registration_mtx: Mutex::new(()),
-            data: UnsafeCell::new(Data::new()),
+            wakers: WakerList::new(),
+            _types: PhantomData,
         }
     }
 
@@ -54,41 +141,25 @@ impl<T> StdExec<T> {
     ) where
         L: 'a,
     {
-        let Data {
-            callbacks_in,
-            callbacks_out,
-            wakers_in,
-            wakers_out,
-        } = &mut *self.data.get();
-
-        let guard = self.registration_mtx.lock();
-        for callback in callbacks_in.drain(..) {
-            callbacks_out.push(callback);
-        }
-        mem::swap(wakers_in, wakers_out);
-        let value = commit();
-        drop(guard);
-        // TODO Atomic downgrading causes significant slowdown.
-        // let value = L::atomic_downgrade(value);
-
-        for waker in (wakers_out).drain(..) {
+        let _ = commit();
+        for waker in self.wakers.drain() {
             waker.wake();
         }
 
-        let mut i = 0;
-        let mut len = callbacks_out.len();
-        let ptr_slice = callbacks_out.as_ptr().cast_mut();
-        while i < len {
-            let func = ptr_slice.add(i);
-            if (*func)(&value) {
-                i += 1;
-            } else {
-                len -= 1;
-                ptr::swap(func, ptr_slice.add(len));
-            }
-        }
+        // let mut i = 0;
+        // let mut len = callbacks_out.len();
+        // let ptr_slice = callbacks_out.as_ptr().cast_mut();
+        // while i < len {
+        //     let func = ptr_slice.add(i);
+        //     if (*func)(&value) {
+        //         i += 1;
+        //     } else {
+        //         len -= 1;
+        //         ptr::swap(func, ptr_slice.add(len));
+        //     }
+        // }
 
-        callbacks_out.truncate(len);
+        // callbacks_out.truncate(len);
     }
 }
 
@@ -114,12 +185,7 @@ where
     fn register<C: FnOnce() -> Option<Box<F>>>(&self, condition: C) -> bool {
         let guard = self.registration_mtx.lock();
         let res = match condition() {
-            Some(f) => {
-                unsafe {
-                    (*self.data.get()).callbacks_in.push(f);
-                }
-                true
-            }
+            Some(f) => true,
             None => false,
         };
         drop(guard);
@@ -132,12 +198,7 @@ impl<T> ExecRegister<BoxedFn<T>> for StdExec<T> {
     fn register<C: FnOnce() -> Option<BoxedFn<T>>>(&self, condition: C) -> bool {
         let guard = self.registration_mtx.lock();
         let res = match condition() {
-            Some(f) => {
-                unsafe {
-                    (*self.data.get()).callbacks_in.push(f);
-                }
-                true
-            }
+            Some(f) => true,
             None => false,
         };
         drop(guard);
@@ -151,9 +212,7 @@ impl<'a, T> ExecRegister<&'a Waker> for StdExec<T> {
         let guard = self.registration_mtx.lock();
         let res = match condition() {
             Some(w) => {
-                unsafe {
-                    (*self.data.get()).wakers_in.push(w.clone());
-                }
+                self.wakers.add_waker(w.clone());
                 true
             }
             None => false,
