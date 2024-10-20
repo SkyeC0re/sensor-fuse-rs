@@ -1,6 +1,6 @@
-pub mod parking_lot;
-#[cfg(feature = "std")]
-pub mod std_sync;
+// pub mod parking_lot;
+// #[cfg(feature = "std")]
+// pub mod std_sync;
 
 use core::{
     marker::PhantomData,
