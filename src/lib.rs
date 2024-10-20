@@ -63,6 +63,7 @@ extern crate alloc;
 pub mod executor;
 pub mod lock;
 pub mod prelude;
+pub mod sensor_core;
 
 #[cfg(feature = "alloc")]
 use alloc::sync::Arc;

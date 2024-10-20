@@ -7,6 +7,10 @@ use core::{
     ops::{Deref, DerefMut},
 };
 use derived_deref::{Deref, DerefMut};
+use std::{
+    future::{poll_fn, Future},
+    pin::pin,
+};
 
 pub trait ReadGuardSpecifier {
     /// The underlying type that the guard is protecting.
