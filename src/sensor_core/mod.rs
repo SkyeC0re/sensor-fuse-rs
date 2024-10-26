@@ -60,23 +60,33 @@ pub trait SensorCoreAsync: SensorCore {
     }
 
     #[inline]
-    fn wait_for<C: FnMut(&Self::Target) -> bool>(
-        &self,
+    fn wait_for_and_map<'a, O, C: FnMut(Self::ReadGuard<'a>) -> SymResult<O>>(
+        &'a self,
         mut condition: C,
         mut reference_version: Option<usize>,
-    ) -> impl Future<Output = (SymResult<Self::ReadGuard<'_>>, usize)> {
+    ) -> impl Future<Output = (SymResult<O>, usize)> {
         async move {
             loop {
                 if let Some(version) = reference_version {
                     match self.wait_changed(version).await {
                         Ok(latest_version) => reference_version = Some(latest_version),
-                        Err(latest_version) => return (Err(self.read().await), latest_version),
+                        Err(latest_version) => {
+                            let guard = self.read().await;
+                            let mapped = match condition(guard) {
+                                Ok(v) => v,
+                                Err(v) => v,
+                            };
+                            return (Err(mapped), latest_version);
+                        }
                     }
+                } else {
+                    reference_version = Some(self.version());
                 }
 
                 let guard = self.read().await;
-                if condition(&guard) {
-                    return (Ok(guard), unsafe { reference_version.unwrap_unchecked() });
+                let res = condition(guard);
+                if res.is_ok() {
+                    return (res, unsafe { reference_version.unwrap_unchecked() });
                 }
             }
         }

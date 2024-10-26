@@ -77,13 +77,19 @@ use core::{
 };
 use derived_deref::{Deref, DerefMut};
 use executor::ExecManager;
-use futures::{future::Select, FutureExt};
+use futures::{future::Select, select, FutureExt};
 use sensor_core::{SensorCore, SensorCoreAsync};
 use std::marker::PhantomData;
 
 use crate::lock::{DataReadLock, DataWriteLock, OwnedData, OwnedFalseLock, ReadGuardSpecifier};
 
 pub type SymResult<T> = Result<T, T>;
+
+pub enum SensorStatus {
+    Changed,
+    ChangedClosed,
+    Closed,
+}
 
 /*** Sensor State ***/
 
@@ -152,25 +158,25 @@ where
 }
 
 /// QOL trait to encapsulate sensor observer's data wrapper, locking strategy and executor type.
-pub trait DerefSensorData: Deref<Target = RawSensorData<Self::Core, Self::Executor>> {
-    /// The data type that the sensor stores.
-    type Target;
-    /// The locking mechanism for the sensor's data.
-    type Core: SensorCore<Target = <Self as DerefSensorData>::Target>;
-    /// The executor associated with the sensor.
-    type Executor: ExecManager<<Self as DerefSensorData>::Target>;
-}
+// pub trait DerefSensorData: Deref<Target = RawSensorData<Self::Core, Self::Executor>> {
+//     /// The data type that the sensor stores.
+//     type Target;
+//     /// The locking mechanism for the sensor's data.
+//     type Core: SensorCore<Target = <Self as DerefSensorData>::Target>;
+//     /// The executor associated with the sensor.
+//     type Executor: ExecManager<<Self as DerefSensorData>::Target>;
+// }
 
-impl<C, E, R> DerefSensorData for R
-where
-    C: SensorCore,
-    E: ExecManager<C::Target>,
-    R: Deref<Target = RawSensorData<C, E>>,
-{
-    type Target = C::Target;
-    type Core = C;
-    type Executor = E;
-}
+// impl<C, E, R> DerefSensorData for R
+// where
+//     C: SensorCore,
+//     E: ExecManager<C::Target>,
+//     R: Deref<Target = RawSensorData<C, E>>,
+// {
+//     type Target = C::Target;
+//     type Core = C;
+//     type Executor = E;
+// }
 
 #[cfg(feature = "alloc")]
 impl<'a, C, E> ShareStrategy<'a> for &'a Arc<RawSensorData<C, E>>
@@ -227,104 +233,104 @@ where
     }
 }
 
-impl<T, S> Drop for SensorWriter<T, S>
-where
-    for<'a> &'a S: ShareStrategy<'a, Target = T>,
-{
-    fn drop(&mut self) {
-        let data = <&S as ShareStrategy<'_>>::share_elided_ref(&self.0);
-        if data.writers.fetch_sub(1, Ordering::Relaxed) == 1 {
-            let _ = data.version.fetch_or(CLOSED_BIT, Ordering::Release);
-        }
-    }
-}
+// impl<T, S> Drop for SensorWriter<T, S>
+// where
+//     for<'a> &'a S: ShareStrategy<'a, Target = T>,
+// {
+//     fn drop(&mut self) {
+//         let data = <&S as ShareStrategy<'_>>::share_elided_ref(&self.0);
+//         if data.writers.fetch_sub(1, Ordering::Relaxed) == 1 {
+//             let _ = data.version.fetch_or(CLOSED_BIT, Ordering::Release);
+//         }
+//     }
+// }
 
-impl<T, S> Clone for SensorWriter<T, S>
-where
-    S: Clone,
-    for<'a> &'a S: ShareStrategy<'a, Target = T>,
-{
-    fn clone(&self) -> Self {
-        let _ = self
-            .0
-            .share_elided_ref()
-            .writers
-            .fetch_add(1, Ordering::Relaxed);
-        Self(self.0.clone())
-    }
-}
+// impl<T, S> Clone for SensorWriter<T, S>
+// where
+//     S: Clone,
+//     for<'a> &'a S: ShareStrategy<'a, Target = T>,
+// {
+//     fn clone(&self) -> Self {
+//         let _ = self
+//             .0
+//             .share_elided_ref()
+//             .writers
+//             .fetch_add(1, Ordering::Relaxed);
+//         Self(self.0.clone())
+//     }
+// }
 
-impl<T, S> SensorWriter<T, S>
-where
-    for<'a> &'a S: ShareStrategy<'a, Target = T>,
-{
-    /// Acquire a read lock on the underlying data.
-    #[inline(always)]
-    pub fn read(&self) -> <<&S as ShareStrategy<'_>>::Core as SensorCore>::ReadGuard<'_> {
-        self.0.share_elided_ref().lock.read()
-    }
+// impl<T, S> SensorWriter<T, S>
+// where
+//     for<'a> &'a S: ShareStrategy<'a, Target = T>,
+// {
+//     /// Acquire a read lock on the underlying data.
+//     #[inline(always)]
+//     pub fn read(&self) -> <<&S as ShareStrategy<'_>>::Core as SensorCore>::ReadGuard<'_> {
+//         self.0.share_elided_ref().lock.read()
+//     }
 
-    /// Acquire a write lock on the underlying data.
-    #[inline(always)]
-    pub fn write(&self) -> <<&S as ShareStrategy<'_>>::Core as SensorCore>::WriteGuard<'_> {
-        self.0.share_elided_ref().lock.write()
-    }
+//     /// Acquire a write lock on the underlying data.
+//     #[inline(always)]
+//     pub fn write(&self) -> <<&S as ShareStrategy<'_>>::Core as SensorCore>::WriteGuard<'_> {
+//         self.0.share_elided_ref().lock.write()
+//     }
 
-    /// Update the sensor value, notify observers and execute all registered callbacks.
-    #[inline(always)]
-    pub fn update(&self, sample: T) {
-        self.modify_with(|v| *v = sample)
-    }
+//     /// Update the sensor value, notify observers and execute all registered callbacks.
+//     #[inline(always)]
+//     pub fn update(&self, sample: T) {
+//         self.modify_with(|v| *v = sample)
+//     }
 
-    /// Modify the sensor value in place, notify observers and execute all registered callbacks.
-    #[inline]
-    pub fn modify_with(&self, f: impl FnOnce(&mut T)) {
-        let sensor_state = self.0.share_elided_ref();
-        let mut guard = sensor_state.lock.write();
+//     /// Modify the sensor value in place, notify observers and execute all registered callbacks.
+//     #[inline]
+//     pub fn modify_with(&self, f: impl FnOnce(&mut T)) {
+//         let sensor_state = self.0.share_elided_ref();
+//         let mut guard = sensor_state.lock.write();
 
-        // Atomic downgrade just occurred. No other modification can happen.
-        sensor_state.executor.execute(|| {
-            f(&mut guard);
-            let _ = sensor_state.version.fetch_add(STEP_SIZE, Ordering::Release);
-            guard
-        });
-    }
+//         // Atomic downgrade just occurred. No other modification can happen.
+//         sensor_state.executor.execute(|| {
+//             f(&mut guard);
+//             let _ = sensor_state.version.fetch_add(STEP_SIZE, Ordering::Release);
+//             guard
+//         });
+//     }
 
-    /// Mark the current sensor value as unseen to all observers, notify them and execute all registered callbacks.
-    #[inline(always)]
-    pub fn mark_all_unseen(&self) {
-        self.modify_with(|_| ())
-    }
+//     /// Mark the current sensor value as unseen to all observers, notify them and execute all registered callbacks.
+//     #[inline(always)]
+//     pub fn mark_all_unseen(&self) {
+//         self.modify_with(|_| ())
+//     }
 
-    /// Spawn an observer by immutably borrowing the sensor writer's data. By definition this observer's scope will be limited
-    /// by the scope of the writer.
-    #[inline(always)]
-    pub fn spawn_referenced_observer(
-        &self,
-    ) -> SensorObserver<
-        T,
-        &'_ RawSensorData<<&S as ShareStrategy<'_>>::Core, <&S as ShareStrategy<'_>>::Executor>,
-    > {
-        let inner = self.0.share_elided_ref();
-        let _ = inner.observers.fetch_add(1, Ordering::Relaxed);
-        SensorObserver {
-            inner,
-            version: UnsafeCell::new(inner.version.load(Ordering::Acquire)),
-        }
-    }
+//     /// Spawn an observer by immutably borrowing the sensor writer's data. By definition this observer's scope will be limited
+//     /// by the scope of the writer.
+//     #[inline(always)]
+//     pub fn spawn_referenced_observer(
+//         &self,
+//     ) -> SensorObserver<
+//         T,
+//         &'_ RawSensorData<<&S as ShareStrategy<'_>>::Core, <&S as ShareStrategy<'_>>::Executor>,
+//     > {
+//         let inner = self.0.share_elided_ref();
+//         let _ = inner.observers.fetch_add(1, Ordering::Relaxed);
+//         SensorObserver {
+//             inner,
+//             version: UnsafeCell::new(inner.version.load(Ordering::Acquire)),
+//         }
+//     }
 
-    /// Spawn an observer by leveraging the sensor writer's sharing strategy. May allow the observer
-    /// to outlive the sensor writer for an appropriate sharing strategy (such as if the writer wraps its data in an `Arc`).
-    #[inline(always)]
-    pub fn spawn_observer(&self) -> SensorObserver<T, <&'_ S as ShareStrategy>::Shared> {
-        let inner = self.0.share_data();
-        let _ = inner.observers.fetch_add(1, Ordering::Relaxed);
-        SensorObserver {
-            version: UnsafeCell::new(inner.version.load(Ordering::Acquire)),
-            inner,
-        }
-    }
-}
+//     /// Spawn an observer by leveraging the sensor writer's sharing strategy. May allow the observer
+//     /// to outlive the sensor writer for an appropriate sharing strategy (such as if the writer wraps its data in an `Arc`).
+//     #[inline(always)]
+//     pub fn spawn_observer(&self) -> SensorObserver<T, <&'_ S as ShareStrategy>::Shared> {
+//         let inner = self.0.share_data();
+//         let _ = inner.observers.fetch_add(1, Ordering::Relaxed);
+//         SensorObserver {
+//             version: UnsafeCell::new(inner.version.load(Ordering::Acquire)),
+//             inner,
+//         }
+//     }
+// }
 
 /*** Sensor Observation ***/
 
@@ -384,83 +390,117 @@ pub trait SensorObserveAsync: SensorObserve {
     /// as such an additional call to `pull` or `pull_updated` is required.
     fn wait_until_changed(&mut self) -> impl Future<Output = SymResult<()>>;
 
+    fn wait_for_and_map<'a, O, M: FnMut(Self::ReadGuard<'a>) -> SymResult<O>>(
+        &'a mut self,
+        condition_map: M,
+    ) -> impl Future<Output = SymResult<O>>
+    where
+        Self: 'a;
+
     /// Asynchronously wait until the sensor value has been updated with a value that satisfies a condition. This call **will** update the observer's version
     /// and evaluate the condition function on values obtained by `pull_updated`.
-    fn wait_for<'a, C: 'a>(
-        &'a mut self,
-        condition: C,
-    ) -> impl Future<Output = SymResult<Self::ReadGuard<'a>>>
-    where
-        for<'b> C: FnMut(&'b Self::Target) -> bool;
+    fn wait_for<F: FnMut(&Self::Target) -> bool>(
+        &mut self,
+        mut condition: F,
+    ) -> impl Future<Output = SymResult<Self::ReadGuard<'_>>> {
+        self.wait_for_and_map(move |guard| {
+            if condition(&guard) {
+                Ok(guard)
+            } else {
+                Err(guard)
+            }
+        })
+    }
 }
 
 /// The generalized sensor observer.
-pub struct SensorObserver<T, R>
+pub struct SensorObserver<T, C, R>
 where
-    R: DerefSensorData<Target = T>,
+    C: SensorCore<Target = T>,
+    R: Deref<Target = C>,
 {
     inner: R,
     version: UnsafeCell<usize>,
 }
 
-impl<T, R> SensorObserve for SensorObserver<T, R>
+impl<T, C, R> SensorObserve for SensorObserver<T, C, R>
 where
-    R: DerefSensorData<Target = T>,
+    C: SensorCore<Target = T>,
+    R: Deref<Target = C>,
 {
     type Target = T;
-    type ReadGuard<'read> = <R::Core as SensorCore>::ReadGuard<'read> where Self: 'read;
+    type ReadGuard<'read> = C::ReadGuard<'read> where Self: 'read;
 
     #[inline(always)]
     fn mark_seen(&mut self) {
-        *self.version.get_mut() = self.inner.core.version();
+        *self.version.get_mut() = self.inner.version();
     }
 
     #[inline(always)]
     fn mark_unseen(&mut self) {
-        *self.version.get_mut() = self.inner.core.version().wrapping_sub(STEP_SIZE);
+        *self.version.get_mut() = self.inner.version().wrapping_sub(STEP_SIZE);
     }
 
     #[inline(always)]
     fn has_changed(&self) -> bool {
-        self.inner.core.version() != unsafe { *self.version.get() }
+        self.inner.version() != unsafe { *self.version.get() }
     }
 
     #[inline(always)]
     fn is_closed(&self) -> bool {
-        self.inner.core.version() & CLOSED_BIT > 0
+        self.inner.version() & CLOSED_BIT > 0
     }
 }
 
-impl<T, R> SensorObserveAsync for SensorObserver<T, R>
+impl<T, C, R> SensorObserveAsync for SensorObserver<T, C, R>
 where
-    R: DerefSensorData<Target = T>,
-    R::Core: SensorCoreAsync,
+    C: SensorCoreAsync<Target = T> + SensorObserve<Target = T>,
+    R: Deref<Target = C>,
 {
     fn read(&self) -> impl Future<Output = Self::ReadGuard<'_>> {
-        self.inner.core.read()
+        self.inner.read()
     }
 
     fn wait_until_changed(&mut self) -> impl Future<Output = SymResult<()>> {
         FutureExt::map(
-            self.inner.core.wait_changed(unsafe { *self.version.get() }),
+            self.inner.wait_changed(unsafe { *self.version.get() }),
             |res| if res.is_ok() { Ok(()) } else { Err(()) },
         )
     }
 
-    fn wait_for<'a, C: 'a>(
+    fn wait_for_and_map<'a, O, M: FnMut(Self::ReadGuard<'a>) -> SymResult<O>>(
         &'a mut self,
-        condition: C,
-    ) -> impl Future<Output = SymResult<Self::ReadGuard<'a>>>
-    where
-        for<'b> C: FnMut(&'b Self::Target) -> bool,
-    {
-        FutureExt::map(
-            self.inner.core.wait_for(condition, None),
-            |(res, latest_version)| {
-                *self.version.get_mut() = latest_version;
-                res
-            },
-        )
+        mut condition_map: M,
+    ) -> impl Future<Output = SymResult<O>> {
+        async move {
+            let mut reference_version = None;
+            // let SensorObserver { inner, version: my_version } = self;
+            loop {
+                if let Some(latest_version) = reference_version {
+                    match self.inner.wait_changed(latest_version).await {
+                        Ok(latest_version) => reference_version = Some(latest_version),
+                        Err(latest_version) => {
+                            *self.version.get_mut() = latest_version;
+                            let guard = self.read().await;
+                            let mapped = match condition_map(guard) {
+                                Ok(v) => v,
+                                Err(v) => v,
+                            };
+                            return Err(mapped);
+                        }
+                    }
+                } else {
+                    reference_version = Some(self.inner.version());
+                }
+
+                let guard = self.inner.read().await;
+                let res = condition_map(guard);
+                if res.is_ok() {
+                    *self.version.get_mut() = unsafe { reference_version.unwrap_unchecked() };
+                    return res;
+                }
+            }
+        }
     }
 }
 
@@ -532,28 +572,49 @@ where
         self.inner.wait_until_changed()
     }
 
-    fn wait_for<'a, C: 'a>(
+    fn wait_for_and_map<'a, O, M: FnMut(Self::ReadGuard<'a>) -> SymResult<O>>(
         &'a mut self,
-        condition: C,
-    ) -> impl Future<Output = SymResult<Self::ReadGuard<'_>>>
+        mut condition_map: M,
+    ) -> impl Future<Output = SymResult<O>>
     where
-        for<'b> C: FnMut(&'b Self::Target) -> bool,
+        Self: 'a,
     {
-        let mut latest_value;
-        FutureExt::map(
-            self.inner.wait_for(|inner_val| {
-                latest_value = OwnedData((self.map.get_mut())(inner_val));
-                condition(&latest_value)
-            }),
-            |res| {
-                if res.is_ok() {
-                    Ok(latest_value)
-                } else {
-                    Err(latest_value)
-                }
-            },
-        )
+        let MappedSensorObserver { inner, map } = self;
+        inner.wait_for_and_map(move |guard| condition_map(OwnedData((map.get_mut())(&guard))))
     }
+
+    // fn wait_for<'a, C: 'a>(
+    //     &'a mut self,
+    //     mut condition: C,
+    // ) -> impl Future<Output = SymResult<Self::ReadGuard<'_>>>
+    // where
+    //     for<'b> C: FnMut(&'b Self::Target) -> bool,
+    // {
+    //     let mut latest_value;
+    //     FutureExt::map(
+    //         self.inner.wait_for(|inner_val| {
+    //             latest_value = OwnedData((self.map.get_mut())(inner_val));
+    //             condition(&latest_value)
+    //         }),
+    //         |res| {
+    //             if res.is_ok() {
+    //                 Ok(latest_value)
+    //             } else {
+    //                 Err(latest_value)
+    //             }
+    //         },
+    //     )
+    // }
+}
+
+struct MappedWaitForFut<'a, A, T, F, C>
+where
+    A: SensorObserveAsync,
+    F: FnMut(&A::Target) -> T,
+    C: FnMut(&'a A::Target) -> bool,
+{
+    s: &'a mut MappedSensorObserver<A, T, F>,
+    condition: C,
 }
 
 /// A fused sensor observer.
@@ -619,36 +680,49 @@ where
     }
 }
 
-impl<A, B, T, F> SensorObserveAsync for FusedSensorObserver<A, B, T, F>
-where
-    A: SensorObserve + SensorObserveAsync,
-    B: SensorObserve + SensorObserveAsync,
-    F: FnMut(&A::Target, &B::Target) -> T,
-{
-    fn wait_until_changed(&mut self) -> impl Future<Output = SymResult<()>> {
-        // let mut a = self.a.wait_until_changed();
-        // let mut b = self.b.wait_until_changed();
-        // poll_fn(move |cx| {
-        //     if let Poll::Ready(res) = pin!(&mut a).poll(cx) {
-        //         return Poll::Ready(res);
-        //     }
-        //     if let Poll::Ready(res) = pin!(&mut b).poll(cx) {
-        //         return Poll::Ready(res);
-        //     }
+struct FusedWaitChanged<A: Future<Output = SymResult<()>>, B: Future<Output = SymResult<()>>> {
+    a: A,
+    b: B,
+}
 
-        //     return Poll::Pending;
-        // })
-        todo!()
-    }
+impl<A: Future<Output = SymResult<()>>, B: Future<Output = SymResult<()>>> Future for FusedWaitChanged<A, B> {
+    type Output = SymResult<()>;
 
-    fn read(&self) -> impl Future<Output = Self::ReadGuard<'_>> {
-        todo!()
-    }
+    fn poll(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
+       let s = self.map_unchecked_mut(|s| &mut s.a)
 
-    fn wait_for<'a, C: 'a + FnMut(&'a Self::Target) -> bool>(
-        &'a mut self,
-        condition: C,
-    ) -> impl Future<Output = SymResult<Self::ReadGuard<'_>>> {
-        todo!()
     }
 }
+
+// impl<A, B, T, F> SensorObserveAsync for FusedSensorObserver<A, B, T, F>
+// where
+//     A: SensorObserve + SensorObserveAsync,
+//     B: SensorObserve + SensorObserveAsync,
+//     F: FnMut(&A::Target, &B::Target) -> T,
+// {
+//     fn read(&self) -> impl Future<Output = Self::ReadGuard<'_>> {
+//         async move {
+//             let a = self.a.read().await;
+//             let b = self.b.read().await;
+//             OwnedData(unsafe { (*self.fuse.get())(&*a, &*b) })
+//         }
+//     }
+
+//     fn wait_until_changed(&mut self) -> impl Future<Output = SymResult<()>> {
+//        async move {
+//         let a_fut
+//        }
+//     }
+
+//     fn wait_for_and_map<'a, O, M: FnMut(Self::ReadGuard<'a>) -> SymResult<O>>(
+//         &'a mut self,
+//         condition_map: M,
+//     ) -> impl Future<Output = SymResult<O>> {
+//         async move {
+//             let mut guard_a = self.a.read().await;
+//             let mut guard_b = self.b.read().await;
+
+//             if
+//         }
+//     }
+// }
