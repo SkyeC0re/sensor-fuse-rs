@@ -77,18 +77,62 @@ use core::{
 };
 use derived_deref::{Deref, DerefMut};
 use executor::ExecManager;
-use futures::{future::Select, select, FutureExt};
+use futures::{future::Select, select, task::UnsafeFutureObj, FutureExt};
 use sensor_core::{SensorCore, SensorCoreAsync};
-use std::marker::PhantomData;
+use std::{marker::PhantomData, mem::MaybeUninit, pin::Pin};
 
 use crate::lock::{DataReadLock, DataWriteLock, OwnedData, OwnedFalseLock, ReadGuardSpecifier};
 
 pub type SymResult<T> = Result<T, T>;
 
-pub enum SensorStatus {
-    Changed,
-    ChangedClosed,
-    Closed,
+const STATUS_SUCCESS_BIT: u8 = 1;
+const STATUS_CLOSED_BIT: u8 = 2;
+
+#[repr(transparent)]
+#[derive(Clone)]
+pub struct ObservationStatus(u8);
+
+impl ObservationStatus {
+    #[inline(always)]
+    pub const fn new() -> Self {
+        Self(0)
+    }
+
+    #[inline(always)]
+    pub const fn closed(&self) -> bool {
+        self.0 & STATUS_CLOSED_BIT > 0
+    }
+
+    #[inline(always)]
+    pub const fn success(&self) -> bool {
+        self.0 & STATUS_SUCCESS_BIT > 0
+    }
+
+    #[inline(always)]
+    pub(crate) fn modify_closed(mut self, closed: bool) -> Self {
+        self.0 = self.0 & (!STATUS_CLOSED_BIT);
+        self.0 |= STATUS_CLOSED_BIT & ((closed as u8) << 1);
+        self
+    }
+
+    #[inline(always)]
+    pub(crate) fn modify_success(mut self, success: bool) -> Self {
+        self.0 = self.0 & (!STATUS_SUCCESS_BIT);
+        self.0 |= STATUS_SUCCESS_BIT & success as u8;
+        self
+    }
+
+    #[inline(always)]
+    pub(crate) fn set_closed(mut self) -> Self {
+        self.0 |= STATUS_CLOSED_BIT;
+        self
+    }
+
+    #[inline(always)]
+    pub(crate) fn set_success(mut self) -> Self {
+        self.0 |= STATUS_SUCCESS_BIT;
+        self
+    }
 }
 
 /*** Sensor State ***/
@@ -388,12 +432,12 @@ pub trait SensorObserveAsync: SensorObserve {
 
     /// Asynchronously wait until the sensor value is updated. This call will **not** update the observer's version,
     /// as such an additional call to `pull` or `pull_updated` is required.
-    fn wait_until_changed(&mut self) -> impl Future<Output = SymResult<()>>;
+    fn wait_until_changed(&self) -> impl Future<Output = ObservationStatus>;
 
-    fn wait_for_and_map<'a, O, M: FnMut(Self::ReadGuard<'a>) -> SymResult<O>>(
+    fn wait_for_and_map<'a, O, M: FnMut(Self::ReadGuard<'a>) -> (O, bool)>(
         &'a mut self,
         condition_map: M,
-    ) -> impl Future<Output = SymResult<O>>
+    ) -> impl Future<Output = (O, ObservationStatus)>
     where
         Self: 'a;
 
@@ -402,13 +446,10 @@ pub trait SensorObserveAsync: SensorObserve {
     fn wait_for<F: FnMut(&Self::Target) -> bool>(
         &mut self,
         mut condition: F,
-    ) -> impl Future<Output = SymResult<Self::ReadGuard<'_>>> {
+    ) -> impl Future<Output = (Self::ReadGuard<'_>, ObservationStatus)> {
         self.wait_for_and_map(move |guard| {
-            if condition(&guard) {
-                Ok(guard)
-            } else {
-                Err(guard)
-            }
+            let success = condition(&guard);
+            (guard, success)
         })
     }
 }
@@ -461,45 +502,22 @@ where
         self.inner.read()
     }
 
-    fn wait_until_changed(&mut self) -> impl Future<Output = SymResult<()>> {
+    fn wait_until_changed(&self) -> impl Future<Output = ObservationStatus> {
         FutureExt::map(
             self.inner.wait_changed(unsafe { *self.version.get() }),
-            |res| if res.is_ok() { Ok(()) } else { Err(()) },
+            |(_, status)| status,
         )
     }
 
-    fn wait_for_and_map<'a, O, M: FnMut(Self::ReadGuard<'a>) -> SymResult<O>>(
+    fn wait_for_and_map<'a, O, M: FnMut(Self::ReadGuard<'a>) -> (O, bool)>(
         &'a mut self,
-        mut condition_map: M,
-    ) -> impl Future<Output = SymResult<O>> {
+        condition_map: M,
+    ) -> impl Future<Output = (O, ObservationStatus)> {
         async move {
-            let mut reference_version = None;
-            // let SensorObserver { inner, version: my_version } = self;
-            loop {
-                if let Some(latest_version) = reference_version {
-                    match self.inner.wait_changed(latest_version).await {
-                        Ok(latest_version) => reference_version = Some(latest_version),
-                        Err(latest_version) => {
-                            *self.version.get_mut() = latest_version;
-                            let guard = self.read().await;
-                            let mapped = match condition_map(guard) {
-                                Ok(v) => v,
-                                Err(v) => v,
-                            };
-                            return Err(mapped);
-                        }
-                    }
-                } else {
-                    reference_version = Some(self.inner.version());
-                }
-
-                let guard = self.inner.read().await;
-                let res = condition_map(guard);
-                if res.is_ok() {
-                    *self.version.get_mut() = unsafe { reference_version.unwrap_unchecked() };
-                    return res;
-                }
-            }
+            let (latest_version, mapped, status) =
+                self.inner.wait_for_and_map(condition_map, None).await;
+            *self.version.get_mut() = latest_version;
+            (mapped, status)
         }
     }
 }
@@ -568,14 +586,14 @@ where
         })
     }
 
-    fn wait_until_changed(&mut self) -> impl Future<Output = SymResult<()>> {
+    fn wait_until_changed(&self) -> impl Future<Output = ObservationStatus> {
         self.inner.wait_until_changed()
     }
 
-    fn wait_for_and_map<'a, O, M: FnMut(Self::ReadGuard<'a>) -> SymResult<O>>(
+    fn wait_for_and_map<'a, O, M: FnMut(Self::ReadGuard<'a>) -> (O, bool)>(
         &'a mut self,
         mut condition_map: M,
-    ) -> impl Future<Output = SymResult<O>>
+    ) -> impl Future<Output = (O, ObservationStatus)>
     where
         Self: 'a,
     {
@@ -680,49 +698,103 @@ where
     }
 }
 
-struct FusedWaitChanged<A: Future<Output = SymResult<()>>, B: Future<Output = SymResult<()>>> {
-    a: A,
+struct FusedWaitChanged<
+    A: Future<Output = ObservationStatus>,
+    B: Future<Output = ObservationStatus>,
+    F: Fn() -> bool,
+> {
+    a: MaybeUninit<A>,
+    a_valid: bool,
     b: B,
+    b_closed: F,
 }
 
-impl<A: Future<Output = SymResult<()>>, B: Future<Output = SymResult<()>>> Future for FusedWaitChanged<A, B> {
-    type Output = SymResult<()>;
+impl<
+        A: Future<Output = ObservationStatus>,
+        B: Future<Output = ObservationStatus>,
+        F: Unpin + Fn() -> bool,
+    > Future for FusedWaitChanged<A, B, F>
+{
+    type Output = ObservationStatus;
 
     fn poll(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
-       let s = self.map_unchecked_mut(|s| &mut s.a)
+        let Self {
+            a,
+            a_valid,
+            b,
+            b_closed,
+        } = unsafe { self.get_unchecked_mut() };
 
+        if *a_valid {
+            if let Poll::Ready(status) = unsafe { Pin::new_unchecked(a.assume_init_mut()).poll(cx) }
+            {
+                if status.success() {
+                    let closed = status.closed() && b_closed();
+                    return Poll::Ready(status.modify_closed(closed));
+                }
+
+                unsafe {
+                    a.assume_init_drop();
+                }
+                *a_valid = false;
+            }
+        }
+
+        // From here it is known that `A` is closed, therefore `B`'s result can be propogated without alteration.
+        unsafe { Pin::new_unchecked(b) }.poll(cx)
     }
 }
 
-// impl<A, B, T, F> SensorObserveAsync for FusedSensorObserver<A, B, T, F>
-// where
-//     A: SensorObserve + SensorObserveAsync,
-//     B: SensorObserve + SensorObserveAsync,
-//     F: FnMut(&A::Target, &B::Target) -> T,
-// {
-//     fn read(&self) -> impl Future<Output = Self::ReadGuard<'_>> {
-//         async move {
-//             let a = self.a.read().await;
-//             let b = self.b.read().await;
-//             OwnedData(unsafe { (*self.fuse.get())(&*a, &*b) })
-//         }
-//     }
+impl<A, B, T, F> SensorObserveAsync for FusedSensorObserver<A, B, T, F>
+where
+    A: SensorObserve + SensorObserveAsync,
+    B: SensorObserve + SensorObserveAsync,
+    F: FnMut(&A::Target, &B::Target) -> T,
+{
+    fn read(&self) -> impl Future<Output = Self::ReadGuard<'_>> {
+        async move {
+            let a = self.a.read().await;
+            let b = self.b.read().await;
+            OwnedData(unsafe { (*self.fuse.get())(&*a, &*b) })
+        }
+    }
 
-//     fn wait_until_changed(&mut self) -> impl Future<Output = SymResult<()>> {
-//        async move {
-//         let a_fut
-//        }
-//     }
+    fn wait_until_changed(&self) -> impl Future<Output = ObservationStatus> {
+        let Self { a, b, .. } = self;
+        FusedWaitChanged {
+            a: MaybeUninit::new(a.wait_until_changed()),
+            a_valid: true,
+            b: self.b.wait_until_changed(),
+            b_closed: move || b.is_closed(),
+        }
+    }
 
-//     fn wait_for_and_map<'a, O, M: FnMut(Self::ReadGuard<'a>) -> SymResult<O>>(
-//         &'a mut self,
-//         condition_map: M,
-//     ) -> impl Future<Output = SymResult<O>> {
-//         async move {
-//             let mut guard_a = self.a.read().await;
-//             let mut guard_b = self.b.read().await;
+    fn wait_for_and_map<'a, O, M: FnMut(Self::ReadGuard<'a>) -> (O, bool)>(
+        &'a mut self,
+        mut condition_map: M,
+    ) -> impl Future<Output = (O, ObservationStatus)>
+    where
+        Self: 'a,
+    {
+        async move {
+            let mut guard_a;
+            let mut guard_b;
+            loop {
+                guard_a = self.a.read().await;
+                guard_b = self.b.read().await;
 
-//             if
-//         }
-//     }
-// }
+                let (mapped, success) =
+                    condition_map(OwnedData(self.fuse.get_mut()(&guard_a, &guard_b)));
+
+                if success {
+                    return (
+                        mapped,
+                        ObservationStatus::new()
+                            .set_success()
+                            .modify_closed(self.a.is_closed() && self.b.is_closed()),
+                    );
+                }
+            }
+        }
+    }
+}

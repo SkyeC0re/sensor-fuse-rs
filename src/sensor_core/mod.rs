@@ -5,7 +5,7 @@ use core::{
     ops::{Deref, DerefMut},
 };
 
-use crate::SymResult;
+use crate::{ObservationStatus, SymResult};
 
 const CLOSED_BIT: usize = 1;
 const VERSION_BUMP: usize = 2;
@@ -41,7 +41,10 @@ pub trait SensorCoreAsync: SensorCore {
 
     /// Wait until a change from reference version is detected and returns `Ok` if a change was detected or `Err` if
     /// the sensor has been closed (regardless of whether an update occurred). In both cases the current version is returned.
-    fn wait_changed(&self, reference_version: usize) -> impl Future<Output = Result<usize, usize>>;
+    fn wait_changed(
+        &self,
+        reference_version: usize,
+    ) -> impl Future<Output = (usize, ObservationStatus)>;
 
     #[inline]
     fn modify<M: FnOnce(&mut Self::Target) -> bool>(
@@ -60,33 +63,44 @@ pub trait SensorCoreAsync: SensorCore {
     }
 
     #[inline]
-    fn wait_for_and_map<'a, O, C: FnMut(Self::ReadGuard<'a>) -> SymResult<O>>(
+    fn wait_for_and_map<'a, O, C: FnMut(Self::ReadGuard<'a>) -> (O, bool)>(
         &'a self,
         mut condition: C,
         mut reference_version: Option<usize>,
-    ) -> impl Future<Output = (SymResult<O>, usize)> {
+    ) -> impl Future<Output = (usize, O, ObservationStatus)> {
         async move {
             loop {
                 if let Some(version) = reference_version {
-                    match self.wait_changed(version).await {
-                        Ok(latest_version) => reference_version = Some(latest_version),
-                        Err(latest_version) => {
-                            let guard = self.read().await;
-                            let mapped = match condition(guard) {
-                                Ok(v) => v,
-                                Err(v) => v,
-                            };
-                            return (Err(mapped), latest_version);
-                        }
+                    let (latest_version, status) = self.wait_changed(version).await;
+                    if status.closed() {
+                        let guard = self.read().await;
+                        let (mapped, success) = condition(guard);
+                        return (
+                            latest_version,
+                            mapped,
+                            ObservationStatus::new()
+                                .set_closed()
+                                .modify_success(success),
+                        );
+                    } else {
+                        reference_version = Some(latest_version);
                     }
                 } else {
                     reference_version = Some(self.version());
                 }
 
                 let guard = self.read().await;
-                let res = condition(guard);
-                if res.is_ok() {
-                    return (res, unsafe { reference_version.unwrap_unchecked() });
+                let (mapped, success) = condition(guard);
+                if success {
+                    // Ensure the latest version associated with the guard is returned.
+                    let version = self.version();
+                    return (
+                        version,
+                        mapped,
+                        ObservationStatus::new()
+                            .set_success()
+                            .modify_closed(version & CLOSED_BIT > 0),
+                    );
                 }
             }
         }

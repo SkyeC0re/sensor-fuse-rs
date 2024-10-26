@@ -13,6 +13,8 @@ use async_lock::{
     RwLock, RwLockReadGuard, RwLockWriteGuard,
 };
 
+use crate::ObservationStatus;
+
 use super::{SensorCore, SensorCoreAsync, CLOSED_BIT, VERSION_BUMP, VERSION_MASK};
 
 const INIT_BIT: usize = 1;
@@ -183,17 +185,21 @@ impl<T> SensorCoreAsync for AsyncCore<T> {
         self.lock.write()
     }
 
-    fn wait_changed(&self, reference_version: usize) -> impl Future<Output = Result<usize, usize>> {
+    fn wait_changed(
+        &self,
+        reference_version: usize,
+    ) -> impl Future<Output = (usize, ObservationStatus)> {
         let mut wait_fut = None;
         poll_fn(move |cx| {
             let mut curr_version = self.version();
             let mut closed = curr_version & CLOSED_BIT > 0;
             if curr_version & VERSION_MASK == reference_version & VERSION_MASK || closed {
-                return Poll::Ready(if closed {
-                    Err(curr_version)
-                } else {
-                    Ok(curr_version)
-                });
+                return Poll::Ready((
+                    curr_version,
+                    ObservationStatus::new()
+                        .modify_closed(closed)
+                        .modify_success(!closed),
+                ));
             }
 
             if wait_fut.is_none() {
@@ -208,11 +214,12 @@ impl<T> SensorCoreAsync for AsyncCore<T> {
                 curr_version = self.version();
                 closed = curr_version & CLOSED_BIT > 0;
                 if curr_version & VERSION_MASK == reference_version & VERSION_MASK || closed {
-                    return Poll::Ready(if closed {
-                        Err(curr_version)
-                    } else {
-                        Ok(curr_version)
-                    });
+                    return Poll::Ready((
+                        curr_version,
+                        ObservationStatus::new()
+                            .modify_closed(closed)
+                            .modify_success(!closed),
+                    ));
                 }
             }
 
