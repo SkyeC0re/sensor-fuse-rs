@@ -384,6 +384,11 @@ pub trait SensorObserve {
     type ReadGuard<'read>: Deref<Target = Self::Target>
     where
         Self: 'read;
+    type Checkpoint;
+
+    fn save_checkpoint(&self) -> Self::Checkpoint;
+
+    fn restore_checkpoint(&mut self, checkpoint: Self::Checkpoint);
 
     fn mark_seen(&mut self);
     /// Mark the current sensor data as unseen.
@@ -437,6 +442,7 @@ pub trait SensorObserveAsync: SensorObserve {
     fn wait_for_and_map<'a, O, M: FnMut(Self::ReadGuard<'a>) -> (O, bool)>(
         &'a mut self,
         condition_map: M,
+        check_current: bool,
     ) -> impl Future<Output = (O, ObservationStatus)>
     where
         Self: 'a;
@@ -446,13 +452,20 @@ pub trait SensorObserveAsync: SensorObserve {
     fn wait_for<F: FnMut(&Self::Target) -> bool>(
         &mut self,
         mut condition: F,
+        check_current: bool,
     ) -> impl Future<Output = (Self::ReadGuard<'_>, ObservationStatus)> {
-        self.wait_for_and_map(move |guard| {
-            let success = condition(&guard);
-            (guard, success)
-        })
+        self.wait_for_and_map(
+            move |guard| {
+                let success = condition(&guard);
+                (guard, success)
+            },
+            check_current,
+        )
     }
 }
+
+#[repr(transparent)]
+pub struct Checkpoint(usize);
 
 /// The generalized sensor observer.
 pub struct SensorObserver<T, C, R>
@@ -471,6 +484,17 @@ where
 {
     type Target = T;
     type ReadGuard<'read> = C::ReadGuard<'read> where Self: 'read;
+
+    type Checkpoint = Checkpoint;
+
+    #[inline(always)]
+    fn save_checkpoint(&self) -> Self::Checkpoint {
+        Checkpoint(unsafe { *self.version.get() })
+    }
+
+    fn restore_checkpoint(&mut self, checkpoint: Self::Checkpoint) {
+        *self.version.get_mut() = checkpoint.0;
+    }
 
     #[inline(always)]
     fn mark_seen(&mut self) {
@@ -512,10 +536,20 @@ where
     fn wait_for_and_map<'a, O, M: FnMut(Self::ReadGuard<'a>) -> (O, bool)>(
         &'a mut self,
         condition_map: M,
+        check_current: bool,
     ) -> impl Future<Output = (O, ObservationStatus)> {
         async move {
-            let (latest_version, mapped, status) =
-                self.inner.wait_for_and_map(condition_map, None).await;
+            let (latest_version, mapped, status) = self
+                .inner
+                .wait_for_and_map(
+                    condition_map,
+                    if check_current {
+                        None
+                    } else {
+                        Some(*self.version.get_mut())
+                    },
+                )
+                .await;
             *self.version.get_mut() = latest_version;
             (mapped, status)
         }
@@ -553,6 +587,17 @@ where
 {
     type Target = T;
     type ReadGuard<'read> = OwnedData<T> where Self: 'read;
+    type Checkpoint = A::Checkpoint;
+
+    #[inline(always)]
+    fn save_checkpoint(&self) -> Self::Checkpoint {
+        self.inner.save_checkpoint()
+    }
+
+    #[inline(always)]
+    fn restore_checkpoint(&mut self, checkpoint: Self::Checkpoint) {
+        self.inner.restore_checkpoint(checkpoint);
+    }
 
     #[inline(always)]
     fn mark_seen(&mut self) {
@@ -593,12 +638,16 @@ where
     fn wait_for_and_map<'a, O, M: FnMut(Self::ReadGuard<'a>) -> (O, bool)>(
         &'a mut self,
         mut condition_map: M,
+        check_current: bool,
     ) -> impl Future<Output = (O, ObservationStatus)>
     where
         Self: 'a,
     {
         let MappedSensorObserver { inner, map } = self;
-        inner.wait_for_and_map(move |guard| condition_map(OwnedData((map.get_mut())(&guard))))
+        inner.wait_for_and_map(
+            move |guard| condition_map(OwnedData((map.get_mut())(&guard))),
+            check_current,
+        )
     }
 
     // fn wait_for<'a, C: 'a>(
@@ -666,6 +715,11 @@ where
     }
 }
 
+pub struct FusedCheckpoint<A, B> {
+    a: A,
+    b: B,
+}
+
 impl<A, B, T, F> SensorObserve for FusedSensorObserver<A, B, T, F>
 where
     A: SensorObserve,
@@ -674,6 +728,21 @@ where
 {
     type Target = T;
     type ReadGuard<'read> = OwnedData<T> where Self: 'read;
+    type Checkpoint = FusedCheckpoint<A::Checkpoint, B::Checkpoint>;
+
+    #[inline]
+    fn save_checkpoint(&self) -> Self::Checkpoint {
+        FusedCheckpoint {
+            a: self.a.save_checkpoint(),
+            b: self.b.save_checkpoint(),
+        }
+    }
+
+    #[inline]
+    fn restore_checkpoint(&mut self, checkpoint: Self::Checkpoint) {
+        self.a.restore_checkpoint(checkpoint.a);
+        self.b.restore_checkpoint(checkpoint.b);
+    }
 
     #[inline(always)]
     fn mark_seen(&mut self) {
@@ -698,7 +767,7 @@ where
     }
 }
 
-struct FusedWaitChanged<
+struct FusedWaitChangedFut<
     A: Future<Output = ObservationStatus>,
     B: Future<Output = ObservationStatus>,
     F: Fn() -> bool,
@@ -713,7 +782,7 @@ impl<
         A: Future<Output = ObservationStatus>,
         B: Future<Output = ObservationStatus>,
         F: Unpin + Fn() -> bool,
-    > Future for FusedWaitChanged<A, B, F>
+    > Future for FusedWaitChangedFut<A, B, F>
 {
     type Output = ObservationStatus;
 
@@ -745,6 +814,19 @@ impl<
     }
 }
 
+pub struct FusedWaitForMapFut<'a, A, B, T, F, O, M>
+where
+    A: SensorObserve + SensorObserveAsync,
+    B: SensorObserve + SensorObserveAsync,
+    F: FnMut(&A::Target, &B::Target) -> T,
+    M: FnMut(<FusedSensorObserver<A, B, T, F> as SensorObserve>::ReadGuard<'a>) -> (O, bool),
+{
+    s: &'a mut FusedSensorObserver<A, B, T, F>,
+    condition_map: M,
+    check_current: bool,
+    checkpoint: <FusedSensorObserver<A, B, T, F> as SensorObserve>::Checkpoint,
+}
+
 impl<A, B, T, F> SensorObserveAsync for FusedSensorObserver<A, B, T, F>
 where
     A: SensorObserve + SensorObserveAsync,
@@ -761,7 +843,7 @@ where
 
     fn wait_until_changed(&self) -> impl Future<Output = ObservationStatus> {
         let Self { a, b, .. } = self;
-        FusedWaitChanged {
+        FusedWaitChangedFut {
             a: MaybeUninit::new(a.wait_until_changed()),
             a_valid: true,
             b: self.b.wait_until_changed(),
@@ -772,16 +854,19 @@ where
     fn wait_for_and_map<'a, O, M: FnMut(Self::ReadGuard<'a>) -> (O, bool)>(
         &'a mut self,
         mut condition_map: M,
+        check_current: bool,
     ) -> impl Future<Output = (O, ObservationStatus)>
     where
         Self: 'a,
     {
         async move {
-            let mut guard_a;
-            let mut guard_b;
+            let checkpoint = self.save_checkpoint();
+            if check_current {
+                let _ = self.wait_until_changed().await;
+            }
             loop {
-                guard_a = self.a.read().await;
-                guard_b = self.b.read().await;
+                let (guard_a, status_a) = self.a.wait_for(|_| true, true).await;
+                let (guard_b, status_b) = self.b.wait_for(|_| true, true).await;
 
                 let (mapped, success) =
                     condition_map(OwnedData(self.fuse.get_mut()(&guard_a, &guard_b)));
@@ -791,7 +876,7 @@ where
                         mapped,
                         ObservationStatus::new()
                             .set_success()
-                            .modify_closed(self.a.is_closed() && self.b.is_closed()),
+                            .modify_closed(status_a.closed() && status_b.closed()),
                     );
                 }
             }
