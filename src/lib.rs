@@ -69,19 +69,16 @@ pub mod sensor_core;
 use alloc::sync::Arc;
 use core::{
     cell::UnsafeCell,
-    future::{poll_fn, Future},
+    future::Future,
     ops::{Deref, DerefMut},
-    pin::pin,
-    sync::atomic::{AtomicUsize, Ordering},
-    task::{Poll, Waker},
+    task::Poll,
 };
-use derived_deref::{Deref, DerefMut};
+use core::{mem::MaybeUninit, pin::Pin};
 use executor::ExecManager;
-use futures::{future::Select, select, task::UnsafeFutureObj, FutureExt};
+use futures::FutureExt;
 use sensor_core::{SensorCore, SensorCoreAsync};
-use std::{marker::PhantomData, mem::MaybeUninit, pin::Pin};
 
-use crate::lock::{DataReadLock, DataWriteLock, OwnedData, OwnedFalseLock, ReadGuardSpecifier};
+use crate::lock::OwnedData;
 
 pub type SymResult<T> = Result<T, T>;
 
@@ -167,27 +164,23 @@ pub trait ShareStrategy<'a> {
     type Target;
     /// The locking mechanism for the sensor's data.
     type Core: SensorCore<Target = Self::Target>;
-    /// The executor associated with the sensor.
-    type Executor: ExecManager<Self::Target>;
     /// The wrapping container for the sensor state.
-    type Shared: Deref<Target = RawSensorData<Self::Core, Self::Executor>>;
+    type Shared: Deref<Target = Self::Core>;
 
     /// Share the sensor state for the largest possible lifetime.
     fn share_data(self) -> Self::Shared;
 
     /// Create an immutable borrow to the sensor state, elided by the lifetime of
     /// wrapping container.
-    fn share_elided_ref(self) -> &'a RawSensorData<Self::Core, Self::Executor>;
+    fn share_elided_ref(self) -> &'a Self::Core;
 }
 
-impl<'a, C, E> ShareStrategy<'a> for &'a RawSensorData<C, E>
+impl<'a, C> ShareStrategy<'a> for &'a C
 where
     C: SensorCore,
-    E: ExecManager<C::Target>,
 {
     type Target = C::Target;
     type Core = C;
-    type Executor = E;
     type Shared = Self;
 
     #[inline(always)]
@@ -202,36 +195,30 @@ where
 }
 
 /// QOL trait to encapsulate sensor observer's data wrapper, locking strategy and executor type.
-pub trait DerefSensorData: Deref<Target = RawSensorData<Self::Core, Self::Executor>> {
+pub trait DerefSensorData: Deref<Target = Self::Core> {
     /// The data type that the sensor stores.
     type Target;
     /// The locking mechanism for the sensor's data.
     type Core: SensorCore<Target = <Self as DerefSensorData>::Target>;
-    /// The executor associated with the sensor.
-    type Executor: ExecManager<<Self as DerefSensorData>::Target>;
 }
 
-impl<C, E, R> DerefSensorData for R
+impl<C, R> DerefSensorData for R
 where
     C: SensorCore,
-    E: ExecManager<C::Target>,
-    R: Deref<Target = RawSensorData<C, E>>,
+    R: Deref<Target = C>,
 {
     type Target = C::Target;
     type Core = C;
-    type Executor = E;
 }
 
 #[cfg(feature = "alloc")]
-impl<'a, C, E> ShareStrategy<'a> for &'a Arc<RawSensorData<C, E>>
+impl<'a, C> ShareStrategy<'a> for &'a Arc<C>
 where
     C: SensorCore,
-    E: ExecManager<C::Target>,
 {
     type Target = C::Target;
     type Core = C;
-    type Executor = E;
-    type Shared = Arc<RawSensorData<C, E>>;
+    type Shared = Arc<C>;
 
     #[inline(always)]
     fn share_data(self) -> Self::Shared {
@@ -239,7 +226,7 @@ where
     }
 
     #[inline(always)]
-    fn share_elided_ref(self) -> &'a RawSensorData<C, E> {
+    fn share_elided_ref(self) -> &'a C {
         self
     }
 }
@@ -258,43 +245,41 @@ where
 {
     #[inline]
     pub fn new(shared_core: S) -> Self {
-        shared_core.share_elided_ref().core.register_writer();
+        shared_core.share_elided_ref().register_writer();
         Self(shared_core)
     }
 }
 
-impl<C, E> SensorWriter<C::Target, RawSensorData<C, E>>
-where
-    C: SensorCore,
-    E: ExecManager<C::Target>,
-{
-    /// Create a new sensor writer by wrapping the appropriate shared data.
-    #[inline(always)]
-    pub const fn from_parts(core: C, executor: E) -> Self {
-        Self(RawSensorData::new(core, executor))
-    }
-}
+// impl<C> SensorWriter<C::Target, C>
+// where
+//     C: SensorCore,
+// {
+//     /// Create a new sensor writer by wrapping the appropriate shared data.
+//     #[inline(always)]
+//     pub const fn from_parts(core: C) -> Self {
+//         Self()
+//     }
+// }
 
-#[cfg(feature = "alloc")]
-impl<C, E> SensorWriter<C::Target, Arc<RawSensorData<C, E>>>
-where
-    C: SensorCore,
-    E: ExecManager<C::Target>,
-{
-    /// Create a new sensor writer by wrapping the appropriate shared data.
-    #[inline(always)]
-    pub fn from_parts_arc(core: C, executor: E) -> Self {
-        Self(Arc::new(RawSensorData::new(core, executor)))
-    }
-}
+// #[cfg(feature = "alloc")]
+// impl<C, E> SensorWriter<C::Target, Arc<RawSensorData<C, E>>>
+// where
+//     C: SensorCore,
+//     E: ExecManager<C::Target>,
+// {
+//     /// Create a new sensor writer by wrapping the appropriate shared data.
+//     #[inline(always)]
+//     pub fn from_parts_arc(core: C, executor: E) -> Self {
+//         Self(Arc::new(RawSensorData::new(core, executor)))
+//     }
+// }
 
 impl<T, S> Drop for SensorWriter<T, S>
 where
     for<'a> &'a S: ShareStrategy<'a, Target = T>,
 {
     fn drop(&mut self) {
-        let data = <&S as ShareStrategy<'_>>::share_elided_ref(&self.0);
-        data.core.deregister_writer();
+        self.0.share_elided_ref().deregister_writer();
     }
 }
 
@@ -357,7 +342,7 @@ where
     pub fn read(
         &self,
     ) -> impl Future<Output = <<&S as ShareStrategy<'_>>::Core as SensorCore>::ReadGuard<'_>> {
-        self.0.share_elided_ref().core.read()
+        self.0.share_elided_ref().read()
     }
 
     /// Acquire a write lock on the underlying data.
@@ -365,7 +350,7 @@ where
     pub fn write(
         &self,
     ) -> impl Future<Output = <<&S as ShareStrategy<'_>>::Core as SensorCore>::WriteGuard<'_>> {
-        self.0.share_elided_ref().core.write()
+        self.0.share_elided_ref().write()
     }
 
     /// Update the sensor value, notify observers and execute all registered callbacks.
@@ -387,15 +372,7 @@ where
         &'a self,
         f: impl FnOnce(&mut T) -> bool + 'a,
     ) -> impl Future<Output = bool> + 'a {
-        let raw_data = self.0.share_elided_ref();
-        async move {
-            let (guard, modified) = raw_data.core.modify(f).await;
-            if modified {
-                raw_data.executor.execute(&guard);
-            }
-
-            modified
-        }
+        async move { self.0.share_elided_ref().modify(f).await.1 }
     }
 }
 
@@ -507,7 +484,7 @@ pub struct SensorObserver<T, R>
 where
     R: DerefSensorData<Target = T>,
 {
-    inner: R,
+    core: R,
     version: UnsafeCell<usize>,
 }
 
@@ -531,22 +508,22 @@ where
 
     #[inline(always)]
     fn mark_seen(&mut self) {
-        *self.version.get_mut() = self.inner.core.version();
+        *self.version.get_mut() = self.core.version();
     }
 
     #[inline(always)]
     fn mark_unseen(&mut self) {
-        *self.version.get_mut() = self.inner.core.version().wrapping_sub(STEP_SIZE);
+        *self.version.get_mut() = self.core.version().wrapping_sub(STEP_SIZE);
     }
 
     #[inline(always)]
     fn has_changed(&self) -> bool {
-        self.inner.core.version() != unsafe { *self.version.get() }
+        self.core.version() != unsafe { *self.version.get() }
     }
 
     #[inline(always)]
     fn is_closed(&self) -> bool {
-        self.inner.core.version() & CLOSED_BIT > 0
+        self.core.version() & CLOSED_BIT > 0
     }
 }
 
@@ -556,12 +533,12 @@ where
     R::Core: SensorCoreAsync,
 {
     fn read(&self) -> impl Future<Output = Self::ReadGuard<'_>> {
-        self.inner.core.read()
+        self.core.read()
     }
 
     fn wait_until_changed(&self) -> impl Future<Output = (Version, ObservationStatus)> {
         FutureExt::map(
-            self.inner.core.wait_changed(unsafe { *self.version.get() }),
+            self.core.wait_changed(unsafe { *self.version.get() }),
             |(version, status)| (Version(version), status),
         )
     }
@@ -573,7 +550,6 @@ where
     ) -> impl Future<Output = (O, ObservationStatus)> {
         async move {
             let (latest_version, mapped, status) = self
-                .inner
                 .core
                 .wait_for_and_map(
                     condition_map,
