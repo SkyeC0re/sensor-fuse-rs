@@ -50,15 +50,14 @@ pub trait SensorCoreAsync: SensorCore {
     fn modify<M: FnOnce(&mut Self::Target) -> bool>(
         &self,
         modifier: M,
-    ) -> impl Future<Output = bool> {
+    ) -> impl Future<Output = (Self::WriteGuard<'_>, bool)> {
         async move {
             let mut guard = self.write().await;
             let modified = modifier(&mut guard);
             if modified {
                 self.bump_version();
             }
-            drop(guard);
-            modified
+            (guard, modified)
         }
     }
 
