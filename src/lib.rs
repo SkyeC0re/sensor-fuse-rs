@@ -60,7 +60,6 @@
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
-pub mod executor;
 pub mod lock;
 pub mod prelude;
 pub mod sensor_core;
@@ -74,9 +73,8 @@ use core::{
     task::Poll,
 };
 use core::{mem::MaybeUninit, pin::Pin};
-use executor::ExecManager;
 use futures::FutureExt;
-use sensor_core::{SensorCore, SensorCoreAsync};
+use sensor_core::{closed_bit_set, SensorCore, SensorCoreAsync, VERSION_BUMP};
 
 use crate::lock::OwnedData;
 
@@ -134,30 +132,6 @@ impl ObservationStatus {
 
 /*** Sensor State ***/
 
-// All credit to [Tokio's Watch Channel](https://docs.rs/tokio/latest/tokio/sync/watch/index.html). If it's not broken don't fix it.
-const CLOSED_BIT: usize = 1;
-const STEP_SIZE: usize = 2;
-
-/// Data structure for storing data with an atomic version tag.
-pub struct RawSensorData<C, E>
-where
-    C: SensorCore,
-    E: ExecManager<C::Target>,
-{
-    core: C,
-    executor: E,
-}
-
-impl<C, E> RawSensorData<C, E>
-where
-    C: SensorCore,
-    E: ExecManager<C::Target>,
-{
-    #[inline(always)]
-    const fn new(core: C, executor: E) -> Self {
-        Self { core, executor }
-    }
-}
 /// Trait for sharing a (most likely heap pointer) wrapped `struct@RawSensorData` with a locking strategy.
 pub trait ShareStrategy<'a> {
     /// The data type that the sensor stores.
@@ -297,39 +271,35 @@ impl<T, S> SensorWriter<T, S>
 where
     for<'a> &'a S: ShareStrategy<'a, Target = T>,
 {
-    // /// Mark the current sensor value as unseen to all observers, notify them and execute all registered callbacks.
-    // #[inline(always)]
-    // pub fn mark_all_unseen(&self) {
-    //     self.0.share_elided_ref().core.bump_version();
-    // }
+    /// Mark the current sensor value as unseen to all observers, notify them and execute all registered callbacks.
+    #[inline(always)]
+    pub fn mark_all_unseen(&self) {
+        self.0.share_elided_ref().mark_unseen();
+    }
 
-    // /// Spawn an observer by immutably borrowing the sensor writer's data. By definition this observer's scope will be limited
-    // /// by the scope of the writer.
-    // #[inline(always)]
-    // pub fn spawn_referenced_observer(
-    //     &self,
-    // ) -> SensorObserver<
-    //     T,
-    //     &'_ RawSensorData<<&S as ShareStrategy<'_>>::Core, <&S as ShareStrategy<'_>>::Executor>,
-    // > {
-    //     let inner = self.0.share_elided_ref();
-    //     SensorObserver {
-    //         version: UnsafeCell::new(inner.core.version()),
-    //         inner,
-    //     }
-    // }
+    /// Spawn an observer by immutably borrowing the sensor writer's data. By definition this observer's scope will be limited
+    /// by the scope of the writer.
+    #[inline(always)]
+    pub fn spawn_referenced_observer(
+        &self,
+    ) -> SensorObserver<T, &'_ <&S as ShareStrategy<'_>>::Core> {
+        let core = self.0.share_elided_ref();
+        SensorObserver {
+            version: UnsafeCell::new(core.version()),
+            core,
+        }
+    }
 
-    // /// Spawn an observer by leveraging the sensor writer's sharing strategy. May allow the observer
-    // /// to outlive the sensor writer for an appropriate sharing strategy (such as if the writer wraps its data in an `Arc`).
-    // #[inline(always)]
-    // pub fn spawn_observer(&self) -> SensorObserver<T, <&'_ S as ShareStrategy>::Shared> {
-    //     let inner = self.0.share_data();
-    //     let _ = inner.observers.fetch_add(1, Ordering::Relaxed);
-    //     SensorObserver {
-    //         version: UnsafeCell::new(inner.version.load(Ordering::Acquire)),
-    //         inner,
-    //     }
-    // }
+    /// Spawn an observer by leveraging the sensor writer's sharing strategy. May allow the observer
+    /// to outlive the sensor writer for an appropriate sharing strategy (such as if the writer wraps its data in an `Arc`).
+    #[inline(always)]
+    pub fn spawn_observer(&self) -> SensorObserver<T, <&'_ S as ShareStrategy>::Shared> {
+        let shared_core = self.0.share_data();
+        SensorObserver {
+            version: UnsafeCell::new(shared_core.version()),
+            core: shared_core,
+        }
+    }
 }
 
 impl<T, S> SensorWriter<T, S>
@@ -475,7 +445,7 @@ pub trait VersionFunctionality {
 impl VersionFunctionality for Version {
     #[inline(always)]
     fn closed(&self) -> bool {
-        self.0 & CLOSED_BIT > 0
+        closed_bit_set(self.0)
     }
 }
 
@@ -513,7 +483,7 @@ where
 
     #[inline(always)]
     fn mark_unseen(&mut self) {
-        *self.version.get_mut() = self.core.version().wrapping_sub(STEP_SIZE);
+        *self.version.get_mut() = self.core.version().wrapping_sub(VERSION_BUMP);
     }
 
     #[inline(always)]
@@ -523,7 +493,7 @@ where
 
     #[inline(always)]
     fn is_closed(&self) -> bool {
-        self.core.version() & CLOSED_BIT > 0
+        closed_bit_set(self.core.version())
     }
 }
 
@@ -547,7 +517,10 @@ where
         &'a mut self,
         condition_map: M,
         check_current: bool,
-    ) -> impl Future<Output = (O, ObservationStatus)> {
+    ) -> impl Future<Output = (O, ObservationStatus)>
+    where
+        Self: 'a,
+    {
         async move {
             let (latest_version, mapped, status) = self
                 .core

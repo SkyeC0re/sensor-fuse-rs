@@ -4,6 +4,7 @@ use rand::random;
 use sensor_fuse::{
     executor::ExecRegister,
     lock::{parking_lot as pl, std_sync as ss},
+    sensor_core::SensorCoreAsync,
     DerefSensorData, SensorObserveAsync, SensorWriter, ShareStrategy,
 };
 use std::{
@@ -184,15 +185,9 @@ where
     // Observers must be sendable across threads.
     R: DerefSensorData<Target = ContentionData> + Send + 'static,
     // Spawning observers must not borrow writers.
-    for<'a> &'a S: ShareStrategy<
-        'a,
-        Target = ContentionData,
-        Lock = R::Lock,
-        Executor = R::Executor,
-        Shared = R,
-    >,
-    // Writer must support async.
-    for<'a, 'b> <&'a S as ShareStrategy<'a>>::Executor: ExecRegister<&'b Waker>,
+    for<'a> &'a S: ShareStrategy<'a, Target = ContentionData, Shared = R, Core = R::Core>,
+    // Core must support async.
+    R::Core: SensorCoreAsync,
     // Writer must be creatable from an initial value.
     SensorWriter<ContentionData, S>: From<ContentionData>,
 {
@@ -206,14 +201,8 @@ impl<S, R> ContentionEnvironment<S, R>
 where
     S: Clone + Send + 'static,
     R: DerefSensorData<Target = ContentionData> + Send + 'static,
-    for<'a> &'a S: ShareStrategy<
-        'a,
-        Target = ContentionData,
-        Lock = R::Lock,
-        Executor = R::Executor,
-        Shared = R,
-    >,
-    for<'a, 'b> <&'a S as ShareStrategy<'a>>::Executor: ExecRegister<&'b Waker>,
+    for<'a> &'a S: ShareStrategy<'a, Target = ContentionData, Shared = R, Core = R::Core>,
+    R::Core: SensorCoreAsync,
     SensorWriter<ContentionData, S>: From<ContentionData>,
 {
     fn new(reader_count: usize, writer_count: usize) -> Self {
@@ -229,31 +218,31 @@ where
                 let mut last_observed_data = 0;
                 loop {
                     let mut iteration = 0;
-                    let guard = match reader
-                        .wait_for(|state| {
-                            if state.test_version == usize::MAX {
-                                return true;
-                            }
+                    let guard = reader
+                        .wait_for(
+                            |state| {
+                                if state.test_version == usize::MAX {
+                                    return true;
+                                }
 
-                            if iteration > 0 && last_observed_data == state.data_version {
-                                return false;
-                            }
+                                if iteration > 0 && last_observed_data == state.data_version {
+                                    return false;
+                                }
 
-                            last_observed_data = state.data_version;
-                            let mut ret = iteration > 1;
+                                last_observed_data = state.data_version;
+                                let mut ret = iteration > 1;
 
-                            if iteration == 1 {
-                                ret |= random::<bool>();
-                            }
+                                if iteration == 1 {
+                                    ret |= random::<bool>();
+                                }
 
-                            iteration += 1;
-                            ret
-                        })
+                                iteration += 1;
+                                ret
+                            },
+                            true,
+                        )
                         .await
-                    {
-                        Ok(guard) => guard,
-                        Err(guard) => guard,
-                    };
+                        .0;
 
                     if guard.test_version == usize::MAX {
                         break;
@@ -294,6 +283,8 @@ where
                                 state.writers_completed += 1;
                             }
                         }
+
+                        true
                     });
 
                     // spin_sleep::sleep(Duration::from_micros(10));
@@ -317,35 +308,48 @@ where
     }
 
     fn bench_individual_writes_req(&self, required_writes: usize) {
-        let mut observer = self.writer.spawn_observer();
-        self.writer.modify_with(|state| {
-            state.test_version += 1;
-            state.observers_completed.fetch_and(0, Ordering::Relaxed);
-            state.writers_completed = 0;
-            state.individual_writes_required = required_writes;
+        block_on(async {
+            let mut observer = self.writer.spawn_observer();
+            self.writer
+                .modify_with(|state| {
+                    state.test_version += 1;
+                    state.observers_completed.fetch_and(0, Ordering::Relaxed);
+                    state.writers_completed = 0;
+                    state.individual_writes_required = required_writes;
+                })
+                .await;
+
+            let writers_len = self.writer_handles.len();
+
+            let _ = black_box(
+                observer
+                    .wait_for(|state| state.writers_completed == writers_len, true)
+                    .await,
+            );
         });
-
-        let writers_len = self.writer_handles.len();
-
-        let _ = black_box(block_on(
-            observer.wait_for(|state| state.writers_completed == writers_len),
-        ));
     }
 
     fn bench_individual_observations_req(&self, required_observations: usize) {
-        let mut observer = self.writer.spawn_observer();
-        self.writer.modify_with(|state| {
-            state.test_version += 1;
-            state.observers_completed.fetch_and(0, Ordering::Relaxed);
-            state.writers_completed = 0;
-            state.individual_observations_required = required_observations;
+        block_on(async {
+            let mut observer = self.writer.spawn_observer();
+            self.writer
+                .modify_with(|state| {
+                    state.test_version += 1;
+                    state.observers_completed.fetch_and(0, Ordering::Relaxed);
+                    state.writers_completed = 0;
+                    state.individual_observations_required = required_observations;
+                })
+                .await;
+
+            let readers_len = self.reader_handles.len();
+
+            let _ = observer
+                .wait_for(
+                    |state| state.observers_completed.load(Ordering::Relaxed) == readers_len,
+                    true,
+                )
+                .await;
         });
-
-        let readers_len = self.reader_handles.len();
-
-        let _ = black_box(block_on(observer.wait_for(|state| {
-            state.observers_completed.load(Ordering::Relaxed) == readers_len
-        })));
     }
 }
 
@@ -353,26 +357,26 @@ impl<S, R> Drop for ContentionEnvironment<S, R>
 where
     S: Clone + Send + 'static,
     R: DerefSensorData<Target = ContentionData> + Send + 'static,
-    for<'a> &'a S: ShareStrategy<
-        'a,
-        Target = ContentionData,
-        Lock = R::Lock,
-        Executor = R::Executor,
-        Shared = R,
-    >,
-    for<'a, 'b> <&'a S as ShareStrategy<'a>>::Executor: ExecRegister<&'b Waker>,
+    for<'a> &'a S: ShareStrategy<'a, Target = ContentionData, Shared = R>,
+    for<'a> <&'a S as ShareStrategy<'a>>::Core: SensorCoreAsync,
     SensorWriter<ContentionData, S>: From<ContentionData>,
 {
     fn drop(&mut self) {
-        self.writer
-            .modify_with(|state| state.test_version = usize::MAX);
-        for reader_handle in self.reader_handles.drain(..) {
-            let _ = block_on(reader_handle);
-        }
+        block_on(async {
+            self.writer
+                .modify_with(|state| {
+                    state.test_version = usize::MAX;
+                    true
+                })
+                .await;
+            for reader_handle in self.reader_handles.drain(..) {
+                let _ = reader_handle.await;
+            }
 
-        for writer_handle in self.writer_handles.drain(..) {
-            let _ = block_on(writer_handle);
-        }
+            for writer_handle in self.writer_handles.drain(..) {
+                let _ = writer_handle.await;
+            }
+        })
     }
 }
 

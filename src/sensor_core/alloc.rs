@@ -80,20 +80,20 @@ impl<'a> Drop for WaitFut<'a> {
 }
 
 impl WakerList {
-    pub const fn new() -> Self {
+    const fn new() -> Self {
         Self {
             head: AtomicPtr::new(null_mut()),
         }
     }
 
-    pub fn wait(&self) -> WaitFut {
+    fn wait(&self) -> WaitFut {
         WaitFut {
             list: self,
             node: null_mut(),
         }
     }
 
-    pub fn wake_all(&self) {
+    fn wake_all(&self) {
         let mut list = self.head.swap(null_mut(), Ordering::Acquire);
 
         let mut state;
@@ -122,6 +122,7 @@ impl WakerList {
     }
 }
 
+/// Standard asyncronous sensor core.
 pub struct AsyncCore<T> {
     version: AtomicUsize,
     lock: RwLock<T>,
@@ -130,6 +131,7 @@ pub struct AsyncCore<T> {
 }
 
 impl<T> AsyncCore<T> {
+    /// Create a new asyncronous sensor core.
     pub const fn new(init: T) -> Self {
         Self {
             version: AtomicUsize::new(0),
@@ -151,8 +153,9 @@ impl<T> SensorCore for AsyncCore<T> {
         self.version.load(Ordering::Acquire)
     }
 
-    fn bump_version(&self) {
+    fn mark_unseen(&self) {
         let _ = self.version.fetch_add(VERSION_BUMP, Ordering::Release);
+        self.waiter_list.wake_all();
     }
 
     fn try_read(&self) -> Option<Self::ReadGuard<'_>> {
@@ -204,8 +207,8 @@ impl<T> SensorCoreAsync for AsyncCore<T> {
 
             if wait_fut.is_none() {
                 let mut wait_fut_init = self.waiter_list.wait();
-                // Result can be ignored, we know that this is always pending on the first poll and puts it in the waiterlist,
-                // guaranteeing that any future update will wake this future. We need not do anything else with this future again, as the framework
+                // Result can be ignored, we know that this is always pending on the first poll which puts it in the waiterlist,
+                // guaranteeing that any future update will wake this future. We need not do anything else with this future again, we
                 // will guarantee that the version will be updated by the time the waker is called. There is therefore no need to ever poll it again.
                 let _ = Pin::new(&mut wait_fut_init).poll(cx);
                 wait_fut = Some(wait_fut_init);

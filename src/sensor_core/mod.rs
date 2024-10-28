@@ -1,4 +1,4 @@
-pub mod std;
+pub mod alloc;
 
 use core::{
     future::Future,
@@ -7,9 +7,15 @@ use core::{
 
 use crate::{ObservationStatus, SymResult};
 
-const CLOSED_BIT: usize = 1;
-const VERSION_BUMP: usize = 2;
-const VERSION_MASK: usize = !CLOSED_BIT;
+// All credit to [Tokio's Watch Channel](https://docs.rs/tokio/latest/tokio/sync/watch/index.html). If it's not broken don't fix it.
+pub(crate) const CLOSED_BIT: usize = 1;
+pub(crate) const VERSION_BUMP: usize = 2;
+pub(crate) const VERSION_MASK: usize = !CLOSED_BIT;
+
+#[inline(always)]
+pub(crate) const fn closed_bit_set(version: usize) -> bool {
+    version & CLOSED_BIT > 0
+}
 
 pub trait SensorCore {
     type Target;
@@ -29,7 +35,8 @@ pub trait SensorCore {
 
     fn version(&self) -> usize;
 
-    fn bump_version(&self);
+    /// Marks the current value as unseen. This should also wake any observers waiting for sensor updates.
+    fn mark_unseen(&self);
 
     fn try_read(&self) -> Option<Self::ReadGuard<'_>>;
     fn try_write(&self) -> Option<Self::WriteGuard<'_>>;
@@ -55,7 +62,7 @@ pub trait SensorCoreAsync: SensorCore {
             let mut guard = self.write().await;
             let modified = modifier(&mut guard);
             if modified {
-                self.bump_version();
+                self.mark_unseen();
             }
             (guard, modified)
         }
@@ -66,7 +73,10 @@ pub trait SensorCoreAsync: SensorCore {
         &'a self,
         mut condition: C,
         mut reference_version: Option<usize>,
-    ) -> impl Future<Output = (usize, O, ObservationStatus)> {
+    ) -> impl Future<Output = (usize, O, ObservationStatus)>
+    where
+        Self: 'a,
+    {
         async move {
             loop {
                 if let Some(version) = reference_version {
@@ -119,7 +129,7 @@ pub trait SensorCoreSync: SensorCore {
         let mut guard = self.write_blocking();
         let modified = modifier(&mut guard);
         if modified {
-            self.bump_version();
+            self.mark_unseen();
         }
         drop(guard);
         modified
