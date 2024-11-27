@@ -1,0 +1,1 @@
+- [ ] TODO Explain the strange signature of wait_for_and_map as a consequence of [this compiler issue](https://github.com/rust-lang/rust/issues/100013)
