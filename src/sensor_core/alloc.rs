@@ -1,3 +1,5 @@
+pub struct SendTest<T: Send>(T);
+
 use core::{
     future::Future,
     pin::Pin,
@@ -12,6 +14,7 @@ use async_lock::{
     futures::{Read, Write},
     RwLock, RwLockReadGuard, RwLockWriteGuard,
 };
+use either::Either;
 
 use crate::ObservationStatus;
 
@@ -35,6 +38,8 @@ struct WaitFut<'a> {
     list: &'a WakerList,
     node: *mut WakerNode,
 }
+
+unsafe impl<'a> Send for WaitFut<'a> {}
 
 impl<'a> Future for WaitFut<'a> {
     type Output = ();
@@ -188,13 +193,15 @@ impl<T> SensorCoreAsync for AsyncCore<T> {
         self.lock.write()
     }
 
+    #[allow(refining_impl_trait)]
     fn wait_changed(
         &self,
         reference_version: usize,
-    ) -> impl Future<Output = (usize, ObservationStatus)> {
-        let mut wait_fut = None;
+    ) -> impl Future<Output = (usize, ObservationStatus)> + Send {
+        let mut wait_fut = Either::Left(&self.waiter_list);
+        let version = &self.version;
         poll_fn(move |cx| {
-            let mut curr_version = self.version();
+            let mut curr_version = version.load(Ordering::Acquire);
             let mut closed = curr_version & CLOSED_BIT > 0;
             if curr_version & VERSION_MASK == reference_version & VERSION_MASK || closed {
                 return Poll::Ready((
@@ -205,16 +212,16 @@ impl<T> SensorCoreAsync for AsyncCore<T> {
                 ));
             }
 
-            if wait_fut.is_none() {
-                let mut wait_fut_init = self.waiter_list.wait();
+            if let Either::Left(waiter_list) = wait_fut {
+                let mut wait_fut_init = waiter_list.wait();
                 // Result can be ignored, we know that this is always pending on the first poll which puts it in the waiterlist,
                 // guaranteeing that any future update will wake this future. We need not do anything else with this future again, we
                 // will guarantee that the version will be updated by the time the waker is called. There is therefore no need to ever poll it again.
                 let _ = Pin::new(&mut wait_fut_init).poll(cx);
-                wait_fut = Some(wait_fut_init);
+                wait_fut = Either::Right(wait_fut_init);
 
                 // Do a second check on initial insertion to ensure we do not miss a version update.
-                curr_version = self.version();
+                curr_version = version.load(Ordering::Acquire);
                 closed = curr_version & CLOSED_BIT > 0;
                 if curr_version & VERSION_MASK == reference_version & VERSION_MASK || closed {
                     return Poll::Ready((
@@ -228,5 +235,99 @@ impl<T> SensorCoreAsync for AsyncCore<T> {
 
             return Poll::Pending;
         })
+    }
+
+    async fn modify<M: FnOnce(&mut Self::Target) -> bool>(
+        &self,
+        modifier: M,
+    ) -> (Self::WriteGuard<'_>, bool) {
+        let mut guard = self.write().await;
+        let modified = modifier(&mut guard);
+        if modified {
+            self.mark_unseen();
+        }
+        (guard, modified)
+    }
+
+    // async fn wait_for_and_map<'a, O, C: FnMut(Self::ReadGuard<'a>) -> (O, bool)>(
+    //     &'a self,
+    //     mut condition: C,
+    //     mut reference_version: Option<usize>,
+    // ) -> (usize, O, ObservationStatus) {
+    //     loop {
+    //         if let Some(version) = reference_version {
+    //             let (latest_version, status) = self.wait_changed(version).await;
+    //             if status.closed() {
+    //                 let guard = self.read().await;
+    //                 let (mapped, success) = condition(guard);
+    //                 return (
+    //                     latest_version,
+    //                     mapped,
+    //                     ObservationStatus::new()
+    //                         .set_closed()
+    //                         .modify_success(success),
+    //                 );
+    //             } else {
+    //                 reference_version = Some(latest_version);
+    //             }
+    //         } else {
+    //             reference_version = Some(self.version());
+    //         }
+
+    //         let guard = self.read().await;
+    //         let (mapped, success) = condition(guard);
+    //         if success {
+    //             // Ensure the latest version associated with the guard is returned.
+    //             let version = self.version();
+    //             return (
+    //                 version,
+    //                 mapped,
+    //                 ObservationStatus::new()
+    //                     .set_success()
+    //                     .modify_closed(version & CLOSED_BIT > 0),
+    //             );
+    //         }
+    //     }
+    // }
+}
+
+// pub struct ModifyFut<'a, T, M: FnOnce(&mut T) -> bool> {
+//     version: &'a AtomicUsize,
+//     write_fut: Write<'a, T>,
+//     modify: MaybeUninit<M>,
+// }
+
+// impl<'a, T, M: FnOnce(&mut T) -> bool> Future for ModifyFut<'a, T, M> {
+//     type Output = (RwLockWriteGuard<'a, T>, bool);
+
+//     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+//         let Self {
+//             write_fut, modify, ..
+//         } = unsafe { self.get_unchecked_mut() };
+//         if let Poll::Ready(mut guard) = unsafe { Pin::new_unchecked(write_fut).poll(cx) } {
+//             let changed = (unsafe { modify.assume_init_read() })(&mut guard);
+//             return Poll::Ready((guard, changed));
+//         }
+
+//         Poll::Pending
+//     }
+// }
+
+#[cfg(test)]
+mod test {
+    use crate::sensor_core::SensorCoreAsync;
+
+    use super::AsyncCore;
+
+    #[test]
+    fn send_wait_for_map() {
+        struct MustSend<T: Send>(T);
+
+        let x = AsyncCore::new(5);
+        MustSend(x.wait_for_and_map(|_| (true, true), None));
+        let rt = tokio::runtime::Builder::new_multi_thread().build().unwrap();
+        let handle = rt.spawn(async move {
+            x.wait_for_and_map(|_| (true, true), None).await;
+        });
     }
 }

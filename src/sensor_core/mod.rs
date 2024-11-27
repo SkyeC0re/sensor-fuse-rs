@@ -5,7 +5,7 @@ use core::{
     ops::{Deref, DerefMut},
 };
 
-use crate::{ObservationStatus, SymResult};
+use crate::{ObservationData, ObservationStatus, SymResult};
 
 // All credit to [Tokio's Watch Channel](https://docs.rs/tokio/latest/tokio/sync/watch/index.html). If it's not broken don't fix it.
 pub(crate) const CLOSED_BIT: usize = 1;
@@ -54,63 +54,65 @@ pub trait SensorCoreAsync: SensorCore {
     ) -> impl Future<Output = (usize, ObservationStatus)>;
 
     #[inline]
-    fn modify<M: FnOnce(&mut Self::Target) -> bool>(
+    async fn modify<M: FnOnce(&mut Self::Target) -> bool>(
         &self,
         modifier: M,
-    ) -> impl Future<Output = (Self::WriteGuard<'_>, bool)> {
-        async move {
-            let mut guard = self.write().await;
-            let modified = modifier(&mut guard);
-            if modified {
-                self.mark_unseen();
-            }
-            (guard, modified)
+    ) -> (Self::WriteGuard<'_>, bool) {
+        let mut guard = self.write().await;
+        let modified = modifier(&mut guard);
+        if modified {
+            self.mark_unseen();
         }
+        (guard, modified)
     }
 
     #[inline]
-    fn wait_for_and_map<'a, O, C: FnMut(Self::ReadGuard<'a>) -> (O, bool)>(
-        &'a self,
+    async fn wait_for_and_map<O, C: FnMut(&Self::Target) -> (O, bool)>(
+        &self,
         mut condition: C,
         mut reference_version: Option<usize>,
-    ) -> impl Future<Output = (usize, O, ObservationStatus)>
-    where
-        Self: 'a,
-    {
-        async move {
-            loop {
-                if let Some(version) = reference_version {
-                    let (latest_version, status) = self.wait_changed(version).await;
-                    if status.closed() {
-                        let guard = self.read().await;
-                        let (mapped, success) = condition(guard);
-                        return (
-                            latest_version,
-                            mapped,
-                            ObservationStatus::new()
+    ) -> (
+        usize,
+        ObservationData<Self::ReadGuard<'_>, O, ObservationStatus>,
+    ) {
+        loop {
+            if let Some(version) = reference_version {
+                let (latest_version, status) = self.wait_changed(version).await;
+                if status.closed() {
+                    let guard = self.read().await;
+                    let (mapped, success) = condition(&guard);
+                    return (
+                        latest_version,
+                        ObservationData {
+                            guard,
+                            output: mapped,
+                            status: ObservationStatus::new()
                                 .set_closed()
                                 .modify_success(success),
-                        );
-                    } else {
-                        reference_version = Some(latest_version);
-                    }
+                        },
+                    );
                 } else {
-                    reference_version = Some(self.version());
+                    reference_version = Some(latest_version);
                 }
+            } else {
+                reference_version = Some(self.version());
+            }
 
-                let guard = self.read().await;
-                let (mapped, success) = condition(guard);
-                if success {
-                    // Ensure the latest version associated with the guard is returned.
-                    let version = self.version();
-                    return (
-                        version,
-                        mapped,
-                        ObservationStatus::new()
+            let guard = self.read().await;
+            let (mapped, success) = condition(&guard);
+            if success {
+                // Ensure the latest version associated with the guard is returned.
+                let version = self.version();
+                return (
+                    version,
+                    ObservationData {
+                        guard,
+                        output: mapped,
+                        status: ObservationStatus::new()
                             .set_success()
                             .modify_closed(version & CLOSED_BIT > 0),
-                    );
-                }
+                    },
+                );
             }
         }
     }
