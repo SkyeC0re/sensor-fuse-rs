@@ -74,7 +74,7 @@ use core::{
 };
 use core::{mem::MaybeUninit, pin::Pin};
 use futures::FutureExt;
-use sensor_core::{closed_bit_set, SensorCore, SensorCoreAsync, VERSION_BUMP};
+use sensor_core::{alloc::AsyncCore, closed_bit_set, SensorCore, SensorCoreAsync, VERSION_BUMP};
 
 use crate::lock::OwnedData;
 
@@ -227,6 +227,24 @@ where
     pub fn new(shared_core: S) -> Self {
         shared_core.share_elided_ref().register_writer();
         Self(shared_core)
+    }
+}
+
+impl<T, C> From<T> for SensorWriter<T, Arc<C>>
+where
+    C: SensorCore<Target = T> + From<T>,
+{
+    fn from(value: T) -> Self {
+        SensorWriter::new(Arc::new(C::from(value)))
+    }
+}
+
+impl<T, C> From<T> for SensorWriter<T, C>
+where
+    C: SensorCore<Target = T> + From<T>,
+{
+    fn from(value: T) -> Self {
+        SensorWriter::new(C::from(value))
     }
 }
 

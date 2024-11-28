@@ -3,7 +3,10 @@ use futures::executor::block_on;
 use paste::paste;
 use rand::random;
 use sensor_fuse::{
-    lock, prelude::*, sensor_core::SensorCoreAsync, DerefSensorData, SensorWriter, ShareStrategy,
+    lock,
+    prelude::*,
+    sensor_core::{alloc::AsyncCore, SensorCoreAsync},
+    DerefSensorData, SensorWriter, ShareStrategy,
 };
 use std::{sync::Arc, task::Waker, thread, time::Duration};
 
@@ -24,66 +27,25 @@ macro_rules! test_core {
     ($prefix:ident, $sensor_writer:ty) => {
         paste! {
             #[test]
-            fn [<$prefix _sensor_observation>]() {
-                test_sensor_observation::<$sensor_writer>();
+            fn [<$prefix _change_observation>]() {
+                test_change_observation::<$sensor_writer>();
             }
 
-            #[test]
-            fn [<$prefix _basic_sensor_observation_parallel_unsynced_10_1000>]() {
-                test_basic_sensor_observation_parallel_unsynced::<$sensor_writer>(10, 1000);
-            }
+            // #[test]
+            // fn [<$prefix _basic_sensor_observation_parallel_unsynced_10_1000>]() {
+            //     test_basic_sensor_observation_parallel_unsynced::<$sensor_writer>(10, 1000);
+            // }
 
-            #[test]
-            fn [<$prefix _mapped_sensor_observation>]() {
-                test_mapped_sensor_observation::<$sensor_writer>();
-            }
+            // #[test]
+            // fn [<$prefix _mapped_sensor_observation>]() {
+            //     test_mapped_sensor_observation::<$sensor_writer>();
+            // }
 
-            #[test]
-            fn [<$prefix _fused_sensor_sensor_observation>]() {
-                test_fused_sensor_observation::<$sensor_writer>();
-            }
+            // #[test]
+            // fn [<$prefix _fused_sensor_sensor_observation>]() {
+            //     test_fused_sensor_observation::<$sensor_writer>();
+            // }
 
-        }
-    };
-}
-
-macro_rules! test_core_exec {
-    ($prefix:ident, $sensor_writer:ty) => {
-        paste! {
-            #[test]
-            fn [<$prefix _test_async_chainged>]() {
-                test_async_changed::<$sensor_writer>();
-            }
-
-            #[test]
-            fn [<$prefix _test_mapped_async_changed>]() {
-                test_mapped_async_changed::<$sensor_writer>();
-            }
-
-            #[test]
-            fn [<$prefix _test_fused_async_changed>]() {
-                test_fused_async_changed::<$sensor_writer>();
-            }
-
-            #[test]
-            fn [<$prefix _test_async_wait_for>]() {
-                test_async_wait_for::<$sensor_writer>();
-            }
-
-            #[test]
-            fn [<$prefix _test_mapped_async_wait_for>]() {
-                test_mapped_async_wait_for::<$sensor_writer>();
-            }
-
-            #[test]
-            fn [<$prefix _test_fused_async_wait_for>]() {
-                test_fused_async_wait_for::<$sensor_writer>();
-            }
-
-            #[test]
-            fn [<$prefix _test_callbacks>]() {
-                test_callbacks::<$sensor_writer>();
-            }
         }
     };
 }
@@ -244,11 +206,22 @@ where
     for<'a> &'a S: ShareStrategy<'a, Target = usize, Shared = R>,
     SensorWriter<usize, S>: From<usize>,
 {
-    let sensor_writer = SensorWriter::<usize, S>::from(1);
+    let sensor_writer = SensorWriter::<usize, S>::from(0);
     let observer = sensor_writer.spawn_observer();
     drop(sensor_writer);
     assert!(observer.is_closed());
-    // assert_eq!(*observer.(), 1);
+}
+
+fn test_change_observation<S>()
+where
+    for<'a> &'a S: ShareStrategy<'a, Target = usize>,
+    SensorWriter<usize, S>: From<usize>,
+{
+    let sensor_writer = SensorWriter::<usize, S>::from(0);
+    let observer = sensor_writer.spawn_observer();
+    assert!(!observer.has_changed());
+    sensor_writer.mark_all_unseen();
+    assert!(observer.has_changed());
 }
 
 fn test_async_changed<S>()
@@ -655,8 +628,8 @@ where
 // /*** std_sync locks ***/
 // test_core!(ss_rwl, lock::std_sync::RwSensorData<_>);
 
-// test_core!(ss_arc_rwl, lock::std_sync::ArcRwSensorData<_>);
-// test_core_with_owned_observer!(ss_arc_rwl, lock::std_sync::ArcRwSensorData<_>);
+test_core!(arc_alloc_async, Arc<AsyncCore<_>>);
+test_core_with_owned_observer!(arc_alloc_async, Arc<AsyncCore<_>>);
 
 // test_core!(ss_mtx, lock::std_sync::MutexSensorData<_>);
 
