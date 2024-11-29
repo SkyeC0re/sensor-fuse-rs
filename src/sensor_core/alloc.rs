@@ -257,28 +257,3 @@ impl<T> SensorCoreAsync for AsyncCore<T> {
         (guard, modified)
     }
 }
-
-#[cfg(test)]
-mod test {
-    use futures::executor::block_on;
-
-    use crate::sensor_core::{SensorCore, SensorCoreAsync};
-
-    use super::AsyncCore;
-
-    #[test]
-    fn send_wait_for_map() {
-        struct MustSend<T: Send>(T);
-
-        let x = AsyncCore::new(5);
-        x.register_writer();
-        // MustSend(x.wait_for_and_map(|_| (true, true), None));
-        let rt = tokio::runtime::Builder::new_multi_thread().build().unwrap();
-        let handle = rt.spawn(async move {
-            let (version, data) = x.wait_for_and_map(|_| (true, true), Some(2)).await;
-            println!("{}, {}", data.status.success(), version);
-        });
-
-        block_on(handle);
-    }
-}

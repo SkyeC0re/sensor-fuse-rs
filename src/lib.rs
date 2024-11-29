@@ -429,7 +429,7 @@ pub trait SensorObserveAsync: SensorObserve {
         check_current: bool,
     ) -> ObservationData<Self::ReadGuard<'_>, (), ObservationStatus> {
         self.wait_for_and_map(
-            move |guard| {
+            |guard| {
                 let success = condition(&guard);
                 ((), success)
             },
@@ -509,24 +509,22 @@ where
     R: DerefSensorData<Target = T>,
     R::Core: SensorCoreAsync,
 {
-    fn read(&self) -> impl Future<Output = Self::ReadGuard<'_>> {
-        self.core.read()
+    #[inline(always)]
+    async fn read(&self) -> Self::ReadGuard<'_> {
+        self.core.read().await
     }
 
-    fn wait_until_changed(&self) -> impl Future<Output = (Version, ObservationStatus)> {
-        FutureExt::map(self.core.wait_changed(self.version), |(version, status)| {
-            (Version(version), status)
-        })
+    #[inline]
+    async fn wait_until_changed(&self) -> (Version, ObservationStatus) {
+        let (version, status) = self.core.wait_changed(self.version).await;
+        (Version(version), status)
     }
 
     async fn wait_for_and_map<O, M: FnMut(&Self::Target) -> (O, bool)>(
         &mut self,
         condition_map: M,
         check_current: bool,
-    ) -> ObservationData<Self::ReadGuard<'_>, O, ObservationStatus>
-// where
-    //     Self: 'a,
-    {
+    ) -> ObservationData<Self::ReadGuard<'_>, O, ObservationStatus> {
         let (latest_version, data) = self
             .core
             .wait_for_and_map(
