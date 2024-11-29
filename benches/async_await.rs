@@ -111,7 +111,6 @@ impl WatchContentionEnvironment {
                         }
                     });
 
-                    // spin_sleep::sleep(Duration::from_micros(10));
                     black_box(for _ in 0..1000 {
                         std::hint::spin_loop();
                     });
@@ -286,7 +285,6 @@ where
                         true
                     }));
 
-                    // spin_sleep::sleep(Duration::from_micros(10));
                     black_box(for _ in 0..1000 {
                         std::hint::spin_loop();
                     });
@@ -386,97 +384,7 @@ where
     }
 }
 
-// fn pl_rw_write(c: &mut Criterion) {
-//     let env = ContentionEnvironment::<pl::ArcRwSensorDataExec<ContentionData>, _>::new(100, 10);
-
-//     c.bench_function("pl_r100_w10_2000_write", |b| {
-//         b.iter(|| {
-//             env.bench_individual_writes_req(2000);
-//         });
-//     });
-// }
-
-// fn pl_rw_low_contention_write(c: &mut Criterion) {
-//     let env = ContentionEnvironment::<pl::ArcRwSensorDataExec<ContentionData>, _>::new(15, 7);
-
-//     c.bench_function("pl_r5_w5_2000_write", |b| {
-//         b.iter(|| {
-//             env.bench_individual_writes_req(2000);
-//         });
-//     });
-// }
-
-// fn ss_rw_write(c: &mut Criterion) {
-//     let env = ContentionEnvironment::<ss::ArcRwSensorDataExec<ContentionData>, _>::new(100, 10);
-
-//     c.bench_function("ss_r100_w10_2000_write", |b| {
-//         b.iter(|| {
-//             env.bench_individual_writes_req(2000);
-//         });
-//     });
-// }
-
-// fn ss_rw_low_contention_write(c: &mut Criterion) {
-//     let env = ContentionEnvironment::<ss::ArcRwSensorDataExec<ContentionData>, _>::new(15, 7);
-
-//     c.bench_function("ss_r5_w5_2000_write", |b| {
-//         b.iter(|| {
-//             env.bench_individual_writes_req(2000);
-//         });
-//     });
-// }
-
-// fn tw_write(c: &mut Criterion) {
-//     let env = WatchContentionEnvironment::new(100, 10);
-
-//     c.bench_function("tw_r100_w10_2000_write", |b| {
-//         b.iter(|| {
-//             env.bench_individual_writes_req(2000);
-//         });
-//     });
-// }
-
-// fn tw_low_contention_write(c: &mut Criterion) {
-//     let env = WatchContentionEnvironment::new(15, 7);
-
-//     c.bench_function("tw_r5_w5_2000_write", |b| {
-//         b.iter(|| {
-//             env.bench_individual_writes_req(2000);
-//         });
-//     });
-// }
-
-// fn pl_rw_observation(c: &mut Criterion) {
-//     let env = ContentionEnvironment::<pl::ArcRwSensorDataExec<ContentionData>, _>::new(100, 10);
-
-//     c.bench_function("pl_r100_w10_2000_observation", |b| {
-//         b.iter(|| {
-//             env.bench_individual_observations_req(2000);
-//         });
-//     });
-// }
-
-// fn pl_rw_low_contention_observation(c: &mut Criterion) {
-//     let env = ContentionEnvironment::<pl::ArcRwSensorDataExec<ContentionData>, _>::new(15, 7);
-
-//     c.bench_function("pl_r5_w5_2000_observation", |b| {
-//         b.iter(|| {
-//             env.bench_individual_observations_req(2000);
-//         });
-//     });
-// }
-
-// fn ss_rw_observation(c: &mut Criterion) {
-//     let env = ContentionEnvironment::<ss::ArcRwSensorDataExec<ContentionData>, _>::new(100, 10);
-
-//     c.bench_function("ss_r100_w10_2000_observation", |b| {
-//         b.iter(|| {
-//             env.bench_individual_observations_req(2000);
-//         });
-//     });
-// }
-
-fn ss_rw_low_contention_observation(c: &mut Criterion) {
+fn arc_async_low_contention_observation(c: &mut Criterion) {
     let env = ContentionEnvironment::<Arc<AsyncCore<ContentionData>>, _>::new(5, 2);
 
     c.bench_function("ss_r5_w5_2000_observation", |b| {
@@ -485,16 +393,6 @@ fn ss_rw_low_contention_observation(c: &mut Criterion) {
         });
     });
 }
-
-// fn tw_observation(c: &mut Criterion) {
-//     let env = WatchContentionEnvironment::new(100, 10);
-
-//     c.bench_function("tw_r100_w10_2000_observation", |b| {
-//         b.iter(|| {
-//             env.bench_individual_observations_req(2000);
-//         });
-//     });
-// }
 
 fn tw_low_contention_observation(c: &mut Criterion) {
     let env = WatchContentionEnvironment::new(5, 2);
@@ -508,17 +406,7 @@ fn tw_low_contention_observation(c: &mut Criterion) {
 
 criterion_group!(
     benches,
-    // pl_rw_write,
-    // ss_rw_write,
-    // tw_write,
-    // pl_rw_low_contention_write,
-    // ss_rw_low_contention_write,
-    // tw_low_contention_write,
-    // pl_rw_observation,
-    // ss_rw_observation,
-    // tw_observation,
-    // pl_rw_low_contention_observation,
-    ss_rw_low_contention_observation,
+    arc_async_low_contention_observation,
     tw_low_contention_observation,
 );
 criterion_main!(benches);

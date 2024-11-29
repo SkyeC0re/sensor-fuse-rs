@@ -57,7 +57,7 @@
 #![warn(unused_qualifications)]
 #![warn(unused_results)]
 // This project explicitly does not enforce any bounds an any futures, but attempts to use conditional `Send`
-// approximation wherever possible. This allows the user to pass either to, for example, pass `!Send` data to
+// approximation wherever possible. This allows the user to, for example, pass `!Send` data to
 // futures that are otherwise `Send`, and the future will naturally become `!Send`, without requiring the user
 // to call a separate function that differs only in whether or not it accepts `Send` data.
 #![allow(async_fn_in_trait)]
