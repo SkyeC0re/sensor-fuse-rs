@@ -56,11 +56,15 @@
 #![warn(unused_import_braces)]
 #![warn(unused_qualifications)]
 #![warn(unused_results)]
+// This project explicitly does not enforce any bounds an any futures, but attempts to use conditional `Send`
+// approximation wherever possible. This allows the user to pass either to, for example, pass `!Send` data to
+// futures that are otherwise `Send`, and the future will naturally become `!Send`, without requiring the user
+// to call a separate function that differs only in whether or not it accepts `Send` data.
+#![allow(async_fn_in_trait)]
 
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
-pub mod lock;
 pub mod prelude;
 pub mod sensor_core;
 
@@ -73,12 +77,20 @@ use core::{
     task::Poll,
 };
 use core::{mem::MaybeUninit, pin::Pin};
+use derived_deref::{Deref, DerefMut};
 use futures::FutureExt;
-use sensor_core::{alloc::AsyncCore, closed_bit_set, SensorCore, SensorCoreAsync, VERSION_BUMP};
+use sensor_core::{closed_bit_set, SensorCore, SensorCoreAsync, VERSION_BUMP};
 
-use crate::lock::OwnedData;
+#[derive(Deref, DerefMut, Clone, Copy)]
+#[repr(transparent)]
+pub struct OwnedData<T>(pub T);
 
-pub type SymResult<T> = Result<T, T>;
+impl<T> OwnedData<T> {
+    #[inline(always)]
+    pub fn into_inner(self) -> T {
+        self.0
+    }
+}
 
 pub struct ObservationData<G, O, S> {
     pub guard: G,
@@ -248,30 +260,6 @@ where
     }
 }
 
-// impl<C> SensorWriter<C::Target, C>
-// where
-//     C: SensorCore,
-// {
-//     /// Create a new sensor writer by wrapping the appropriate shared data.
-//     #[inline(always)]
-//     pub const fn from_parts(core: C) -> Self {
-//         Self()
-//     }
-// }
-
-// #[cfg(feature = "alloc")]
-// impl<C, E> SensorWriter<C::Target, Arc<RawSensorData<C, E>>>
-// where
-//     C: SensorCore,
-//     E: ExecManager<C::Target>,
-// {
-//     /// Create a new sensor writer by wrapping the appropriate shared data.
-//     #[inline(always)]
-//     pub fn from_parts_arc(core: C, executor: E) -> Self {
-//         Self(Arc::new(RawSensorData::new(core, executor)))
-//     }
-// }
-
 impl<T, S> Drop for SensorWriter<T, S>
 where
     for<'a> &'a S: ShareStrategy<'a, Target = T>,
@@ -309,7 +297,7 @@ where
     ) -> SensorObserver<T, &'_ <&S as ShareStrategy<'_>>::Core> {
         let core = self.0.share_elided_ref();
         SensorObserver {
-            version: UnsafeCell::new(core.version()),
+            version: core.version(),
             core,
         }
     }
@@ -320,9 +308,23 @@ where
     pub fn spawn_observer(&self) -> SensorObserver<T, <&'_ S as ShareStrategy>::Shared> {
         let shared_core = self.0.share_data();
         SensorObserver {
-            version: UnsafeCell::new(shared_core.version()),
+            version: shared_core.version(),
             core: shared_core,
         }
+    }
+
+    #[inline(always)]
+    pub fn try_write(
+        &self,
+    ) -> Option<<<&S as ShareStrategy<'_>>::Core as SensorCore>::WriteGuard<'_>> {
+        self.0.share_elided_ref().try_write()
+    }
+
+    #[inline(always)]
+    pub fn try_read(
+        &self,
+    ) -> Option<<<&S as ShareStrategy<'_>>::Core as SensorCore>::ReadGuard<'_>> {
+        self.0.share_elided_ref().try_read()
     }
 }
 
@@ -333,40 +335,31 @@ where
 {
     /// Acquire a read lock on the underlying data.
     #[inline(always)]
-    pub fn read(
-        &self,
-    ) -> impl Future<Output = <<&S as ShareStrategy<'_>>::Core as SensorCore>::ReadGuard<'_>> {
-        self.0.share_elided_ref().read()
+    pub async fn read(&self) -> <<&S as ShareStrategy<'_>>::Core as SensorCore>::ReadGuard<'_> {
+        self.0.share_elided_ref().read().await
     }
 
     /// Acquire a write lock on the underlying data.
     #[inline(always)]
-    pub fn write(
-        &self,
-    ) -> impl Future<Output = <<&S as ShareStrategy<'_>>::Core as SensorCore>::WriteGuard<'_>> {
-        self.0.share_elided_ref().write()
+    pub async fn write(&self) -> <<&S as ShareStrategy<'_>>::Core as SensorCore>::WriteGuard<'_> {
+        self.0.share_elided_ref().write().await
     }
 
     /// Update the sensor value, notify observers and execute all registered callbacks.
     #[inline(always)]
-    pub fn update<'a>(&'a self, sample: T) -> impl Future<Output = ()> + 'a {
-        async move {
-            let _ = self
-                .modify_with(|v| {
-                    *v = sample;
-                    true
-                })
-                .await;
-        }
+    pub async fn update<'a>(&'a self, sample: T) {
+        let _ = self
+            .modify_with(|v| {
+                *v = sample;
+                true
+            })
+            .await;
     }
 
     /// Modify the sensor value in place, notify observers and execute all registered callbacks.
-    #[inline]
-    pub fn modify_with<'a>(
-        &'a self,
-        f: impl FnOnce(&mut T) -> bool + 'a,
-    ) -> impl Future<Output = bool> + 'a {
-        async move { self.0.share_elided_ref().modify(f).await.1 }
+    #[inline(always)]
+    pub async fn modify_with(&self, f: impl FnOnce(&mut T) -> bool) -> bool {
+        self.0.share_elided_ref().modify(f).await.1
     }
 }
 
@@ -391,17 +384,6 @@ pub trait SensorObserve {
     fn has_changed(&self) -> bool;
     /// Returns true if all upstream writers has been dropped and no more updates can occur.
     fn is_closed(&self) -> bool;
-    /// Returns true if this observer has observed that all upstream writers has been dropped.
-    /// This may return false even if all upstream writers have been dropped, but is guaranteed to
-    /// be updated whenever a call to the following is made:
-    /// - `function@pull`
-    /// - `function@mark_seen`
-    /// - `function@mark_unseen`
-    /// - `function@has_changed`
-    /// - `function@is_closed`
-    /// - `function@wait_until_changed` is awaited.
-    /// - `function@wait_for` is awaited.
-    // fn is_locally_closed(&self) -> bool;
 
     /// Fuse this observer with another using the given fusion function into a cacheless observer.
     #[inline(always)]
@@ -427,11 +409,11 @@ pub trait SensorObserve {
 
 /// Async observer functionality.
 pub trait SensorObserveAsync: SensorObserve {
-    fn read(&self) -> impl Future<Output = Self::ReadGuard<'_>>;
+    async fn read(&self) -> Self::ReadGuard<'_>;
 
     /// Asynchronously wait until the sensor value is updated. This call will **not** update the observer's version,
     /// as such an additional call to `pull` or `pull_updated` is required.
-    fn wait_until_changed(&self) -> impl Future<Output = (Self::Checkpoint, ObservationStatus)>;
+    async fn wait_until_changed(&self) -> (Self::Checkpoint, ObservationStatus);
 
     async fn wait_for_and_map<O, M: FnMut(&Self::Target) -> (O, bool)>(
         &mut self,
@@ -478,10 +460,10 @@ where
     R: DerefSensorData<Target = T>,
 {
     core: R,
-    version: UnsafeCell<usize>,
+    version: usize,
 }
 
-unsafe impl<T, R> Send for SensorObserver<T, R> where R: DerefSensorData<Target = T> + Send {}
+// unsafe impl<T, R> Send for SensorObserver<T, R> where R: DerefSensorData<Target = T> + Send {}
 
 impl<T, R> SensorObserve for SensorObserver<T, R>
 where
@@ -494,26 +476,26 @@ where
 
     #[inline(always)]
     fn save_checkpoint(&self) -> Self::Checkpoint {
-        Version(unsafe { *self.version.get() })
+        Version(self.version)
     }
 
     fn restore_checkpoint(&mut self, checkpoint: &Self::Checkpoint) {
-        *self.version.get_mut() = checkpoint.0;
+        self.version = checkpoint.0;
     }
 
     #[inline(always)]
     fn mark_seen(&mut self) {
-        *self.version.get_mut() = self.core.version();
+        self.version = self.core.version();
     }
 
     #[inline(always)]
     fn mark_unseen(&mut self) {
-        *self.version.get_mut() = self.core.version().wrapping_sub(VERSION_BUMP);
+        self.version = self.core.version().wrapping_sub(VERSION_BUMP);
     }
 
     #[inline(always)]
     fn has_changed(&self) -> bool {
-        self.core.version() != unsafe { *self.version.get() }
+        self.core.version() != self.version
     }
 
     #[inline(always)]
@@ -532,10 +514,9 @@ where
     }
 
     fn wait_until_changed(&self) -> impl Future<Output = (Version, ObservationStatus)> {
-        FutureExt::map(
-            self.core.wait_changed(unsafe { *self.version.get() }),
-            |(version, status)| (Version(version), status),
-        )
+        FutureExt::map(self.core.wait_changed(self.version), |(version, status)| {
+            (Version(version), status)
+        })
     }
 
     async fn wait_for_and_map<O, M: FnMut(&Self::Target) -> (O, bool)>(
@@ -553,11 +534,11 @@ where
                 if check_current {
                     None
                 } else {
-                    Some(*self.version.get_mut())
+                    Some(self.version)
                 },
             )
             .await;
-        *self.version.get_mut() = latest_version;
+        self.version = latest_version;
         data
     }
 }

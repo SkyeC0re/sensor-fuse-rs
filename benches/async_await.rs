@@ -11,8 +11,6 @@ use std::{
         atomic::{AtomicUsize, Ordering},
         Arc,
     },
-    task::Waker,
-    thread,
 };
 use tokio::{
     runtime::{self, Runtime},
