@@ -5,7 +5,7 @@ use core::{
     ops::{Deref, DerefMut},
 };
 
-use crate::{ObservationData, ObservationStatus};
+use crate::ObservationStatus;
 
 // All credit to [Tokio's Watch Channel](https://docs.rs/tokio/latest/tokio/sync/watch/index.html). If it's not broken don't fix it.
 pub(crate) const CLOSED_BIT: usize = 1;
@@ -136,29 +136,25 @@ pub trait SensorCoreSync: SensorCore {
     }
 
     #[inline]
-    fn wait_for_and_map_blocking<O, C: FnMut(&Self::Target) -> (O, bool)>(
+    fn wait_for_and_map_blocking<O, C: FnMut(&Self::Target) -> bool>(
         &self,
         mut condition: C,
         mut reference_version: Option<usize>,
-    ) -> (
-        usize,
-        ObservationData<Self::ReadGuard<'_>, O, ObservationStatus>,
-    ) {
+    ) -> (usize, (Self::ReadGuard<'_>, ObservationStatus)) {
         loop {
             if let Some(version) = reference_version {
                 let (latest_version, status) = self.wait_changed_blocking(version);
                 if status.closed() {
                     let guard = self.read_blocking();
-                    let (mapped, success) = condition(&guard);
+                    let success = condition(&guard);
                     return (
                         latest_version,
-                        ObservationData {
+                        (
                             guard,
-                            output: mapped,
-                            status: ObservationStatus::new()
+                            ObservationStatus::new()
                                 .set_closed()
                                 .modify_success(success),
-                        },
+                        ),
                     );
                 } else {
                     reference_version = Some(latest_version);
@@ -168,19 +164,18 @@ pub trait SensorCoreSync: SensorCore {
             }
 
             let guard = self.read_blocking();
-            let (mapped, success) = condition(&guard);
+            let success = condition(&guard);
             if success {
                 // Ensure the latest version associated with the guard is returned.
                 let version = self.version();
                 return (
                     version,
-                    ObservationData {
+                    (
                         guard,
-                        output: mapped,
-                        status: ObservationStatus::new()
+                        ObservationStatus::new()
                             .set_success()
                             .modify_closed(version & CLOSED_BIT > 0),
-                    },
+                    ),
                 );
             }
         }

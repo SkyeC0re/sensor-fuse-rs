@@ -1,5 +1,3 @@
-pub struct SendTest<T: Send>(T);
-
 use core::{
     future::Future,
     pin::Pin,

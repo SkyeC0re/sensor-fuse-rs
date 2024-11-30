@@ -66,12 +66,6 @@ impl<T> OwnedData<T> {
     }
 }
 
-pub struct ObservationData<G, O, S> {
-    pub guard: G,
-    pub output: O,
-    pub status: S,
-}
-
 const STATUS_SUCCESS_BIT: u8 = 1;
 const STATUS_CLOSED_BIT: u8 = 2;
 
