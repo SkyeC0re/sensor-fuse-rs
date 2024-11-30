@@ -5,46 +5,20 @@
 //! to provide a modular framework for implementing observer or observer + callback patterns. From the perspective of this crate sensor data can
 //! be defined as the following:
 //! - The raw data.
-//! - A callback executor which does some work whenever the raw data is updated.
-//! - An atomic version counter.
-//! - A locking strategy that allows atomic access to the raw data and callback executor.
+//! - A (possibly atomic) version counter.
+//! - A change detection strategy.
+//! - A locking strategy that allows atomic access to the raw data.
 //! - An optional heap pointer that wraps all of the above.
 //!
 //! Given this definition, Tokio's watch channel only allows for the generalization of the raw data type, however
-//! Sensor-Fuse additionally allows for the generalization of the callback executor, the locking strategy and optional heap pointer as well.
+//! Sensor-Fuse additionally allows for the generalization of the locking strategy and optional heap pointer as well.
 //! In fact, Tokio's watch channel within this framework is roughly equivalent to selecting `std::sync::RwLock` as the locking strategy,
-//! and the standard `VecBox` executor (the core requirement here being that the executor must be able to accept `Waker`s) with
-//! an `Arc` pointer wrapping everything.
+//! with an `Arc` pointer wrapping everything.
 //!
 //! ```
 //! extern crate sensor_fuse;
-//! use sensor_fuse::{prelude::*, lock::parking_lot::RwSensorWriterExec};
-//!
-//! let writer = RwSensorWriterExec::new(3);
-//!
-//! writer.register(Box::new(|x: &_| {
-//!     println!("{}", x);
-//!     // The standard executor uses a boolean return value to determine whether or not to keep the
-//!     // function in its execution set. To keep the function forever, we just unconditionally return true.
-//!     true
-//! }));
-//!
-//! let mut observer = writer.spawn_observer();
-//! assert_eq!(*observer.pull(), 3);
-//!
-//! // Prints "5".
-//! writer.update(5);
-//!
-//! assert_eq!(*observer.pull(), 5);
+//! // TODO example.
 //! ```
-//!
-//! ## Executors and Executables
-//!
-//! Within the framework, every sensor is associated with an executor which allows executables to be registered. In this context
-//! an executable can be anything but fundamentally represents a piece of work that must occur each time the sensor value is updated. The framework's basic
-//! non-trivial executor (`struct@StdExec`) for example allows for both the registration of `Waker`s to power asynchronous behaviour and
-//! callback functions that act on references to the sensor value. Each time the sensor value is updated, `struct@StdExec` will execute all `Waker`s and
-//! callbacks, dropping all the Wakers and those callbacks that produced `false` as output values.
 //!
 
 #![warn(bad_style)]
