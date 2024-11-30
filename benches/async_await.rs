@@ -240,7 +240,7 @@ where
                             true,
                         )
                         .await
-                        .guard;
+                        .0;
 
                     if guard.test_version == usize::MAX {
                         break;

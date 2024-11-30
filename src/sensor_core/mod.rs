@@ -70,29 +70,25 @@ pub trait SensorCoreAsync: SensorCore {
     }
 
     #[inline]
-    async fn wait_for_and_map<O, C: FnMut(&Self::Target) -> (O, bool)>(
+    async fn wait_for<C: FnMut(&Self::Target) -> bool>(
         &self,
         mut condition: C,
         mut reference_version: Option<usize>,
-    ) -> (
-        usize,
-        ObservationData<Self::ReadGuard<'_>, O, ObservationStatus>,
-    ) {
+    ) -> (usize, (Self::ReadGuard<'_>, ObservationStatus)) {
         loop {
             if let Some(version) = reference_version {
                 let (latest_version, status) = self.wait_changed(version).await;
                 if status.closed() {
                     let guard = self.read().await;
-                    let (mapped, success) = condition(&guard);
+                    let success = condition(&guard);
                     return (
                         latest_version,
-                        ObservationData {
+                        (
                             guard,
-                            output: mapped,
-                            status: ObservationStatus::new()
+                            ObservationStatus::new()
                                 .set_closed()
                                 .modify_success(success),
-                        },
+                        ),
                     );
                 } else {
                     reference_version = Some(latest_version);
@@ -102,19 +98,18 @@ pub trait SensorCoreAsync: SensorCore {
             }
 
             let guard = self.read().await;
-            let (mapped, success) = condition(&guard);
+            let success = condition(&guard);
             if success {
                 // Ensure the latest version associated with the guard is returned.
                 let version = self.version();
                 return (
                     version,
-                    ObservationData {
+                    (
                         guard,
-                        output: mapped,
-                        status: ObservationStatus::new()
+                        ObservationStatus::new()
                             .set_success()
                             .modify_closed(version & CLOSED_BIT > 0),
-                    },
+                    ),
                 );
             }
         }

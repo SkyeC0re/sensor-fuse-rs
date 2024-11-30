@@ -80,16 +80,19 @@ const STATUS_CLOSED_BIT: u8 = 2;
 pub struct ObservationStatus(u8);
 
 impl ObservationStatus {
+    /// Creates a new non-closed, non-successful observation status.
     #[inline(always)]
     pub const fn new() -> Self {
         Self(0)
     }
 
+    /// Returns true if updates are no longer possible.
     #[inline(always)]
     pub const fn closed(&self) -> bool {
         self.0 & STATUS_CLOSED_BIT > 0
     }
 
+    /// Returns true if an observation occurred successfully.
     #[inline(always)]
     pub const fn success(&self) -> bool {
         self.0 & STATUS_SUCCESS_BIT > 0
@@ -210,7 +213,7 @@ where
     for<'a> &'a S: ShareStrategy<'a, Target = T>,
 {
     #[inline]
-    pub fn new(shared_core: S) -> Self {
+    pub(crate) fn new(shared_core: S) -> Self {
         shared_core.share_elided_ref().register_writer();
         Self(shared_core)
     }
@@ -287,6 +290,7 @@ where
         }
     }
 
+    /// Attempts to instantaneously aqcuire a write lock to the underlying core's data.
     #[inline(always)]
     pub fn try_write(
         &self,
@@ -294,6 +298,7 @@ where
         self.0.share_elided_ref().try_write()
     }
 
+    /// Attempts to instantaneously aqcuire a read lock to the underlying core's data.
     #[inline(always)]
     pub fn try_read(
         &self,
@@ -347,8 +352,13 @@ pub trait SensorObserve {
         Self: 'read;
     type Checkpoint: VersionFunctionality + Clone + Unpin;
 
+    /// Saves the current version checkpoint of the sensor, and allows the observer to revert to this
+    /// checkpoint in the future using `fn@restore_checkpoint`.
     fn save_checkpoint(&self) -> Self::Checkpoint;
 
+    /// Restores the current version checkpoint of the observer. Note that this does **not** restore the
+    /// actual data of the sensor from when the checkpoint was saved, only what version the observer perceives
+    /// as the most recent data version of the sensor.
     fn restore_checkpoint(&mut self, checkpoint: &Self::Checkpoint);
 
     fn mark_seen(&mut self);
@@ -389,28 +399,12 @@ pub trait SensorObserveAsync: SensorObserve {
     /// as such an additional call to `pull` or `pull_updated` is required.
     async fn wait_until_changed(&self) -> (Self::Checkpoint, ObservationStatus);
 
-    async fn wait_for_and_map<O, M: FnMut(&Self::Target) -> (O, bool)>(
+    /// Asynchronously wait for a particular condition to become true and allows the return
+    async fn wait_for<M: FnMut(&Self::Target) -> bool>(
         &mut self,
         condition_map: M,
         check_current: bool,
-    ) -> ObservationData<Self::ReadGuard<'_>, O, ObservationStatus>;
-
-    /// Asynchronously wait until the sensor value has been updated with a value that satisfies a condition. This call **will** update the observer's version
-    /// and evaluate the condition function on values obtained by `pull_updated`.
-    async fn wait_for<F: FnMut(&Self::Target) -> bool>(
-        &mut self,
-        mut condition: F,
-        check_current: bool,
-    ) -> ObservationData<Self::ReadGuard<'_>, (), ObservationStatus> {
-        self.wait_for_and_map(
-            |guard| {
-                let success = condition(&guard);
-                ((), success)
-            },
-            check_current,
-        )
-        .await
-    }
+    ) -> (Self::ReadGuard<'_>, ObservationStatus);
 }
 
 #[repr(transparent)]
@@ -418,6 +412,7 @@ pub trait SensorObserveAsync: SensorObserve {
 pub struct Version(usize);
 
 pub trait VersionFunctionality {
+    /// Returns true if the sensor is closed and no further updates can occur.
     fn closed(&self) -> bool;
 }
 
@@ -494,15 +489,15 @@ where
         (Version(version), status)
     }
 
-    async fn wait_for_and_map<O, M: FnMut(&Self::Target) -> (O, bool)>(
+    async fn wait_for<C: FnMut(&Self::Target) -> bool>(
         &mut self,
-        condition_map: M,
+        condition: C,
         check_current: bool,
-    ) -> ObservationData<Self::ReadGuard<'_>, O, ObservationStatus> {
+    ) -> (Self::ReadGuard<'_>, ObservationStatus) {
         let (latest_version, data) = self
             .core
-            .wait_for_and_map(
-                condition_map,
+            .wait_for(
+                condition,
                 if check_current {
                     None
                 } else {
@@ -594,27 +589,20 @@ where
         self.inner.wait_until_changed()
     }
 
-    async fn wait_for_and_map<O, M: FnMut(&T) -> (O, bool)>(
+    async fn wait_for<C: FnMut(&T) -> bool>(
         &mut self,
-        mut condition_map: M,
+        mut condition: C,
         check_current: bool,
-    ) -> ObservationData<Self::ReadGuard<'_>, O, ObservationStatus> {
+    ) -> (Self::ReadGuard<'_>, ObservationStatus) {
         let MappedSensorObserver { inner, map } = self;
-        let data = inner
-            .wait_for_and_map(
-                move |guard| {
-                    let guard = OwnedData((map.get_mut())(&guard));
-                    let x = condition_map(&guard);
-                    ((guard, x.0), x.1)
-                },
+        let mut mapped = MaybeUninit::uninit();
+        let (_, status) = inner
+            .wait_for(
+                |guard| condition(mapped.write(OwnedData((map.get_mut())(&guard)))),
                 check_current,
             )
             .await;
-        ObservationData {
-            guard: data.output.0,
-            output: data.output.1,
-            status: data.status,
-        }
+        (unsafe { mapped.assume_init() }, status)
     }
 }
 
@@ -811,11 +799,11 @@ where
         }
     }
 
-    async fn wait_for_and_map<O, M: FnMut(&T) -> (O, bool)>(
+    async fn wait_for<C: FnMut(&T) -> bool>(
         &mut self,
-        mut condition_map: M,
+        mut condition: C,
         check_current: bool,
-    ) -> ObservationData<Self::ReadGuard<'_>, O, ObservationStatus> {
+    ) -> (Self::ReadGuard<'_>, ObservationStatus) {
         let checkpoint = self.save_checkpoint();
         let mut data = DropFn::new((self, checkpoint), |(s, cp)| s.restore_checkpoint(cp));
 
@@ -835,22 +823,20 @@ where
                 b: checkpoint_b,
             };
 
-            let guard = OwnedData(s.fuse.get_mut()(&guard_a, &guard_b));
-            let (mapped, success) = condition_map(&guard);
+            let fused = OwnedData(s.fuse.get_mut()(&guard_a, &guard_b));
 
-            if success {
+            if condition(&fused) {
                 *restore_checkpoint = fused_checkpoint;
-                return ObservationData {
-                    guard,
-                    output: mapped,
-                    status: ObservationStatus::new()
+                return (
+                    fused,
+                    ObservationStatus::new()
                         .set_success()
                         .modify_closed(restore_checkpoint.closed()),
-                };
+                );
             }
 
-            drop(guard_a);
             drop(guard_b);
+            drop(guard_a);
 
             s.restore_checkpoint(&fused_checkpoint);
             let _ = s.wait_until_changed().await;
