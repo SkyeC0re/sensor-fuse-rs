@@ -255,3 +255,26 @@ impl<T> SensorCoreAsync for AsyncCore<T> {
         (guard, modified)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::sensor_core::SensorCoreAsync;
+
+    use super::AsyncCore;
+
+    #[repr(transparent)]
+    struct IsSend<S: Send>(S);
+
+    /// We prove that all futures relating to `AsyncCore` are inherently `Send`.
+    #[test]
+    fn send_proofs() {
+        let core = AsyncCore::new(0);
+
+        let _ = IsSend(core.read());
+        let _ = IsSend(core.write());
+        let _ = IsSend(core.modify(|_| true));
+        let _ = IsSend(core.wait_changed(0));
+        let _ = IsSend(core.wait_for(|_| true, 0));
+        let _ = IsSend(core.write());
+    }
+}

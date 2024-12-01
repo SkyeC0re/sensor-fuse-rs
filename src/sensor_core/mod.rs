@@ -49,13 +49,13 @@ pub trait SensorCoreAsync: SensorCore {
     /// Asyncronously acquires a write lock to the underlying data.
     fn write(&self) -> impl Future<Output = Self::WriteGuard<'_>>;
 
-    /// Wait until a change from reference version is detected and returns `Ok` if a change was detected or `Err` if
-    /// the sensor has been closed (regardless of whether an update occurred). In both cases the current version is returned.
+    /// Wait until a change from reference version is detected and returns the most recent version and the observation status.
     fn wait_changed(
         &self,
         reference_version: usize,
     ) -> impl Future<Output = (usize, ObservationStatus)>;
 
+    /// Modify the current sensor data and optionally update the version of the sensor.
     #[inline]
     async fn modify<M: FnOnce(&mut Self::Target) -> bool>(
         &self,
@@ -69,32 +69,30 @@ pub trait SensorCoreAsync: SensorCore {
         (guard, modified)
     }
 
+    /// Asynchronously wait for a particular condition to become true. This method initially waits for the sensor's current version to deviate from
+    /// the reference version before starting to check the sensor value with the condition function.
     #[inline]
     async fn wait_for<C: FnMut(&Self::Target) -> bool>(
         &self,
         mut condition: C,
-        mut reference_version: Option<usize>,
+        mut reference_version: usize,
     ) -> (usize, (Self::ReadGuard<'_>, ObservationStatus)) {
         loop {
-            if let Some(version) = reference_version {
-                let (latest_version, status) = self.wait_changed(version).await;
-                if status.closed() {
-                    let guard = self.read().await;
-                    let success = condition(&guard);
-                    return (
-                        latest_version,
-                        (
-                            guard,
-                            ObservationStatus::new()
-                                .set_closed()
-                                .modify_success(success),
-                        ),
-                    );
-                } else {
-                    reference_version = Some(latest_version);
-                }
+            let (latest_version, status) = self.wait_changed(reference_version).await;
+            if status.closed() {
+                let guard = self.read().await;
+                let success = condition(&guard);
+                return (
+                    latest_version,
+                    (
+                        guard,
+                        ObservationStatus::new()
+                            .set_closed()
+                            .modify_success(success),
+                    ),
+                );
             } else {
-                reference_version = Some(self.version());
+                reference_version = latest_version;
             }
 
             let guard = self.read().await;

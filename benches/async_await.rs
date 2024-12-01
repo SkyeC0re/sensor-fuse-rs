@@ -217,28 +217,25 @@ where
                 loop {
                     let mut iteration = 0;
                     let guard = reader
-                        .wait_for(
-                            |state: &ContentionData| {
-                                if state.test_version == usize::MAX {
-                                    return true;
-                                }
+                        .wait_for(|state: &ContentionData| {
+                            if state.test_version == usize::MAX {
+                                return true;
+                            }
 
-                                if iteration > 0 && last_observed_data == state.data_version {
-                                    return false;
-                                }
+                            if iteration > 0 && last_observed_data == state.data_version {
+                                return false;
+                            }
 
-                                last_observed_data = state.data_version;
-                                let mut ret = iteration > 1;
+                            last_observed_data = state.data_version;
+                            let mut ret = iteration > 1;
 
-                                if iteration == 1 {
-                                    ret |= random::<bool>();
-                                }
+                            if iteration == 1 {
+                                ret |= random::<bool>();
+                            }
 
-                                iteration += 1;
-                                ret
-                            },
-                            true,
-                        )
+                            iteration += 1;
+                            ret
+                        })
                         .await
                         .0;
 
@@ -321,7 +318,7 @@ where
 
             let _ = black_box(
                 observer
-                    .wait_for(|state| state.writers_completed == writers_len, true)
+                    .wait_for(|state| state.writers_completed == writers_len)
                     .await,
             );
         });
@@ -343,10 +340,7 @@ where
             let readers_len = self.reader_handles.len();
 
             let _ = observer
-                .wait_for(
-                    |state| state.observers_completed.load(Ordering::Relaxed) == readers_len,
-                    true,
-                )
+                .wait_for(|state| state.observers_completed.load(Ordering::Relaxed) == readers_len)
                 .await;
         });
     }

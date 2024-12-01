@@ -393,11 +393,17 @@ pub trait SensorObserveAsync: SensorObserve {
     /// as such an additional call to `pull` or `pull_updated` is required.
     async fn wait_until_changed(&self) -> (Self::Checkpoint, ObservationStatus);
 
-    /// Asynchronously wait for a particular condition to become true and allows the return
+    /// Asynchronously wait for a particular condition to become true. This method checks the current sensor value even if the current value is marked
+    /// as seen by the observer.
     async fn wait_for<M: FnMut(&Self::Target) -> bool>(
         &mut self,
         condition_map: M,
-        check_current: bool,
+    ) -> (Self::ReadGuard<'_>, ObservationStatus);
+
+    /// Asynchronously wait for a particular condition to become true. This method waits for the sensor value to be marked unseen before staring checks.
+    async fn wait_for_next<M: FnMut(&Self::Target) -> bool>(
+        &mut self,
+        condition_map: M,
     ) -> (Self::ReadGuard<'_>, ObservationStatus);
 }
 
@@ -486,19 +492,20 @@ where
     async fn wait_for<C: FnMut(&Self::Target) -> bool>(
         &mut self,
         condition: C,
-        check_current: bool,
     ) -> (Self::ReadGuard<'_>, ObservationStatus) {
         let (latest_version, data) = self
             .core
-            .wait_for(
-                condition,
-                if check_current {
-                    None
-                } else {
-                    Some(self.version)
-                },
-            )
+            .wait_for(condition, self.core.version().wrapping_sub(VERSION_BUMP))
             .await;
+        self.version = latest_version;
+        data
+    }
+
+    async fn wait_for_next<C: FnMut(&Self::Target) -> bool>(
+        &mut self,
+        condition: C,
+    ) -> (Self::ReadGuard<'_>, ObservationStatus) {
+        let (latest_version, data) = self.core.wait_for(condition, self.version).await;
         self.version = latest_version;
         data
     }
@@ -586,15 +593,23 @@ where
     async fn wait_for<C: FnMut(&T) -> bool>(
         &mut self,
         mut condition: C,
-        check_current: bool,
     ) -> (Self::ReadGuard<'_>, ObservationStatus) {
         let MappedSensorObserver { inner, map } = self;
         let mut mapped = MaybeUninit::uninit();
         let (_, status) = inner
-            .wait_for(
-                |guard| condition(mapped.write(OwnedData((map.get_mut())(&guard)))),
-                check_current,
-            )
+            .wait_for(|guard| condition(mapped.write(OwnedData((map.get_mut())(&guard)))))
+            .await;
+        (unsafe { mapped.assume_init() }, status)
+    }
+
+    async fn wait_for_next<C: FnMut(&T) -> bool>(
+        &mut self,
+        mut condition: C,
+    ) -> (Self::ReadGuard<'_>, ObservationStatus) {
+        let MappedSensorObserver { inner, map } = self;
+        let mut mapped = MaybeUninit::uninit();
+        let (_, status) = inner
+            .wait_for_next(|guard| condition(mapped.write(OwnedData((map.get_mut())(&guard)))))
             .await;
         (unsafe { mapped.assume_init() }, status)
     }
@@ -767,37 +782,20 @@ impl<
     }
 }
 
-impl<A, B, T, F> SensorObserveAsync for FusedSensorObserver<A, B, T, F>
+impl<A, B, T, F> FusedSensorObserver<A, B, T, F>
 where
     A: SensorObserve + SensorObserveAsync,
     B: SensorObserve + SensorObserveAsync,
     F: FnMut(&A::Target, &B::Target) -> T,
 {
-    fn read(&self) -> impl Future<Output = Self::ReadGuard<'_>> {
-        async move {
-            let a = self.a.read().await;
-            let b = self.b.read().await;
-            OwnedData(unsafe { (*self.fuse.get())(&*a, &*b) })
-        }
-    }
-
-    fn wait_until_changed(&self) -> impl Future<Output = (Self::Checkpoint, ObservationStatus)> {
-        let Self { a, b, .. } = self;
-        FusedWaitChangedFut {
-            a: MaybeUninit::new(a.wait_until_changed()),
-            ca: a.save_checkpoint(),
-            a_valid: true,
-            b: self.b.wait_until_changed(),
-            cb: b.save_checkpoint(),
-            b_closed: move || b.is_closed(),
-        }
-    }
-
-    async fn wait_for<C: FnMut(&T) -> bool>(
+    async fn wait_for_inner<C: FnMut(&T) -> bool>(
         &mut self,
         mut condition: C,
         check_current: bool,
-    ) -> (Self::ReadGuard<'_>, ObservationStatus) {
+    ) -> (
+        <FusedSensorObserver<A, B, T, F> as SensorObserve>::ReadGuard<'_>,
+        ObservationStatus,
+    ) {
         let checkpoint = self.save_checkpoint();
         let mut data = DropFn::new((self, checkpoint), |(s, cp)| s.restore_checkpoint(cp));
 
@@ -835,6 +833,47 @@ where
             s.restore_checkpoint(&fused_checkpoint);
             let _ = s.wait_until_changed().await;
         }
+    }
+}
+impl<A, B, T, F> SensorObserveAsync for FusedSensorObserver<A, B, T, F>
+where
+    A: SensorObserve + SensorObserveAsync,
+    B: SensorObserve + SensorObserveAsync,
+    F: FnMut(&A::Target, &B::Target) -> T,
+{
+    fn read(&self) -> impl Future<Output = Self::ReadGuard<'_>> {
+        async move {
+            let a = self.a.read().await;
+            let b = self.b.read().await;
+            OwnedData(unsafe { (*self.fuse.get())(&*a, &*b) })
+        }
+    }
+
+    fn wait_until_changed(&self) -> impl Future<Output = (Self::Checkpoint, ObservationStatus)> {
+        let Self { a, b, .. } = self;
+        FusedWaitChangedFut {
+            a: MaybeUninit::new(a.wait_until_changed()),
+            ca: a.save_checkpoint(),
+            a_valid: true,
+            b: self.b.wait_until_changed(),
+            cb: b.save_checkpoint(),
+            b_closed: move || b.is_closed(),
+        }
+    }
+
+    async fn wait_for<C: FnMut(&T) -> bool>(
+        &mut self,
+        condition: C,
+    ) -> (Self::ReadGuard<'_>, ObservationStatus) {
+        self.wait_for_inner(condition, true).await
+    }
+
+    #[inline(always)]
+    async fn wait_for_next<C: FnMut(&T) -> bool>(
+        &mut self,
+        condition: C,
+    ) -> (Self::ReadGuard<'_>, ObservationStatus) {
+        self.wait_for_inner(condition, false).await
     }
 }
 

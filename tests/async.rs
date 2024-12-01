@@ -199,7 +199,7 @@ where
     let writer = SensorWriter::<_, S>::from(0);
     let mut observer = writer.spawn_observer();
 
-    wookie!(wait_for: observer.wait_for(|v| *v == 2, true));
+    wookie!(wait_for: observer.wait_for(|v| *v == 2));
     assert!(wait_for.poll().is_pending());
 
     wookie!(modify1: writer
@@ -301,7 +301,7 @@ where
     let writer = SensorWriter::<_, S>::from(0);
     let mut observer = writer.spawn_observer().map(|v| *v + 10);
 
-    wookie!(wait_for: observer.wait_for(|v| *v == 12, true));
+    wookie!(wait_for: observer.wait_for(|v| *v == 12));
     assert!(wait_for.poll().is_pending());
 
     wookie!(modify1: writer
@@ -436,7 +436,7 @@ where
         .spawn_observer()
         .fuse(writer2.spawn_observer(), |x, y| *x + *y);
 
-    let mut wait_for_data = Wookie::new(observer.wait_for(|v| *v > 2, true));
+    let mut wait_for_data = Wookie::new(observer.wait_for(|v| *v > 2));
     let mut wait_for = unsafe { Pin::new_unchecked(&mut wait_for_data) };
     assert!(wait_for.poll().is_pending());
 
@@ -479,7 +479,7 @@ where
 
     observer.mark_seen();
 
-    let mut wait_for_data = Wookie::new(observer.wait_for(|v| *v > 3, true));
+    let mut wait_for_data = Wookie::new(observer.wait_for(|v| *v > 3));
     let mut wait_for = unsafe { Pin::new_unchecked(&mut wait_for_data) };
     assert!(wait_for.poll().is_pending());
 
