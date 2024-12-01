@@ -1,3 +1,6 @@
+//! Sensor core functionality and standard sensor core implementations.
+//!
+
 pub mod alloc;
 
 use core::{
@@ -137,28 +140,24 @@ pub trait SensorCoreSync: SensorCore {
     fn wait_for_and_map_blocking<O, C: FnMut(&Self::Target) -> bool>(
         &self,
         mut condition: C,
-        mut reference_version: Option<usize>,
+        mut reference_version: usize,
     ) -> (usize, (Self::ReadGuard<'_>, ObservationStatus)) {
         loop {
-            if let Some(version) = reference_version {
-                let (latest_version, status) = self.wait_changed_blocking(version);
-                if status.closed() {
-                    let guard = self.read_blocking();
-                    let success = condition(&guard);
-                    return (
-                        latest_version,
-                        (
-                            guard,
-                            ObservationStatus::new()
-                                .set_closed()
-                                .modify_success(success),
-                        ),
-                    );
-                } else {
-                    reference_version = Some(latest_version);
-                }
+            let (latest_version, status) = self.wait_changed_blocking(reference_version);
+            if status.closed() {
+                let guard = self.read_blocking();
+                let success = condition(&guard);
+                return (
+                    latest_version,
+                    (
+                        guard,
+                        ObservationStatus::new()
+                            .set_closed()
+                            .modify_success(success),
+                    ),
+                );
             } else {
-                reference_version = Some(self.version());
+                reference_version = latest_version;
             }
 
             let guard = self.read_blocking();

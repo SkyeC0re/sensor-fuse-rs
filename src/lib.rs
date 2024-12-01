@@ -59,13 +59,6 @@ use sensor_core::{closed_bit_set, SensorCore, SensorCoreAsync, VERSION_BUMP};
 #[repr(transparent)]
 pub struct OwnedData<T>(pub T);
 
-impl<T> OwnedData<T> {
-    #[inline(always)]
-    pub fn into_inner(self) -> T {
-        self.0
-    }
-}
-
 const STATUS_SUCCESS_BIT: u8 = 1;
 const STATUS_CLOSED_BIT: u8 = 2;
 
