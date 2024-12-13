@@ -482,6 +482,7 @@ where
         (Version(version), status)
     }
 
+    #[inline]
     async fn wait_for<C: FnMut(&Self::Target) -> bool>(
         &mut self,
         condition: C,
@@ -494,6 +495,7 @@ where
         data
     }
 
+    #[inline]
     async fn wait_for_next<C: FnMut(&Self::Target) -> bool>(
         &mut self,
         condition: C,
@@ -588,11 +590,20 @@ where
         mut condition: C,
     ) -> (Self::ReadGuard<'_>, ObservationStatus) {
         let MappedSensorObserver { inner, map } = self;
-        let mut mapped = MaybeUninit::uninit();
-        let (_, status) = inner
-            .wait_for(|guard| condition(mapped.write(OwnedData((map.get_mut())(&guard)))))
+        let mut mapped = None;
+        let (guard, status) = inner
+            .wait_for(|guard| {
+                let data = OwnedData((map.get_mut())(&guard));
+                let success = condition(&data);
+
+                mapped = Some(data);
+                success
+            })
             .await;
-        (unsafe { mapped.assume_init() }, status)
+        (
+            mapped.unwrap_or_else(|| OwnedData((map.get_mut())(&guard))),
+            status,
+        )
     }
 
     async fn wait_for_next<C: FnMut(&T) -> bool>(

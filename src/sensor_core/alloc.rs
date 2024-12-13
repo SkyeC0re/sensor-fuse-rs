@@ -6,7 +6,7 @@ use core::{
     task::{Context, Poll, Waker},
 };
 use core::{hint::spin_loop, mem::MaybeUninit};
-use std::future::poll_fn;
+use std::{cell::UnsafeCell, future::poll_fn};
 
 use async_lock::{
     futures::{Read, Write},
@@ -42,6 +42,7 @@ unsafe impl<'a> Send for WaitFut<'a> {}
 impl<'a> Future for WaitFut<'a> {
     type Output = ();
 
+    #[inline]
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         if self.node == null_mut() {
             self.node = Box::into_raw(Box::new(WakerNode {
@@ -71,6 +72,7 @@ impl<'a> Future for WaitFut<'a> {
 }
 
 impl<'a> Drop for WaitFut<'a> {
+    #[inline]
     fn drop(&mut self) {
         if self.node == null_mut() {
             return;
@@ -83,12 +85,14 @@ impl<'a> Drop for WaitFut<'a> {
 }
 
 impl WakerList {
+    #[inline(always)]
     const fn new() -> Self {
         Self {
             head: AtomicPtr::new(null_mut()),
         }
     }
 
+    #[inline]
     fn wait(&self) -> WaitFut {
         WaitFut {
             list: self,
@@ -96,6 +100,7 @@ impl WakerList {
         }
     }
 
+    #[inline]
     fn wake_all(&self) {
         let mut list = self.head.swap(null_mut(), Ordering::Acquire);
 
@@ -160,27 +165,33 @@ impl<T> SensorCore for AsyncCore<T> {
 
     type WriteGuard<'write> = RwLockWriteGuard<'write, T> where Self: 'write;
 
+    #[inline(always)]
     fn version(&self) -> usize {
         self.version.load(Ordering::Acquire)
     }
 
+    #[inline]
     fn mark_unseen(&self) {
         let _ = self.version.fetch_add(VERSION_BUMP, Ordering::Release);
         self.waiter_list.wake_all();
     }
 
+    #[inline]
     fn try_read(&self) -> Option<Self::ReadGuard<'_>> {
         self.lock.try_read()
     }
 
+    #[inline]
     fn try_write(&self) -> Option<Self::WriteGuard<'_>> {
         self.lock.try_write()
     }
 
+    #[inline]
     fn register_writer(&self) {
         let _ = self.writers.fetch_add(1, Ordering::Relaxed);
     }
 
+    #[inline]
     fn deregister_writer(&self) {
         if self.writers.fetch_sub(1, Ordering::Relaxed) == 1 {
             let _ = self.version.fetch_or(CLOSED_BIT, Ordering::Release);
@@ -190,16 +201,19 @@ impl<T> SensorCore for AsyncCore<T> {
 
 impl<T> SensorCoreAsync for AsyncCore<T> {
     #[allow(refining_impl_trait)]
+    #[inline(always)]
     fn read(&self) -> Read<'_, T> {
         self.lock.read()
     }
 
     #[allow(refining_impl_trait)]
+    #[inline(always)]
     fn write(&self) -> Write<'_, T> {
         self.lock.write()
     }
 
     #[allow(refining_impl_trait)]
+    #[inline]
     fn wait_changed(
         &self,
         reference_version: usize,
@@ -243,6 +257,7 @@ impl<T> SensorCoreAsync for AsyncCore<T> {
         })
     }
 
+    #[inline]
     async fn modify<M: FnOnce(&mut Self::Target) -> bool>(
         &self,
         modifier: M,
@@ -253,6 +268,41 @@ impl<T> SensorCoreAsync for AsyncCore<T> {
             self.mark_unseen();
         }
         (guard, modified)
+    }
+}
+
+// Ensure that WakerNodes cannot exist with addresses utilizing the lowest 2 bits.
+#[repr(align(4))]
+struct RwLockNode {
+    waker: MaybeUninit<Waker>,
+    // Combination of the reference version  in the upper bits and reader/writer flag in the lowest bit.
+    data: usize,
+    next: AtomicUsize,
+}
+struct RwLockList {
+    head: AtomicPtr<RwLockNode>,
+    tail: AtomicPtr<RwLockNode>,
+    idle_reads: UnsafeCell<*mut WakerNode>,
+    version: AtomicUsize,
+    state: AtomicUsize,
+}
+
+struct ReadFut<'a> {
+    list: &'a RwLockList,
+    version: usize,
+    node: *mut RwLockNode,
+}
+
+impl<'a> Future for ReadFut<'a> {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        if self.node.is_null() {
+            let state = self.list.state.load(Ordering::Relaxed);
+
+            if state & 1 == 1 {}
+        }
+        Poll::Pending
     }
 }
 

@@ -6,7 +6,7 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-async-lock = "3.4.0"
+async-lock = { version = "3.4.0", default-features = false }
 derived-deref = "2.1.0"
 either = { version = "1.13.0", default-features = false }
 event-listener = "5.3.1"

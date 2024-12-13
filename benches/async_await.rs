@@ -453,7 +453,7 @@ fn tokio_watch_r5_w5_o50_s10_observation(c: &mut BenchmarkGroup<WallTime>) {
 }
 
 fn arc_async_r5_w5_o50_s100_observation(c: &mut BenchmarkGroup<WallTime>) {
-    let env = ContentionEnvironment::<Arc<AsyncCore<ContentionData>>, _>::new(5, 5);
+    let env = ContentionEnvironment::<Arc<AsyncCore<ContentionData>>, _>::new(10, 10);
 
     c.bench_function("arc_async_alloc_r5_w5_o50_s100_observation", |b| {
         b.iter(|| {
@@ -463,7 +463,7 @@ fn arc_async_r5_w5_o50_s100_observation(c: &mut BenchmarkGroup<WallTime>) {
 }
 
 fn tokio_watch_r5_w5_o50_s100_observation(c: &mut BenchmarkGroup<WallTime>) {
-    let env = WatchContentionEnvironment::new(5, 5);
+    let env = WatchContentionEnvironment::new(10, 10);
 
     c.bench_function("tokio_watch_r5_w5_o50_s100_observation", |b| {
         b.iter(|| {
@@ -513,7 +513,7 @@ fn tokio_watch_r5_w5_o50_s10_writes(c: &mut BenchmarkGroup<WallTime>) {
 }
 
 fn arc_async_r5_w5_o50_s100_writes(c: &mut BenchmarkGroup<WallTime>) {
-    let env = ContentionEnvironment::<Arc<AsyncCore<ContentionData>>, _>::new(5, 5);
+    let env = ContentionEnvironment::<Arc<AsyncCore<ContentionData>>, _>::new(10, 10);
 
     c.bench_function("arc_async_alloc_r5_w5_o50_s100_writes", |b| {
         b.iter(|| {
@@ -523,7 +523,7 @@ fn arc_async_r5_w5_o50_s100_writes(c: &mut BenchmarkGroup<WallTime>) {
 }
 
 fn tokio_watch_r5_w5_o50_s100_writes(c: &mut BenchmarkGroup<WallTime>) {
-    let env = WatchContentionEnvironment::new(5, 5);
+    let env = WatchContentionEnvironment::new(10, 10);
 
     c.bench_function("tokio_watch_r5_w5_o50_s100_writes", |b| {
         b.iter(|| {
@@ -538,10 +538,10 @@ pub fn bench_reads() {
 
     group.sampling_mode(criterion::SamplingMode::Linear);
 
-    arc_async_r5_w5_o50_s0_observation(&mut group);
-    tokio_watch_r5_w5_o50_s0_observation(&mut group);
-    arc_async_r5_w5_o50_s10_observation(&mut group);
-    tokio_watch_r5_w5_o50_s10_observation(&mut group);
+    // arc_async_r5_w5_o50_s0_observation(&mut group);
+    // tokio_watch_r5_w5_o50_s0_observation(&mut group);
+    // arc_async_r5_w5_o50_s10_observation(&mut group);
+    // tokio_watch_r5_w5_o50_s10_observation(&mut group);
     arc_async_r5_w5_o50_s100_observation(&mut group);
     tokio_watch_r5_w5_o50_s100_observation(&mut group);
     group.finish();
@@ -553,10 +553,10 @@ pub fn bench_writes() {
 
     group.sampling_mode(criterion::SamplingMode::Linear);
 
-    arc_async_r5_w5_o50_s0_writes(&mut group);
-    tokio_watch_r5_w5_o50_s0_writes(&mut group);
-    arc_async_r5_w5_o50_s10_writes(&mut group);
-    tokio_watch_r5_w5_o50_s10_writes(&mut group);
+    // arc_async_r5_w5_o50_s0_writes(&mut group);
+    // tokio_watch_r5_w5_o50_s0_writes(&mut group);
+    // arc_async_r5_w5_o50_s10_writes(&mut group);
+    // tokio_watch_r5_w5_o50_s10_writes(&mut group);
     arc_async_r5_w5_o50_s100_writes(&mut group);
     tokio_watch_r5_w5_o50_s100_writes(&mut group);
     group.finish();
