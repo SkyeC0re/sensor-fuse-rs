@@ -4,7 +4,7 @@ use sensor_fuse::{
     sensor_core::{alloc::AsyncCore, SensorCoreAsync},
     SensorWriter, ShareStrategy,
 };
-use std::{pin::Pin, sync::Arc, task::Poll};
+use std::{ops::Deref, pin::Pin, sync::Arc, task::Poll};
 
 use wookie::{wookie, Wookie};
 
@@ -13,69 +13,69 @@ macro_rules! test_single_thread {
         paste! {
             #[test]
             fn [<$prefix _read>]() {
-                test_read::<$sensor_writer>();
+                test_read::<_, $sensor_writer>();
             }
 
             #[test]
             fn [<$prefix _write_read>]() {
-                test_write_read::<$sensor_writer>();
+                test_write_read::<_, $sensor_writer>();
             }
 
             #[test]
             fn [<$prefix _modify>]() {
-                test_modify::<$sensor_writer>();
+                test_modify::<_, $sensor_writer>();
             }
 
             #[test]
             fn [<$prefix _wait_changed>]() {
-                test_wait_changed::<$sensor_writer>();
+                test_wait_changed::<_, $sensor_writer>();
             }
 
             #[test]
             fn [<$prefix _wait_for>]() {
-                test_wait_for::<$sensor_writer>();
+                test_wait_for::<_, $sensor_writer>();
             }
 
             #[test]
             fn [<$prefix _mapped_read>]() {
-                test_mapped_read::<$sensor_writer>();
+                test_mapped_read::<_, $sensor_writer>();
             }
 
             #[test]
             fn [<$prefix _mapped_wait_changed>]() {
-                test_mapped_wait_changed::<$sensor_writer>();
+                test_mapped_wait_changed::<_, $sensor_writer>();
             }
 
             #[test]
             fn [<$prefix _mapped_wait_for>]() {
-                test_mapped_wait_for::<$sensor_writer>();
+                test_mapped_wait_for::<_, $sensor_writer>();
             }
 
             #[test]
             fn [<$prefix _fused_read>]() {
-                test_fused_read::<$sensor_writer>();
+                test_fused_read::<_, $sensor_writer>();
             }
 
             #[test]
             fn [<$prefix _fused_wait_changed>]() {
-                test_fused_wait_changed::<$sensor_writer>();
+                test_fused_wait_changed::<_, $sensor_writer>();
             }
 
             #[test]
             fn [<$prefix _fused_wait_for>]() {
-                test_fused_wait_for::<$sensor_writer>();
+                test_fused_wait_for::<_, $sensor_writer>();
             }
         }
     };
 }
 
-fn test_read<S>()
+fn test_read<C, S>()
 where
-    for<'a> &'a S: ShareStrategy<'a, Target = usize>,
-    for<'a> <&'a S as ShareStrategy<'a>>::Core: SensorCoreAsync,
-    SensorWriter<usize, S>: From<usize>,
+    C: SensorCoreAsync<Target = usize> + From<usize>,
+    S: Deref<Target = C> + From<C>,
+    for<'a> &'a S: ShareStrategy<'a, Core = C>,
 {
-    let writer = SensorWriter::<_, S>::from(0);
+    let writer = SensorWriter::from_value(0);
     let observer = writer.spawn_observer();
 
     assert!(!observer.has_changed());
@@ -93,13 +93,13 @@ where
     };
 }
 
-fn test_write_read<S>()
+fn test_write_read<C, S>()
 where
-    for<'a> &'a S: ShareStrategy<'a, Target = usize>,
-    for<'a> <&'a S as ShareStrategy<'a>>::Core: SensorCoreAsync,
-    SensorWriter<usize, S>: From<usize>,
+C: SensorCoreAsync<Target = usize> + From<usize>,
+S: Deref<Target = C> + From<C>,
+for<'a> &'a S: ShareStrategy<'a, Core = C>,
 {
-    let writer = SensorWriter::<_, S>::from(0);
+    let writer = SensorWriter::from_value(0);
     let observer = writer.spawn_observer();
 
     wookie!(write: writer.write());
@@ -127,13 +127,13 @@ where
     };
 }
 
-fn test_modify<S>()
+fn test_modify<C, S>()
 where
-    for<'a> &'a S: ShareStrategy<'a, Target = usize>,
-    for<'a> <&'a S as ShareStrategy<'a>>::Core: SensorCoreAsync,
-    SensorWriter<usize, S>: From<usize>,
+C: SensorCoreAsync<Target = usize> + From<usize>,
+S: Deref<Target = C> + From<C>,
+for<'a> &'a S: ShareStrategy<'a, Core = C>,
 {
-    let writer = SensorWriter::<_, S>::from(0);
+    let writer = SensorWriter::<_, S>::from_value(0);
     let observer = writer.spawn_observer();
 
     wookie!(modify1: writer
@@ -155,13 +155,13 @@ where
     assert!(observer.has_changed());
 }
 
-fn test_wait_changed<S>()
+fn test_wait_changed<C, S>()
 where
-    for<'a> &'a S: ShareStrategy<'a, Target = usize>,
-    for<'a> <&'a S as ShareStrategy<'a>>::Core: SensorCoreAsync,
-    SensorWriter<usize, S>: From<usize>,
+C: SensorCoreAsync<Target = usize> + From<usize>,
+S: Deref<Target = C> + From<C>,
+for<'a> &'a S: ShareStrategy<'a, Core = C>,
 {
-    let writer = SensorWriter::<_, S>::from(0);
+    let writer = SensorWriter::from_value(0);
     let observer = writer.spawn_observer();
 
     wookie!(wait_changed: observer.wait_until_changed());
@@ -190,13 +190,13 @@ where
     assert!(wait_changed.poll().is_ready());
 }
 
-fn test_wait_for<S>()
+fn test_wait_for<C, S>()
 where
-    for<'a> &'a S: ShareStrategy<'a, Target = usize>,
-    for<'a> <&'a S as ShareStrategy<'a>>::Core: SensorCoreAsync,
-    SensorWriter<usize, S>: From<usize>,
+C: SensorCoreAsync<Target = usize> + From<usize>,
+S: Deref<Target = C> + From<C>,
+for<'a> &'a S: ShareStrategy<'a, Core = C>,
 {
-    let writer = SensorWriter::<_, S>::from(0);
+    let writer = SensorWriter::from_value(0);
     let mut observer = writer.spawn_observer();
 
     wookie!(wait_for: observer.wait_for(|v| *v == 2));
@@ -229,13 +229,13 @@ where
     };
 }
 
-fn test_mapped_read<S>()
+fn test_mapped_read<C, S>()
 where
-    for<'a> &'a S: ShareStrategy<'a, Target = usize>,
-    for<'a> <&'a S as ShareStrategy<'a>>::Core: SensorCoreAsync,
-    SensorWriter<usize, S>: From<usize>,
+C: SensorCoreAsync<Target = usize> + From<usize>,
+S: Deref<Target = C> + From<C>,
+for<'a> &'a S: ShareStrategy<'a, Core = C>,
 {
-    let writer = SensorWriter::<_, S>::from(0);
+    let writer = SensorWriter::from_value(0);
     let observer = writer.spawn_observer().map(|v| *v + 10);
 
     wookie!(write: writer.write());
@@ -257,13 +257,13 @@ where
     };
 }
 
-fn test_mapped_wait_changed<S>()
+fn test_mapped_wait_changed<C, S>()
 where
-    for<'a> &'a S: ShareStrategy<'a, Target = usize>,
-    for<'a> <&'a S as ShareStrategy<'a>>::Core: SensorCoreAsync,
-    SensorWriter<usize, S>: From<usize>,
+C: SensorCoreAsync<Target = usize> + From<usize>,
+S: Deref<Target = C> + From<C>,
+for<'a> &'a S: ShareStrategy<'a, Core = C>,
 {
-    let writer = SensorWriter::<_, S>::from(0);
+    let writer = SensorWriter::from_value(0);
     let observer = writer.spawn_observer().map(|v| *v + 10);
 
     wookie!(wait_changed: observer.wait_until_changed());
@@ -292,13 +292,13 @@ where
     assert!(wait_changed.poll().is_ready());
 }
 
-fn test_mapped_wait_for<S>()
+fn test_mapped_wait_for<C, S>()
 where
-    for<'a> &'a S: ShareStrategy<'a, Target = usize>,
-    for<'a> <&'a S as ShareStrategy<'a>>::Core: SensorCoreAsync,
-    SensorWriter<usize, S>: From<usize>,
+C: SensorCoreAsync<Target = usize> + From<usize>,
+S: Deref<Target = C> + From<C>,
+for<'a> &'a S: ShareStrategy<'a, Core = C>,
 {
-    let writer = SensorWriter::<_, S>::from(0);
+    let writer = SensorWriter::<_, S>::from_value(0);
     let mut observer = writer.spawn_observer().map(|v| *v + 10);
 
     wookie!(wait_for: observer.wait_for(|v| *v == 12));
@@ -332,13 +332,13 @@ where
     };
 }
 
-fn test_fused_read<S>()
+fn test_fused_read<C, S>()
 where
-    for<'a> &'a S: ShareStrategy<'a, Target = usize>,
-    for<'a> <&'a S as ShareStrategy<'a>>::Core: SensorCoreAsync,
-    SensorWriter<usize, S>: From<usize>,
+C: SensorCoreAsync<Target = usize> + From<usize>,
+S: Deref<Target = C> + From<C>,
+for<'a> &'a S: ShareStrategy<'a, Core = C>,
 {
-    let writer = SensorWriter::<_, S>::from(0);
+    let writer = SensorWriter::from_value(0);
     let observer = writer.spawn_observer().map(|v| *v + 10);
 
     wookie!(write: writer.write());
@@ -360,14 +360,14 @@ where
     };
 }
 
-fn test_fused_wait_changed<S>()
+fn test_fused_wait_changed<C, S>()
 where
-    for<'a> &'a S: ShareStrategy<'a, Target = usize>,
-    for<'a> <&'a S as ShareStrategy<'a>>::Core: SensorCoreAsync,
-    SensorWriter<usize, S>: From<usize>,
+C: SensorCoreAsync<Target = usize> + From<usize>,
+S: Deref<Target = C> + From<C>,
+for<'a> &'a S: ShareStrategy<'a, Core = C>,
 {
-    let writer1 = SensorWriter::<_, S>::from(0);
-    let writer2 = SensorWriter::<_, S>::from(0);
+    let writer1 = SensorWriter::from_value(0);
+    let writer2 = SensorWriter::from_value(0);
     let mut observer = writer1
         .spawn_observer()
         .fuse(writer2.spawn_observer(), |x, y| *x + *y);
@@ -424,14 +424,14 @@ where
     assert!(wait_changed.poll().is_ready());
 }
 
-fn test_fused_wait_for<S>()
+fn test_fused_wait_for<C, S>()
 where
-    for<'a> &'a S: ShareStrategy<'a, Target = usize>,
-    for<'a> <&'a S as ShareStrategy<'a>>::Core: SensorCoreAsync,
-    SensorWriter<usize, S>: From<usize>,
+C: SensorCoreAsync<Target = usize> + From<usize>,
+S: Deref<Target = C> + From<C>,
+for<'a> &'a S: ShareStrategy<'a, Core = C>,
 {
-    let writer1 = SensorWriter::<_, S>::from(0);
-    let writer2 = SensorWriter::<_, S>::from(0);
+    let writer1 = SensorWriter::from_value(0);
+    let writer2 = SensorWriter::from_value(0);
     let mut observer = writer1
         .spawn_observer()
         .fuse(writer2.spawn_observer(), |x, y| *x + *y);

@@ -117,9 +117,7 @@ impl ObservationStatus {
 /// Trait for sharing a (most likely heap pointer) wrapped `struct@RawSensorData` with a locking strategy.
 pub trait ShareStrategy<'a> {
     /// The data type that the sensor stores.
-    type Target;
-    /// The locking mechanism for the sensor's data.
-    type Core: SensorCore<Target = Self::Target>;
+    type Core: SensorCore;
     /// The wrapping container for the sensor state.
     type Shared: Deref<Target = Self::Core>;
 
@@ -131,21 +129,18 @@ pub trait ShareStrategy<'a> {
     fn share_elided_ref(self) -> &'a Self::Core;
 }
 
-impl<'a, C> ShareStrategy<'a> for &'a C
-where
-    C: SensorCore,
+impl<'a, C: SensorCore> ShareStrategy<'a> for &'a OwnedData<C>
 {
-    type Target = C::Target;
     type Core = C;
-    type Shared = Self;
+    type Shared = &'a C;
 
     #[inline(always)]
-    fn share_data(self) -> Self {
+    fn share_data(self) -> &'a C {
         self
     }
 
     #[inline(always)]
-    fn share_elided_ref(self) -> Self {
+    fn share_elided_ref(self) -> &'a C {
         self
     }
 }
@@ -168,16 +163,13 @@ where
 }
 
 #[cfg(feature = "alloc")]
-impl<'a, C> ShareStrategy<'a> for &'a Arc<C>
-where
-    C: SensorCore,
+impl<'a, C: SensorCore> ShareStrategy<'a> for &'a Arc<C>
 {
-    type Target = C::Target;
     type Core = C;
     type Shared = Arc<C>;
 
     #[inline(always)]
-    fn share_data(self) -> Self::Shared {
+    fn share_data(self) -> Arc<C> {
         self.clone()
     }
 
@@ -191,66 +183,92 @@ where
 
 /// The generalized sensor writer.
 #[repr(transparent)]
-pub struct SensorWriter<T, S>(S)
+pub struct SensorWriter<C, S>(S)
 where
-    for<'a> &'a S: ShareStrategy<'a, Target = T>;
+    C: SensorCore,
+    // Ideally we would collapse these two requirements by embedding the functionality
+    // and relying directly on `fn@shared_elided_ref` from the `trait@ShareStrategy` trait,
+    // but the compiler cannot adequitly derive the lifetime requirements and feasibility in certain situations when
+    // async functions are called for an async sensor writer. As such, the share strategy requirement is used for
+    // creating observers with specific lifetimes, whilst the deref requirement is used for accessing the sensor core
+    // for any arbitrary lifetime.
+    S: Deref<Target = C>,
+    for<'a> &'a S: ShareStrategy<'a, Core =C>;
 
-impl<T, S> SensorWriter<T, S>
+impl<C, S> SensorWriter<C, S>
 where
-    for<'a> &'a S: ShareStrategy<'a, Target = T>,
+    C: SensorCore,
+    S: Deref<Target = C>,
+    for<'a> &'a S: ShareStrategy<'a, Core = C>
 {
     #[inline]
-    pub(crate) fn new(shared_core: S) -> Self {
-        shared_core.share_elided_ref().register_writer();
+    pub(crate) fn from_core(shared_core: S) -> Self {
+        shared_core.register_writer();
         Self(shared_core)
     }
 }
 
-impl<T, C> From<T> for SensorWriter<T, Arc<C>>
-where
-    C: SensorCore<Target = T> + From<T>,
-{
-    fn from(value: T) -> Self {
-        SensorWriter::new(Arc::new(C::from(value)))
-    }
-}
+// impl<C, T> From<T> for  SensorWriter<C, Arc<C>>
+// where
+//     C: SensorCore<Target = T> + From<T>,
+// {
+//     fn from(value: T) -> Self {
+//         SensorWriter::new(Arc::new(C::from(value)))
+//     }
+// }
 
-impl<T, C> From<T> for SensorWriter<T, C>
-where
-    C: SensorCore<Target = T> + From<T>,
-{
-    fn from(value: T) -> Self {
-        SensorWriter::new(C::from(value))
-    }
-}
+// impl<T, C> From<T> for SensorWriter<C, OwnedData<C>>
+// where
+//     C: SensorCore<Target = T> + From<T>,
+// {
+//     fn from(value: T) -> Self {
+//         SensorWriter::new(OwnedData(C::from(value)))
+//     }
+// }
 
-impl<T, S> Drop for SensorWriter<T, S>
+impl<C, S> Drop for SensorWriter<C, S>
 where
-    for<'a> &'a S: ShareStrategy<'a, Target = T>,
+C: SensorCore,
+S: Deref<Target = C>,
+for<'a> &'a S: ShareStrategy<'a, Core = C>
 {
     fn drop(&mut self) {
-        self.0.share_elided_ref().deregister_writer();
+        self.0.deregister_writer();
     }
 }
 
-impl<T, S> Clone for SensorWriter<T, S>
+impl<C, S> Clone for SensorWriter<C, S>
 where
-    S: Clone,
-    for<'a> &'a S: ShareStrategy<'a, Target = T>,
+C: SensorCore,
+S: Deref<Target = C> + Clone,
+for<'a> &'a S: ShareStrategy<'a, Core = C>
 {
     fn clone(&self) -> Self {
-        Self::new(self.0.clone())
+        Self::from_core(self.0.clone())
     }
 }
 
-impl<T, S> SensorWriter<T, S>
+impl<C, S> SensorWriter<C, S>
 where
-    for<'a> &'a S: ShareStrategy<'a, Target = T>,
+C: SensorCore + From<C::Target>,
+S: Deref<Target = C> + From<C>,
+for<'a> &'a S: ShareStrategy<'a, Core = C> {
+    #[inline]
+    pub fn from_value(value: C::Target) -> Self {
+        Self(S::from(C::from(value)))
+    }
+}
+
+impl<C, S> SensorWriter<C, S>
+where
+C: SensorCore,
+S: Deref<Target = C>,
+for<'a> &'a S: ShareStrategy<'a, Core = C>
 {
     /// Mark the current sensor value as unseen to all observers, notify them and execute all registered callbacks.
     #[inline(always)]
     pub fn mark_all_unseen(&self) {
-        self.0.share_elided_ref().mark_unseen();
+        self.0.mark_unseen();
     }
 
     /// Spawn an observer by immutably borrowing the sensor writer's data. By definition this observer's scope will be limited
@@ -258,7 +276,7 @@ where
     #[inline(always)]
     pub fn spawn_referenced_observer(
         &self,
-    ) -> SensorObserver<T, &'_ <&S as ShareStrategy<'_>>::Core> {
+    ) -> SensorObserver<C::Target, &'_ C> {
         let core = self.0.share_elided_ref();
         SensorObserver {
             version: core.version(),
@@ -269,7 +287,7 @@ where
     /// Spawn an observer by leveraging the sensor writer's sharing strategy. May allow the observer
     /// to outlive the sensor writer for an appropriate sharing strategy (such as if the writer wraps its data in an `Arc`).
     #[inline(always)]
-    pub fn spawn_observer(&self) -> SensorObserver<T, <&'_ S as ShareStrategy>::Shared> {
+    pub fn spawn_observer(&self) -> SensorObserver<C::Target, <&'_ S as ShareStrategy>::Shared> {
         let shared_core = self.0.share_data();
         SensorObserver {
             version: shared_core.version(),
@@ -294,10 +312,11 @@ where
     }
 }
 
-impl<T, S> SensorWriter<T, S>
+impl<C, S> SensorWriter<C, S>
 where
-    for<'a> &'a S: ShareStrategy<'a, Target = T>,
-    for<'a> <&'a S as ShareStrategy<'a>>::Core: SensorCoreAsync,
+    C: SensorCoreAsync,
+    S: Deref<Target = C>,
+    for<'a> &'a S: ShareStrategy<'a, Core = C>,
 {
     /// Acquire a read lock on the underlying data.
     #[inline(always)]
@@ -313,7 +332,7 @@ where
 
     /// Update the sensor value, notify observers and execute all registered callbacks.
     #[inline(always)]
-    pub async fn update<'a>(&'a self, sample: T) {
+    pub async fn update<'a>(&'a self, sample: C::Target) {
         let _ = self
             .modify_with(|v| {
                 *v = sample;
@@ -324,7 +343,7 @@ where
 
     /// Modify the sensor value in place, notify observers and execute all registered callbacks.
     #[inline(always)]
-    pub async fn modify_with(&self, f: impl FnOnce(&mut T) -> bool) -> bool {
+    pub async fn modify_with(&self, f: impl FnOnce(&mut C::Target) -> bool) -> bool {
         self.0.share_elided_ref().modify(f).await.1
     }
 }

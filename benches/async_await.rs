@@ -1,3 +1,4 @@
+use async_lock::RwLockReadGuard;
 use criterion::{
     criterion_group, criterion_main, measurement::WallTime, BenchmarkGroup, Criterion,
 };
@@ -103,7 +104,7 @@ impl WatchContentionEnvironment {
         let mut writer_handles = Vec::new();
         for _ in 0..writer_count {
             let writer = writer.clone();
-            writer_handles.push(runtime.spawn_blocking(move || {
+            writer_handles.push(runtime.spawn(async move {
                 let mut test_version = 0;
                 let mut writes = 0;
                 loop {
@@ -196,34 +197,18 @@ impl Drop for WatchContentionEnvironment {
     }
 }
 
-struct ContentionEnvironment<S, R>
-where
-    // Writers must be cloneable and sendable across threads.
-    S: Clone + Send + 'static,
-    // Observers must be sendable across threads.
-    R: DerefSensorData<Target = ContentionData> + Send + 'static,
-    // Spawning observers must not borrow writers.
-    for<'a> &'a S: ShareStrategy<'a, Target = ContentionData, Shared = R, Core = R::Core>,
-    // Core must support async.
-    R::Core: SensorCoreAsync,
-    // Writer must be creatable from an initial value.
-    SensorWriter<ContentionData, S>: From<ContentionData>,
+struct ContentionEnvironment
 {
     reader_handles: Vec<tokio::task::JoinHandle<()>>,
     writer_handles: Vec<tokio::task::JoinHandle<()>>,
-    writer: SensorWriter<ContentionData, S>,
+    writer: SensorWriter<AsyncCore<ContentionData>, Arc<AsyncCore<ContentionData>>>,
     _runtime: Runtime,
 }
 
-impl<S, R> ContentionEnvironment<S, R>
-where
-    S: Clone + Send + 'static,
-    R: DerefSensorData<Target = ContentionData, Core = AsyncCore<ContentionData>> + Send + 'static,
-    for<'a> &'a S: ShareStrategy<'a, Target = ContentionData, Shared = R, Core = R::Core>,
-    SensorWriter<ContentionData, S>: From<ContentionData>,
+impl ContentionEnvironment
 {
     fn new(reader_count: usize, writer_count: usize) -> Self {
-        let writer = SensorWriter::<ContentionData, S>::from(ContentionData::default());
+        let writer = SensorWriter::from_value(ContentionData::default());
         let runtime = runtime::Builder::new_multi_thread()
             .worker_threads(4)
             .build()
@@ -238,7 +223,7 @@ where
                 let mut last_observed_data = 0;
                 loop {
                     let mut iteration = 0;
-                    let guard = reader
+                    let guard: RwLockReadGuard<ContentionData> = reader
                         .wait_for(|state: &ContentionData| {
                             if state.test_version == usize::MAX {
                                 return true;
@@ -287,11 +272,11 @@ where
         let mut writer_handles = Vec::new();
         for _ in 0..writer_count {
             let writer = writer.clone();
-            writer_handles.push(runtime.spawn_blocking(move || {
+            writer_handles.push(runtime.spawn(async move {
                 let mut test_version = 0;
                 let mut writes = 0;
                 loop {
-                    block_on(writer.modify_with(|state| {
+                    writer.modify_with(|state: &mut ContentionData | {
                         state.data_version = state.data_version.wrapping_add(1);
                         if test_version != state.test_version {
                             writes = 0;
@@ -310,7 +295,7 @@ where
                         });
 
                         true
-                    }));
+                    }).await;
 
                     if test_version == usize::MAX {
                         break;
@@ -380,18 +365,7 @@ where
     }
 }
 
-impl<S, R> Drop for ContentionEnvironment<S, R>
-where
-    // Writers must be cloneable and sendable across threads.
-    S: Clone + Send + 'static,
-    // Observers must be sendable across threads.
-    R: DerefSensorData<Target = ContentionData> + Send + 'static,
-    // Spawning observers must not borrow writers.
-    for<'a> &'a S: ShareStrategy<'a, Target = ContentionData, Shared = R, Core = R::Core>,
-    // Core must support async.
-    R::Core: SensorCoreAsync,
-    // Writer must be creatable from an initial value.
-    SensorWriter<ContentionData, S>: From<ContentionData>,
+impl Drop for ContentionEnvironment
 {
     fn drop(&mut self) {
         block_on(async {
@@ -413,7 +387,7 @@ where
 }
 
 fn arc_async_r5_w5_o50_s0_observation(c: &mut BenchmarkGroup<WallTime>) {
-    let env = ContentionEnvironment::<Arc<AsyncCore<ContentionData>>, _>::new(5, 5);
+    let env = ContentionEnvironment::new(5, 5);
 
     c.bench_function("arc_async_alloc_r5_w5_o50_s0_observation", |b| {
         b.iter(|| {
@@ -433,7 +407,7 @@ fn tokio_watch_r5_w5_o50_s0_observation(c: &mut BenchmarkGroup<WallTime>) {
 }
 
 fn arc_async_r5_w5_o50_s10_observation(c: &mut BenchmarkGroup<WallTime>) {
-    let env = ContentionEnvironment::<Arc<AsyncCore<ContentionData>>, _>::new(5, 5);
+    let env = ContentionEnvironment::new(5, 5);
 
     c.bench_function("arc_async_alloc_r5_w5_o50_s10_observation", |b| {
         b.iter(|| {
@@ -453,7 +427,7 @@ fn tokio_watch_r5_w5_o50_s10_observation(c: &mut BenchmarkGroup<WallTime>) {
 }
 
 fn arc_async_r5_w5_o50_s100_observation(c: &mut BenchmarkGroup<WallTime>) {
-    let env = ContentionEnvironment::<Arc<AsyncCore<ContentionData>>, _>::new(10, 10);
+    let env = ContentionEnvironment::new(10, 10);
 
     c.bench_function("arc_async_alloc_r5_w5_o50_s100_observation", |b| {
         b.iter(|| {
@@ -473,7 +447,7 @@ fn tokio_watch_r5_w5_o50_s100_observation(c: &mut BenchmarkGroup<WallTime>) {
 }
 
 fn arc_async_r5_w5_o50_s0_writes(c: &mut BenchmarkGroup<WallTime>) {
-    let env = ContentionEnvironment::<Arc<AsyncCore<ContentionData>>, _>::new(5, 5);
+    let env = ContentionEnvironment::new(5, 5);
 
     c.bench_function("arc_async_alloc_r5_w5_o50_s0_writes", |b| {
         b.iter(|| {
@@ -493,7 +467,7 @@ fn tokio_watch_r5_w5_o50_s0_writes(c: &mut BenchmarkGroup<WallTime>) {
 }
 
 fn arc_async_r5_w5_o50_s10_writes(c: &mut BenchmarkGroup<WallTime>) {
-    let env = ContentionEnvironment::<Arc<AsyncCore<ContentionData>>, _>::new(5, 5);
+    let env = ContentionEnvironment::new(5, 5);
 
     c.bench_function("arc_async_alloc_r5_w5_o50_s10_writes", |b| {
         b.iter(|| {
@@ -513,7 +487,7 @@ fn tokio_watch_r5_w5_o50_s10_writes(c: &mut BenchmarkGroup<WallTime>) {
 }
 
 fn arc_async_r5_w5_o50_s100_writes(c: &mut BenchmarkGroup<WallTime>) {
-    let env = ContentionEnvironment::<Arc<AsyncCore<ContentionData>>, _>::new(10, 10);
+    let env = ContentionEnvironment::new(10, 10);
 
     c.bench_function("arc_async_alloc_r5_w5_o50_s100_writes", |b| {
         b.iter(|| {
@@ -543,7 +517,7 @@ pub fn bench_reads() {
     // arc_async_r5_w5_o50_s10_observation(&mut group);
     // tokio_watch_r5_w5_o50_s10_observation(&mut group);
     arc_async_r5_w5_o50_s100_observation(&mut group);
-    tokio_watch_r5_w5_o50_s100_observation(&mut group);
+    // tokio_watch_r5_w5_o50_s100_observation(&mut group);
     group.finish();
 }
 
@@ -558,7 +532,7 @@ pub fn bench_writes() {
     // arc_async_r5_w5_o50_s10_writes(&mut group);
     // tokio_watch_r5_w5_o50_s10_writes(&mut group);
     arc_async_r5_w5_o50_s100_writes(&mut group);
-    tokio_watch_r5_w5_o50_s100_writes(&mut group);
+    // tokio_watch_r5_w5_o50_s100_writes(&mut group);
     group.finish();
 }
 
