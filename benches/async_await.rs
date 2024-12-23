@@ -6,7 +6,7 @@ use futures::executor::block_on;
 use rand::random;
 use sensor_fuse::{
     sensor_core::{alloc::AsyncCore, SensorCoreAsync},
-    DerefSensorData, SensorObserveAsync, SensorWriter, ShareStrategy,
+    SensorObserveAsync, SensorWriter, ShareStrategy,
 };
 use std::{
     hint::black_box,

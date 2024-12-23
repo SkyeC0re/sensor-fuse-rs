@@ -129,37 +129,20 @@ pub trait ShareStrategy<'a> {
     fn share_elided_ref(self) -> &'a Self::Core;
 }
 
-impl<'a, C: SensorCore> ShareStrategy<'a> for &'a OwnedData<C>
+impl<'a, C: SensorCore> ShareStrategy<'a> for &'a C
 {
     type Core = C;
-    type Shared = &'a C;
+    type Shared = Self;
 
     #[inline(always)]
-    fn share_data(self) -> &'a C {
+    fn share_data(self) -> Self {
         self
     }
 
     #[inline(always)]
-    fn share_elided_ref(self) -> &'a C {
+    fn share_elided_ref(self) -> Self {
         self
     }
-}
-
-/// QOL trait to encapsulate sensor observer's data wrapper, locking strategy and executor type.
-pub trait DerefSensorData: Deref<Target = Self::Core> {
-    /// The data type that the sensor stores.
-    type Target;
-    /// The locking mechanism for the sensor's data.
-    type Core: SensorCore<Target = <Self as DerefSensorData>::Target>;
-}
-
-impl<C, R> DerefSensorData for R
-where
-    C: SensorCore,
-    R: Deref<Target = C>,
-{
-    type Target = C::Target;
-    type Core = C;
 }
 
 #[cfg(feature = "alloc")]
@@ -192,48 +175,27 @@ where
     // async functions are called for an async sensor writer. As such, the share strategy requirement is used for
     // creating observers with specific lifetimes, whilst the deref requirement is used for accessing the sensor core
     // for any arbitrary lifetime.
-    S: Deref<Target = C>,
     for<'a> &'a S: ShareStrategy<'a, Core =C>;
 
 impl<C, S> SensorWriter<C, S>
 where
     C: SensorCore,
-    S: Deref<Target = C>,
     for<'a> &'a S: ShareStrategy<'a, Core = C>
 {
     #[inline]
     pub(crate) fn from_core(shared_core: S) -> Self {
-        shared_core.register_writer();
+        shared_core.share_elided_ref().register_writer();
         Self(shared_core)
     }
 }
 
-// impl<C, T> From<T> for  SensorWriter<C, Arc<C>>
-// where
-//     C: SensorCore<Target = T> + From<T>,
-// {
-//     fn from(value: T) -> Self {
-//         SensorWriter::new(Arc::new(C::from(value)))
-//     }
-// }
-
-// impl<T, C> From<T> for SensorWriter<C, OwnedData<C>>
-// where
-//     C: SensorCore<Target = T> + From<T>,
-// {
-//     fn from(value: T) -> Self {
-//         SensorWriter::new(OwnedData(C::from(value)))
-//     }
-// }
-
 impl<C, S> Drop for SensorWriter<C, S>
 where
 C: SensorCore,
-S: Deref<Target = C>,
 for<'a> &'a S: ShareStrategy<'a, Core = C>
 {
     fn drop(&mut self) {
-        self.0.deregister_writer();
+        self.0.share_elided_ref().deregister_writer();
     }
 }
 
@@ -251,7 +213,7 @@ for<'a> &'a S: ShareStrategy<'a, Core = C>
 impl<C, S> SensorWriter<C, S>
 where
 C: SensorCore + From<C::Target>,
-S: Deref<Target = C> + From<C>,
+S: From<C>,
 for<'a> &'a S: ShareStrategy<'a, Core = C> {
     #[inline]
     pub fn from_value(value: C::Target) -> Self {
@@ -262,13 +224,12 @@ for<'a> &'a S: ShareStrategy<'a, Core = C> {
 impl<C, S> SensorWriter<C, S>
 where
 C: SensorCore,
-S: Deref<Target = C>,
 for<'a> &'a S: ShareStrategy<'a, Core = C>
 {
     /// Mark the current sensor value as unseen to all observers, notify them and execute all registered callbacks.
     #[inline(always)]
     pub fn mark_all_unseen(&self) {
-        self.0.mark_unseen();
+        self.0.share_elided_ref().mark_unseen();
     }
 
     /// Spawn an observer by immutably borrowing the sensor writer's data. By definition this observer's scope will be limited
@@ -276,7 +237,7 @@ for<'a> &'a S: ShareStrategy<'a, Core = C>
     #[inline(always)]
     pub fn spawn_referenced_observer(
         &self,
-    ) -> SensorObserver<C::Target, &'_ C> {
+    ) -> SensorObserver<C, &'_ C> {
         let core = self.0.share_elided_ref();
         SensorObserver {
             version: core.version(),
@@ -287,7 +248,7 @@ for<'a> &'a S: ShareStrategy<'a, Core = C>
     /// Spawn an observer by leveraging the sensor writer's sharing strategy. May allow the observer
     /// to outlive the sensor writer for an appropriate sharing strategy (such as if the writer wraps its data in an `Arc`).
     #[inline(always)]
-    pub fn spawn_observer(&self) -> SensorObserver<C::Target, <&'_ S as ShareStrategy>::Shared> {
+    pub fn spawn_observer(&self) -> SensorObserver<C, <&'_ S as ShareStrategy>::Shared> {
         let shared_core = self.0.share_data();
         SensorObserver {
             version: shared_core.version(),
@@ -315,7 +276,6 @@ for<'a> &'a S: ShareStrategy<'a, Core = C>
 impl<C, S> SensorWriter<C, S>
 where
     C: SensorCoreAsync,
-    S: Deref<Target = C>,
     for<'a> &'a S: ShareStrategy<'a, Core = C>,
 {
     /// Acquire a read lock on the underlying data.
@@ -436,22 +396,16 @@ impl VersionFunctionality for Version {
 }
 
 /// The generalized sensor observer.
-pub struct SensorObserver<T, R>
-where
-    R: DerefSensorData<Target = T>,
+pub struct SensorObserver<C: SensorCore, R: Deref<Target = C>>
 {
     core: R,
     version: usize,
 }
 
-// unsafe impl<T, R> Send for SensorObserver<T, R> where R: DerefSensorData<Target = T> + Send {}
-
-impl<T, R> SensorObserve for SensorObserver<T, R>
-where
-    R: DerefSensorData<Target = T>,
+impl<C: SensorCore, R: Deref<Target = C>> SensorObserve for SensorObserver<C, R>
 {
-    type Target = T;
-    type ReadGuard<'read> = <R::Core as SensorCore>::ReadGuard<'read> where Self: 'read;
+    type Target = C::Target;
+    type ReadGuard<'read> = C::ReadGuard<'read> where Self: 'read;
 
     type Checkpoint = Version;
 
@@ -485,10 +439,7 @@ where
     }
 }
 
-impl<T, R> SensorObserveAsync for SensorObserver<T, R>
-where
-    R: DerefSensorData<Target = T>,
-    R::Core: SensorCoreAsync,
+impl<C: SensorCoreAsync, R: Deref<Target = C>> SensorObserveAsync for SensorObserver<C, R>
 {
     #[inline(always)]
     async fn read(&self) -> Self::ReadGuard<'_> {
@@ -502,9 +453,9 @@ where
     }
 
     #[inline]
-    async fn wait_for<C: FnMut(&Self::Target) -> bool>(
+    async fn wait_for<F: FnMut(&Self::Target) -> bool>(
         &mut self,
-        condition: C,
+        condition: F,
     ) -> (Self::ReadGuard<'_>, ObservationStatus) {
         let (latest_version, data) = self
             .core
@@ -515,9 +466,9 @@ where
     }
 
     #[inline]
-    async fn wait_for_next<C: FnMut(&Self::Target) -> bool>(
+    async fn wait_for_next<F: FnMut(&Self::Target) -> bool>(
         &mut self,
-        condition: C,
+        condition: F,
     ) -> (Self::ReadGuard<'_>, ObservationStatus) {
         let (latest_version, data) = self.core.wait_for(condition, self.version).await;
         self.version = latest_version;
