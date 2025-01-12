@@ -1,12 +1,12 @@
 use async_lock::RwLockReadGuard;
 use criterion::{
-    criterion_group, criterion_main, measurement::WallTime, BenchmarkGroup, Criterion,
+    criterion_main, measurement::WallTime, BenchmarkGroup, Criterion,
 };
 use futures::executor::block_on;
 use rand::random;
 use sensor_fuse::{
-    sensor_core::{alloc::AsyncCore, SensorCoreAsync},
-    SensorObserveAsync, SensorWriter, ShareStrategy,
+    sensor_core::{alloc::AsyncCore},
+    SensorObserveAsync, SensorWriter,
 };
 use std::{
     hint::black_box,

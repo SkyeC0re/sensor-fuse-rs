@@ -14,7 +14,7 @@ use async_lock::{
 };
 use either::Either;
 
-use crate::ObservationStatus;
+use crate::{ObservationStatus, SymResult, Version, STATUS_CHANGED_BIT, STATUS_CLOSED_BIT};
 
 use super::{SensorCore, SensorCoreAsync, CLOSED_BIT, VERSION_BUMP, VERSION_MASK};
 
@@ -161,13 +161,19 @@ impl<T> From<T> for AsyncCore<T> {
 impl<T> SensorCore for AsyncCore<T> {
     type Target = T;
 
-    type ReadGuard<'read> = RwLockReadGuard<'read, T> where Self: 'read;
+    type ReadGuard<'read>
+        = RwLockReadGuard<'read, T>
+    where
+        Self: 'read;
 
-    type WriteGuard<'write> = RwLockWriteGuard<'write, T> where Self: 'write;
+    type WriteGuard<'write>
+        = RwLockWriteGuard<'write, T>
+    where
+        Self: 'write;
 
     #[inline(always)]
-    fn version(&self) -> usize {
-        self.version.load(Ordering::Acquire)
+    fn version(&self) -> Version {
+        Version(self.version.load(Ordering::Acquire))
     }
 
     #[inline]
@@ -182,17 +188,17 @@ impl<T> SensorCore for AsyncCore<T> {
     }
 
     #[inline]
-    fn try_write(&self) -> Option<Self::WriteGuard<'_>> {
+    unsafe fn try_write(&self) -> Option<Self::WriteGuard<'_>> {
         self.lock.try_write()
     }
 
     #[inline]
-    fn register_writer(&self) {
+    unsafe fn register_writer(&self) {
         let _ = self.writers.fetch_add(1, Ordering::Relaxed);
     }
 
     #[inline]
-    fn deregister_writer(&self) {
+    unsafe fn deregister_writer(&self) {
         if self.writers.fetch_sub(1, Ordering::Relaxed) == 1 {
             let _ = self.version.fetch_or(CLOSED_BIT, Ordering::Release);
         }
@@ -214,22 +220,15 @@ impl<T> SensorCoreAsync for AsyncCore<T> {
 
     #[allow(refining_impl_trait)]
     #[inline]
-    fn wait_changed(
-        &self,
-        reference_version: usize,
-    ) -> impl Future<Output = (usize, ObservationStatus)> + Send {
+    fn wait_changed(&self, reference_version: Version) -> impl Future<Output = Version> + Send {
         let mut wait_fut = Either::Left(&self.waiter_list);
         let version = &self.version;
         poll_fn(move |cx| {
-            let mut curr_version = version.load(Ordering::Acquire);
-            let mut closed = curr_version & CLOSED_BIT > 0;
-            if curr_version & VERSION_MASK != reference_version & VERSION_MASK || closed {
-                return Poll::Ready((
-                    curr_version,
-                    ObservationStatus::new()
-                        .modify_closed(closed)
-                        .modify_success(!closed),
-                ));
+            let mut curr_version = Version(version.load(Ordering::Acquire));
+            // We can safely ignore applying the version mask to the versions. A closed state can never be reverted and
+            // as such if the closed bit is set on either `curr_version` or `reference_version` then `closed = true`.
+            if curr_version.closed_bit_set() || curr_version != reference_version {
+                return Poll::Ready(curr_version);
             }
 
             if let Either::Left(waiter_list) = wait_fut {
@@ -241,15 +240,9 @@ impl<T> SensorCoreAsync for AsyncCore<T> {
                 wait_fut = Either::Right(wait_fut_init);
 
                 // Do a second check on initial insertion to ensure we do not miss a version update.
-                curr_version = version.load(Ordering::Acquire);
-                closed = curr_version & CLOSED_BIT > 0;
-                if curr_version & VERSION_MASK != reference_version & VERSION_MASK || closed {
-                    return Poll::Ready((
-                        curr_version,
-                        ObservationStatus::new()
-                            .modify_closed(closed)
-                            .modify_success(!closed),
-                    ));
+                curr_version = Version(version.load(Ordering::Acquire));
+                if curr_version.closed_bit_set() || curr_version != reference_version {
+                    return Poll::Ready(curr_version);
                 }
             }
 
@@ -258,7 +251,7 @@ impl<T> SensorCoreAsync for AsyncCore<T> {
     }
 
     #[inline]
-    async fn modify<M: FnOnce(&mut Self::Target) -> bool>(
+    async unsafe fn modify<M: FnOnce(&mut Self::Target) -> bool>(
         &self,
         modifier: M,
     ) -> (Self::WriteGuard<'_>, bool) {
@@ -271,44 +264,9 @@ impl<T> SensorCoreAsync for AsyncCore<T> {
     }
 }
 
-// Ensure that WakerNodes cannot exist with addresses utilizing the lowest 2 bits.
-#[repr(align(4))]
-struct RwLockNode {
-    waker: MaybeUninit<Waker>,
-    // Combination of the reference version  in the upper bits and reader/writer flag in the lowest bit.
-    data: usize,
-    next: AtomicUsize,
-}
-struct RwLockList {
-    head: AtomicPtr<RwLockNode>,
-    tail: AtomicPtr<RwLockNode>,
-    idle_reads: UnsafeCell<*mut WakerNode>,
-    version: AtomicUsize,
-    state: AtomicUsize,
-}
-
-struct ReadFut<'a> {
-    list: &'a RwLockList,
-    version: usize,
-    node: *mut RwLockNode,
-}
-
-impl<'a> Future for ReadFut<'a> {
-    type Output = ();
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        if self.node.is_null() {
-            let state = self.list.state.load(Ordering::Relaxed);
-
-            if state & 1 == 1 {}
-        }
-        Poll::Pending
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use crate::sensor_core::SensorCoreAsync;
+    use crate::{sensor_core::SensorCoreAsync, Version};
 
     use super::AsyncCore;
 
@@ -322,9 +280,9 @@ mod tests {
 
         let _ = IsSend(core.read());
         let _ = IsSend(core.write());
-        let _ = IsSend(core.modify(|_| true));
-        let _ = IsSend(core.wait_changed(0));
-        let _ = IsSend(core.wait_for(|_| true, 0));
+        let _ = IsSend(unsafe { core.modify(|_| true) });
+        let _ = IsSend(core.wait_changed(Version(0)));
+        let _ = IsSend(core.wait_for(|_| true, Version(0)));
         let _ = IsSend(core.write());
     }
 }

@@ -53,36 +53,62 @@ use core::{
 use core::{mem::MaybeUninit, pin::Pin};
 use derived_deref::{Deref, DerefMut};
 use futures::FutureExt;
-use sensor_core::{closed_bit_set, SensorCore, SensorCoreAsync, VERSION_BUMP};
+use sensor_core::{closed_bit_set, SensorCore, SensorCoreAsync, CLOSED_BIT, VERSION_BUMP};
 
 #[derive(Deref, DerefMut, Clone, Copy)]
 #[repr(transparent)]
 pub struct OwnedData<T>(pub T);
 
-const STATUS_SUCCESS_BIT: u8 = 1;
-const STATUS_CLOSED_BIT: u8 = 2;
+pub type SymResult<T> = Result<T, T>;
+
+mod sealed {
+    pub trait SealedObserve {}
+}
+
+pub const STATUS_SUCCESS_BIT: u8 = 1;
+pub const STATUS_CLOSED_BIT: u8 = 2;
+pub const STATUS_CHANGED_BIT: u8 = 4;
 
 #[repr(transparent)]
-#[derive(Clone)]
-pub struct ObservationStatus(u8);
+#[derive(Clone, Copy, Deref, DerefMut)]
+pub struct ObservationStatus(pub u8);
 
 impl ObservationStatus {
-    /// Creates a new non-closed, non-successful observation status.
+    /// Invert the bits defined by `flags` if a condition holds.
+    #[inline(always)]
+    pub const fn set_flags_if(mut self, condition: bool, flags: u8) -> Self {
+        self.0 |= flags & (condition as u8).wrapping_neg();
+        self
+    }
+
+    /// Creates a new non-closed, non-changed, non-successful observation status.
     #[inline(always)]
     pub const fn new() -> Self {
         Self(0)
     }
 
-    /// Returns true if updates are no longer possible.
+    /// Creates a new non-closed, non-successful observation status.
     #[inline(always)]
-    pub const fn closed(&self) -> bool {
-        self.0 & STATUS_CLOSED_BIT > 0
+    pub const fn new_success() -> Self {
+        Self(STATUS_SUCCESS_BIT)
     }
 
-    /// Returns true if an observation occurred successfully.
+    /// Returns true if updates are no longer possible.
     #[inline(always)]
-    pub const fn success(&self) -> bool {
-        self.0 & STATUS_SUCCESS_BIT > 0
+    pub const fn closed(self) -> bool {
+        self.0 & STATUS_CLOSED_BIT != 0
+    }
+
+    /// Returns true if the observation condition was met.
+    #[inline(always)]
+    pub const fn success(self) -> bool {
+        self.0 & STATUS_SUCCESS_BIT != 0
+    }
+
+    /// Returns true if an updated value was observed.
+    #[inline(always)]
+    pub const fn changed(self) -> bool {
+        self.0 & STATUS_CHANGED_BIT != 0
     }
 
     #[inline(always)]
@@ -100,6 +126,13 @@ impl ObservationStatus {
     }
 
     #[inline(always)]
+    pub(crate) fn modify_changed(mut self, changed: bool) -> Self {
+        self.0 = self.0 & (!STATUS_CHANGED_BIT);
+        self.0 |= STATUS_CHANGED_BIT & ((changed as u8) << 2);
+        self
+    }
+
+    #[inline(always)]
     pub(crate) fn set_closed(mut self) -> Self {
         self.0 |= STATUS_CLOSED_BIT;
         self
@@ -108,6 +141,12 @@ impl ObservationStatus {
     #[inline(always)]
     pub(crate) fn set_success(mut self) -> Self {
         self.0 |= STATUS_SUCCESS_BIT;
+        self
+    }
+
+    #[inline(always)]
+    pub(crate) fn set_changed(mut self) -> Self {
+        self.0 |= STATUS_CHANGED_BIT;
         self
     }
 }
@@ -129,8 +168,7 @@ pub trait ShareStrategy<'a> {
     fn share_elided_ref(self) -> &'a Self::Core;
 }
 
-impl<'a, C: SensorCore> ShareStrategy<'a> for &'a C
-{
+impl<'a, C: SensorCore> ShareStrategy<'a> for &'a C {
     type Core = C;
     type Shared = Self;
 
@@ -146,8 +184,7 @@ impl<'a, C: SensorCore> ShareStrategy<'a> for &'a C
 }
 
 #[cfg(feature = "alloc")]
-impl<'a, C: SensorCore> ShareStrategy<'a> for &'a Arc<C>
-{
+impl<'a, C: SensorCore> ShareStrategy<'a> for &'a Arc<C> {
     type Core = C;
     type Shared = Arc<C>;
 
@@ -175,46 +212,49 @@ where
     // async functions are called for an async sensor writer. As such, the share strategy requirement is used for
     // creating observers with specific lifetimes, whilst the deref requirement is used for accessing the sensor core
     // for any arbitrary lifetime.
-    for<'a> &'a S: ShareStrategy<'a, Core =C>;
+    for<'a> &'a S: ShareStrategy<'a, Core = C>;
 
 impl<C, S> SensorWriter<C, S>
 where
     C: SensorCore,
-    for<'a> &'a S: ShareStrategy<'a, Core = C>
+    for<'a> &'a S: ShareStrategy<'a, Core = C>,
 {
     #[inline]
     pub(crate) fn from_core(shared_core: S) -> Self {
-        shared_core.share_elided_ref().register_writer();
         Self(shared_core)
     }
 }
 
 impl<C, S> Drop for SensorWriter<C, S>
 where
-C: SensorCore,
-for<'a> &'a S: ShareStrategy<'a, Core = C>
+    C: SensorCore,
+    for<'a> &'a S: ShareStrategy<'a, Core = C>,
 {
+    #[inline]
     fn drop(&mut self) {
-        self.0.share_elided_ref().deregister_writer();
+        unsafe { self.0.share_elided_ref().deregister_writer() };
     }
 }
 
 impl<C, S> Clone for SensorWriter<C, S>
 where
-C: SensorCore,
-S: Deref<Target = C> + Clone,
-for<'a> &'a S: ShareStrategy<'a, Core = C>
+    C: SensorCore,
+    S: Deref<Target = C> + Clone,
+    for<'a> &'a S: ShareStrategy<'a, Core = C>,
 {
+    #[inline]
     fn clone(&self) -> Self {
+        unsafe { self.0.share_elided_ref().register_writer() };
         Self::from_core(self.0.clone())
     }
 }
 
 impl<C, S> SensorWriter<C, S>
 where
-C: SensorCore + From<C::Target>,
-S: From<C>,
-for<'a> &'a S: ShareStrategy<'a, Core = C> {
+    C: SensorCore + From<C::Target>,
+    S: From<C>,
+    for<'a> &'a S: ShareStrategy<'a, Core = C>,
+{
     #[inline]
     pub fn from_value(value: C::Target) -> Self {
         Self(S::from(C::from(value)))
@@ -223,8 +263,8 @@ for<'a> &'a S: ShareStrategy<'a, Core = C> {
 
 impl<C, S> SensorWriter<C, S>
 where
-C: SensorCore,
-for<'a> &'a S: ShareStrategy<'a, Core = C>
+    C: SensorCore,
+    for<'a> &'a S: ShareStrategy<'a, Core = C>,
 {
     /// Mark the current sensor value as unseen to all observers, notify them and execute all registered callbacks.
     #[inline(always)]
@@ -235,9 +275,7 @@ for<'a> &'a S: ShareStrategy<'a, Core = C>
     /// Spawn an observer by immutably borrowing the sensor writer's data. By definition this observer's scope will be limited
     /// by the scope of the writer.
     #[inline(always)]
-    pub fn spawn_referenced_observer(
-        &self,
-    ) -> SensorObserver<C, &'_ C> {
+    pub fn spawn_referenced_observer(&self) -> SensorObserver<C, &'_ C> {
         let core = self.0.share_elided_ref();
         SensorObserver {
             version: core.version(),
@@ -261,7 +299,7 @@ for<'a> &'a S: ShareStrategy<'a, Core = C>
     pub fn try_write(
         &self,
     ) -> Option<<<&S as ShareStrategy<'_>>::Core as SensorCore>::WriteGuard<'_>> {
-        self.0.share_elided_ref().try_write()
+        unsafe { self.0.share_elided_ref().try_write() }
     }
 
     /// Attempts to instantaneously aqcuire a read lock to the underlying core's data.
@@ -304,7 +342,7 @@ where
     /// Modify the sensor value in place, notify observers and execute all registered callbacks.
     #[inline(always)]
     pub async fn modify_with(&self, f: impl FnOnce(&mut C::Target) -> bool) -> bool {
-        self.0.share_elided_ref().modify(f).await.1
+        unsafe { self.0.share_elided_ref().modify(f).await.1 }
     }
 }
 
@@ -363,7 +401,7 @@ pub trait SensorObserveAsync: SensorObserve {
 
     /// Asynchronously wait until the sensor value is updated. This call will **not** update the observer's version,
     /// as such an additional call to `pull` or `pull_updated` is required.
-    async fn wait_until_changed(&self) -> (Self::Checkpoint, ObservationStatus);
+    async fn wait_until_changed(&self) -> SymResult<Self::Checkpoint>;
 
     /// Asynchronously wait for a particular condition to become true. This method checks the current sensor value even if the current value is marked
     /// as seen by the observer.
@@ -380,8 +418,30 @@ pub trait SensorObserveAsync: SensorObserve {
 }
 
 #[repr(transparent)]
-#[derive(Clone)]
+#[derive(Clone, Copy, Eq, PartialEq)]
 pub struct Version(usize);
+
+impl Version {
+    #[inline(always)]
+    pub const fn closed_bit_set(self) -> bool {
+        closed_bit_set(self.0)
+    }
+
+    #[inline(always)]
+    pub const fn set_closed_bit(&mut self) {
+        self.0 |= CLOSED_BIT
+    }
+
+    #[inline(always)]
+    pub const fn increment(&mut self) {
+        self.0.wrapping_add(VERSION_BUMP);
+    }
+
+    #[inline(always)]
+    pub const fn decrement(&mut self) {
+        self.0.wrapping_sub(VERSION_BUMP);
+    }
+}
 
 pub trait VersionFunctionality {
     /// Returns true if the sensor is closed and no further updates can occur.
@@ -391,21 +451,22 @@ pub trait VersionFunctionality {
 impl VersionFunctionality for Version {
     #[inline(always)]
     fn closed(&self) -> bool {
-        closed_bit_set(self.0)
+        self.closed_bit_set()
     }
 }
 
 /// The generalized sensor observer.
-pub struct SensorObserver<C: SensorCore, R: Deref<Target = C>>
-{
+pub struct SensorObserver<C: SensorCore, R: Deref<Target = C>> {
     core: R,
     version: usize,
 }
 
-impl<C: SensorCore, R: Deref<Target = C>> SensorObserve for SensorObserver<C, R>
-{
+impl<C: SensorCore, R: Deref<Target = C>> SensorObserve for SensorObserver<C, R> {
     type Target = C::Target;
-    type ReadGuard<'read> = C::ReadGuard<'read> where Self: 'read;
+    type ReadGuard<'read>
+        = C::ReadGuard<'read>
+    where
+        Self: 'read;
 
     type Checkpoint = Version;
 
@@ -439,16 +500,15 @@ impl<C: SensorCore, R: Deref<Target = C>> SensorObserve for SensorObserver<C, R>
     }
 }
 
-impl<C: SensorCoreAsync, R: Deref<Target = C>> SensorObserveAsync for SensorObserver<C, R>
-{
+impl<C: SensorCoreAsync, R: Deref<Target = C>> SensorObserveAsync for SensorObserver<C, R> {
     #[inline(always)]
     async fn read(&self) -> Self::ReadGuard<'_> {
         self.core.read().await
     }
 
     #[inline]
-    async fn wait_until_changed(&self) -> (Version, ObservationStatus) {
-        let (version, status) = self.core.wait_changed(self.version).await;
+    async fn wait_until_changed(&self) -> (Version, SymResult<()>) {
+        let (status, version) = self.core.wait_changed(self.version).await;
         (Version(version), status)
     }
 
@@ -506,7 +566,10 @@ where
     F: FnMut(&A::Target) -> T,
 {
     type Target = T;
-    type ReadGuard<'read> = OwnedData<T> where Self: 'read;
+    type ReadGuard<'read>
+        = OwnedData<T>
+    where
+        Self: 'read;
     type Checkpoint = A::Checkpoint;
 
     #[inline(always)]
@@ -640,7 +703,10 @@ where
     F: FnMut(&A::Target, &B::Target) -> T,
 {
     type Target = T;
-    type ReadGuard<'read> = OwnedData<T> where Self: 'read;
+    type ReadGuard<'read>
+        = OwnedData<T>
+    where
+        Self: 'read;
     type Checkpoint = FusedVersion<A::Checkpoint, B::Checkpoint>;
 
     #[inline]
@@ -705,7 +771,7 @@ impl<
         F: Unpin + Fn() -> bool,
     > Future for FusedWaitChangedFut<A, CA, B, CB, F>
 {
-    type Output = (FusedVersion<CA, CB>, ObservationStatus);
+    type Output = SymResult<FusedVersion<CA, CB>>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
         let Self {
