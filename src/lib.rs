@@ -408,13 +408,13 @@ pub trait SensorObserveAsync: SensorObserve {
     async fn wait_for<M: FnMut(&Self::Target) -> bool>(
         &mut self,
         condition_map: M,
-    ) -> (Self::ReadGuard<'_>, ObservationStatus);
+    ) -> SymResult<Self::ReadGuard<'_>>;
 
     /// Asynchronously wait for a particular condition to become true. This method waits for the sensor value to be marked unseen before staring checks.
     async fn wait_for_next<M: FnMut(&Self::Target) -> bool>(
         &mut self,
         condition_map: M,
-    ) -> (Self::ReadGuard<'_>, ObservationStatus);
+    ) -> SymResult<Self::ReadGuard<'_>>;
 }
 
 #[repr(transparent)]
@@ -458,7 +458,7 @@ impl VersionFunctionality for Version {
 /// The generalized sensor observer.
 pub struct SensorObserver<C: SensorCore, R: Deref<Target = C>> {
     core: R,
-    version: usize,
+    version: Version,
 }
 
 impl<C: SensorCore, R: Deref<Target = C>> SensorObserve for SensorObserver<C, R> {
@@ -472,11 +472,11 @@ impl<C: SensorCore, R: Deref<Target = C>> SensorObserve for SensorObserver<C, R>
 
     #[inline(always)]
     fn save_checkpoint(&self) -> Self::Checkpoint {
-        Version(self.version)
+        self.version
     }
 
     fn restore_checkpoint(&mut self, checkpoint: &Self::Checkpoint) {
-        self.version = checkpoint.0;
+        self.version = *checkpoint;
     }
 
     #[inline(always)]
@@ -486,7 +486,8 @@ impl<C: SensorCore, R: Deref<Target = C>> SensorObserve for SensorObserver<C, R>
 
     #[inline(always)]
     fn mark_unseen(&mut self) {
-        self.version = self.core.version().wrapping_sub(VERSION_BUMP);
+        self.version = self.core.version();
+        self.version.decrement();
     }
 
     #[inline(always)]
@@ -496,7 +497,7 @@ impl<C: SensorCore, R: Deref<Target = C>> SensorObserve for SensorObserver<C, R>
 
     #[inline(always)]
     fn is_closed(&self) -> bool {
-        closed_bit_set(self.core.version())
+        self.core.version().closed_bit_set()
     }
 }
 
@@ -507,32 +508,40 @@ impl<C: SensorCoreAsync, R: Deref<Target = C>> SensorObserveAsync for SensorObse
     }
 
     #[inline]
-    async fn wait_until_changed(&self) -> (Version, SymResult<()>) {
-        let (status, version) = self.core.wait_changed(self.version).await;
-        (Version(version), status)
+    async fn wait_until_changed(&self) -> SymResult<Version> {
+        let version = self.core.wait_changed(self.version).await;
+        match version.closed_bit_set() {
+            true => Err(version),
+            false => Ok(version),
+        }
     }
 
     #[inline]
     async fn wait_for<F: FnMut(&Self::Target) -> bool>(
         &mut self,
         condition: F,
-    ) -> (Self::ReadGuard<'_>, ObservationStatus) {
-        let (latest_version, data) = self
-            .core
-            .wait_for(condition, self.core.version().wrapping_sub(VERSION_BUMP))
-            .await;
+    ) -> SymResult<Self::ReadGuard<'_>> {
+        let mut reference_version = self.core.version();
+        reference_version.decrement();
+        let (guard, latest_version) = self.core.wait_for(condition, reference_version).await;
         self.version = latest_version;
-        data
+        match latest_version.closed_bit_set() {
+            true => Err(guard),
+            false => Ok(guard),
+        }
     }
 
     #[inline]
     async fn wait_for_next<F: FnMut(&Self::Target) -> bool>(
         &mut self,
         condition: F,
-    ) -> (Self::ReadGuard<'_>, ObservationStatus) {
-        let (latest_version, data) = self.core.wait_for(condition, self.version).await;
+    ) -> SymResult<Self::ReadGuard<'_>> {
+        let (guard, latest_version) = self.core.wait_for(condition, self.version).await;
         self.version = latest_version;
-        data
+        match latest_version.closed_bit_set() {
+            true => Err(guard),
+            false => Ok(guard),
+        }
     }
 }
 
@@ -610,45 +619,43 @@ where
 {
     fn read(&self) -> impl Future<Output = Self::ReadGuard<'_>> {
         FutureExt::map(self.inner.read(), |inner_value| {
+            // Safety: `MappedSensorObserver` is not `Sync`, disallowing race conditions over the mapping function.
             OwnedData(unsafe { (*self.map.get())(&inner_value) })
         })
     }
 
-    fn wait_until_changed(&self) -> impl Future<Output = (Self::Checkpoint, ObservationStatus)> {
+    fn wait_until_changed(&self) -> impl Future<Output = SymResult<Self::Checkpoint>> {
         self.inner.wait_until_changed()
     }
 
     async fn wait_for<C: FnMut(&T) -> bool>(
         &mut self,
         mut condition: C,
-    ) -> (Self::ReadGuard<'_>, ObservationStatus) {
+    ) -> SymResult<Self::ReadGuard<'_>> {
         let MappedSensorObserver { inner, map } = self;
-        let mut mapped = None;
-        let (guard, status) = inner
-            .wait_for(|guard| {
-                let data = OwnedData((map.get_mut())(&guard));
-                let success = condition(&data);
-
-                mapped = Some(data);
-                success
-            })
-            .await;
-        (
-            mapped.unwrap_or_else(|| OwnedData((map.get_mut())(&guard))),
-            status,
-        )
+        let mut mapped = MaybeUninit::uninit();
+        match inner
+            .wait_for(|guard| condition(mapped.write(OwnedData((map.get_mut())(&guard)))))
+            .await
+        {
+            Ok(_) => Ok(unsafe { mapped.assume_init() }), // Safety: `mapped` is populated on success.
+            Err(guard) => Err(OwnedData((map.get_mut())(&guard))),
+        }
     }
 
     async fn wait_for_next<C: FnMut(&T) -> bool>(
         &mut self,
         mut condition: C,
-    ) -> (Self::ReadGuard<'_>, ObservationStatus) {
+    ) -> SymResult<Self::ReadGuard<'_>> {
         let MappedSensorObserver { inner, map } = self;
         let mut mapped = MaybeUninit::uninit();
-        let (_, status) = inner
+        match inner
             .wait_for_next(|guard| condition(mapped.write(OwnedData((map.get_mut())(&guard)))))
-            .await;
-        (unsafe { mapped.assume_init() }, status)
+            .await
+        {
+            Ok(_) => Ok(unsafe { mapped.assume_init() }), // Safety: `mapped` is populated on success.
+            Err(guard) => Err(OwnedData((map.get_mut())(&guard))),
+        }
     }
 }
 
@@ -747,9 +754,9 @@ where
 }
 
 struct FusedWaitChangedFut<
-    A: Future<Output = (CA, ObservationStatus)>,
+    A: Future<Output = SymResult<CA>>,
     CA: VersionFunctionality + Clone + Unpin,
-    B: Future<Output = (CB, ObservationStatus)>,
+    B: Future<Output = SymResult<CB>>,
     CB: VersionFunctionality + Clone + Unpin,
     F: Fn() -> bool,
 > {
@@ -764,11 +771,11 @@ struct FusedWaitChangedFut<
 }
 
 impl<
-        A: Future<Output = (CA, ObservationStatus)>,
+        A: Future<Output = SymResult<CA>>,
         CA: VersionFunctionality + Clone + Unpin,
-        B: Future<Output = (CB, ObservationStatus)>,
+        B: Future<Output = SymResult<CB>>,
         CB: VersionFunctionality + Clone + Unpin,
-        F: Unpin + Fn() -> bool,
+        F: Fn() -> bool,
     > Future for FusedWaitChangedFut<A, CA, B, CB, F>
 {
     type Output = SymResult<FusedVersion<CA, CB>>;
@@ -784,40 +791,43 @@ impl<
         } = unsafe { self.get_unchecked_mut() };
 
         if *a_valid {
-            if let Poll::Ready((checkpoint_a, status)) =
+            if let Poll::Ready(checkpoint_a_res) =
                 unsafe { Pin::new_unchecked(a.assume_init_mut()).poll(cx) }
             {
-                if status.success() {
-                    let closed = status.closed() && b_closed();
-                    return Poll::Ready((
-                        FusedVersion {
-                            a: checkpoint_a,
+                match checkpoint_a_res {
+                    Ok(checkpoint) => {
+                        return Poll::Ready(Ok(FusedVersion {
+                            a: checkpoint,
                             b: cb.clone(),
-                        },
-                        status.modify_closed(closed),
-                    ));
-                }
+                        }));
+                    }
+                    Err(checkpoint) => {
+                        *ca = checkpoint;
 
-                *ca = checkpoint_a;
-
-                unsafe {
-                    a.assume_init_drop();
+                        unsafe {
+                            a.assume_init_drop();
+                        }
+                        *a_valid = false;
+                    }
                 }
-                *a_valid = false;
             }
         }
 
         // From here it is known that `A` is closed, therefore `B`'s result can be propogated without alteration.
         unsafe { Pin::new_unchecked(b) }
             .poll(cx)
-            .map(|(checkpoint_b, status)| {
-                (
-                    FusedVersion {
+            .map(|checkpoint_b_res| {
+                let version = match &checkpoint_b_res {
+                    Ok(checkpoint) | Err(checkpoint) => FusedVersion {
                         a: ca.clone(),
-                        b: checkpoint_b,
+                        b: checkpoint.clone(),
                     },
-                    status,
-                )
+                };
+
+                match checkpoint_b_res {
+                    Ok(_) => Ok(version),
+                    Err(_) => Err(version),
+                }
             })
     }
 }
@@ -832,10 +842,7 @@ where
         &mut self,
         mut condition: C,
         check_current: bool,
-    ) -> (
-        <FusedSensorObserver<A, B, T, F> as SensorObserve>::ReadGuard<'_>,
-        ObservationStatus,
-    ) {
+    ) -> SymResult<<FusedSensorObserver<A, B, T, F> as SensorObserve>::ReadGuard<'_>> {
         let checkpoint = self.save_checkpoint();
         let mut data = DropFn::new((self, checkpoint), |(s, cp)| s.restore_checkpoint(cp));
 
@@ -859,12 +866,7 @@ where
 
             if condition(&fused) {
                 *restore_checkpoint = fused_checkpoint;
-                return (
-                    fused,
-                    ObservationStatus::new()
-                        .set_success()
-                        .modify_closed(restore_checkpoint.closed()),
-                );
+                return Ok(fused);
             }
 
             drop(guard_b);
@@ -889,7 +891,7 @@ where
         }
     }
 
-    fn wait_until_changed(&self) -> impl Future<Output = (Self::Checkpoint, ObservationStatus)> {
+    fn wait_until_changed(&self) -> impl Future<Output = SymResult<Self::Checkpoint>> {
         let Self { a, b, .. } = self;
         FusedWaitChangedFut {
             a: MaybeUninit::new(a.wait_until_changed()),
@@ -904,7 +906,7 @@ where
     async fn wait_for<C: FnMut(&T) -> bool>(
         &mut self,
         condition: C,
-    ) -> (Self::ReadGuard<'_>, ObservationStatus) {
+    ) -> SymResult<Self::ReadGuard<'_>> {
         self.wait_for_inner(condition, true).await
     }
 
@@ -912,7 +914,7 @@ where
     async fn wait_for_next<C: FnMut(&T) -> bool>(
         &mut self,
         condition: C,
-    ) -> (Self::ReadGuard<'_>, ObservationStatus) {
+    ) -> SymResult<Self::ReadGuard<'_>> {
         self.wait_for_inner(condition, false).await
     }
 }
