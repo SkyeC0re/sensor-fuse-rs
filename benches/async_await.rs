@@ -1,13 +1,8 @@
 use async_lock::RwLockReadGuard;
-use criterion::{
-    criterion_main, measurement::WallTime, BenchmarkGroup, Criterion,
-};
+use criterion::{criterion_main, measurement::WallTime, BenchmarkGroup, Criterion};
 use futures::executor::block_on;
 use rand::random;
-use sensor_fuse::{
-    sensor_core::{alloc::AsyncCore},
-    SensorObserveAsync, SensorWriter,
-};
+use sensor_fuse::{sensor_core::alloc::AsyncCore, SensorObserveAsync, SensorWriter};
 use std::{
     hint::black_box,
     sync::{
@@ -104,7 +99,7 @@ impl WatchContentionEnvironment {
         let mut writer_handles = Vec::new();
         for _ in 0..writer_count {
             let writer = writer.clone();
-            writer_handles.push(runtime.spawn(async move {
+            writer_handles.push(runtime.spawn_blocking(move || {
                 let mut test_version = 0;
                 let mut writes = 0;
                 loop {
@@ -197,16 +192,14 @@ impl Drop for WatchContentionEnvironment {
     }
 }
 
-struct ContentionEnvironment
-{
+struct ContentionEnvironment {
     reader_handles: Vec<tokio::task::JoinHandle<()>>,
     writer_handles: Vec<tokio::task::JoinHandle<()>>,
     writer: SensorWriter<AsyncCore<ContentionData>, Arc<AsyncCore<ContentionData>>>,
     _runtime: Runtime,
 }
 
-impl ContentionEnvironment
-{
+impl ContentionEnvironment {
     fn new(reader_count: usize, writer_count: usize) -> Self {
         let writer = SensorWriter::from_value(ContentionData::default());
         let runtime = runtime::Builder::new_multi_thread()
@@ -223,7 +216,7 @@ impl ContentionEnvironment
                 let mut last_observed_data = 0;
                 loop {
                     let mut iteration = 0;
-                    let guard: RwLockReadGuard<ContentionData> = reader
+                    let guard: RwLockReadGuard<ContentionData> = match reader
                         .wait_for(|state: &ContentionData| {
                             if state.test_version == usize::MAX {
                                 return true;
@@ -244,7 +237,9 @@ impl ContentionEnvironment
                             ret
                         })
                         .await
-                        .0;
+                    {
+                        Ok(v) | Err(v) => v,
+                    };
 
                     if guard.test_version == usize::MAX {
                         break;
@@ -272,11 +267,11 @@ impl ContentionEnvironment
         let mut writer_handles = Vec::new();
         for _ in 0..writer_count {
             let writer = writer.clone();
-            writer_handles.push(runtime.spawn(async move {
+            writer_handles.push(runtime.spawn_blocking(move || {
                 let mut test_version = 0;
                 let mut writes = 0;
                 loop {
-                    writer.modify_with(|state: &mut ContentionData | {
+                    let fut = writer.modify_with(|state: &mut ContentionData| {
                         state.data_version = state.data_version.wrapping_add(1);
                         if test_version != state.test_version {
                             writes = 0;
@@ -295,7 +290,9 @@ impl ContentionEnvironment
                         });
 
                         true
-                    }).await;
+                    });
+
+                    block_on(fut);
 
                     if test_version == usize::MAX {
                         break;
@@ -365,8 +362,7 @@ impl ContentionEnvironment
     }
 }
 
-impl Drop for ContentionEnvironment
-{
+impl Drop for ContentionEnvironment {
     fn drop(&mut self) {
         block_on(async {
             self.writer
@@ -517,7 +513,7 @@ pub fn bench_reads() {
     // arc_async_r5_w5_o50_s10_observation(&mut group);
     // tokio_watch_r5_w5_o50_s10_observation(&mut group);
     arc_async_r5_w5_o50_s100_observation(&mut group);
-    // tokio_watch_r5_w5_o50_s100_observation(&mut group);
+    tokio_watch_r5_w5_o50_s100_observation(&mut group);
     group.finish();
 }
 
@@ -532,7 +528,7 @@ pub fn bench_writes() {
     // arc_async_r5_w5_o50_s10_writes(&mut group);
     // tokio_watch_r5_w5_o50_s10_writes(&mut group);
     arc_async_r5_w5_o50_s100_writes(&mut group);
-    // tokio_watch_r5_w5_o50_s100_writes(&mut group);
+    tokio_watch_r5_w5_o50_s100_writes(&mut group);
     group.finish();
 }
 

@@ -59,97 +59,14 @@ use sensor_core::{closed_bit_set, SensorCore, SensorCoreAsync, CLOSED_BIT, VERSI
 #[repr(transparent)]
 pub struct OwnedData<T>(pub T);
 
+impl<T> From<T> for OwnedData<T> {
+    #[inline(always)]
+    fn from(value: T) -> Self {
+        Self(value)
+    }
+}
+
 pub type SymResult<T> = Result<T, T>;
-
-mod sealed {
-    pub trait SealedObserve {}
-}
-
-pub const STATUS_SUCCESS_BIT: u8 = 1;
-pub const STATUS_CLOSED_BIT: u8 = 2;
-pub const STATUS_CHANGED_BIT: u8 = 4;
-
-#[repr(transparent)]
-#[derive(Clone, Copy, Deref, DerefMut)]
-pub struct ObservationStatus(pub u8);
-
-impl ObservationStatus {
-    /// Invert the bits defined by `flags` if a condition holds.
-    #[inline(always)]
-    pub const fn set_flags_if(mut self, condition: bool, flags: u8) -> Self {
-        self.0 |= flags & (condition as u8).wrapping_neg();
-        self
-    }
-
-    /// Creates a new non-closed, non-changed, non-successful observation status.
-    #[inline(always)]
-    pub const fn new() -> Self {
-        Self(0)
-    }
-
-    /// Creates a new non-closed, non-successful observation status.
-    #[inline(always)]
-    pub const fn new_success() -> Self {
-        Self(STATUS_SUCCESS_BIT)
-    }
-
-    /// Returns true if updates are no longer possible.
-    #[inline(always)]
-    pub const fn closed(self) -> bool {
-        self.0 & STATUS_CLOSED_BIT != 0
-    }
-
-    /// Returns true if the observation condition was met.
-    #[inline(always)]
-    pub const fn success(self) -> bool {
-        self.0 & STATUS_SUCCESS_BIT != 0
-    }
-
-    /// Returns true if an updated value was observed.
-    #[inline(always)]
-    pub const fn changed(self) -> bool {
-        self.0 & STATUS_CHANGED_BIT != 0
-    }
-
-    #[inline(always)]
-    pub(crate) fn modify_closed(mut self, closed: bool) -> Self {
-        self.0 = self.0 & (!STATUS_CLOSED_BIT);
-        self.0 |= STATUS_CLOSED_BIT & ((closed as u8) << 1);
-        self
-    }
-
-    #[inline(always)]
-    pub(crate) fn modify_success(mut self, success: bool) -> Self {
-        self.0 = self.0 & (!STATUS_SUCCESS_BIT);
-        self.0 |= STATUS_SUCCESS_BIT & success as u8;
-        self
-    }
-
-    #[inline(always)]
-    pub(crate) fn modify_changed(mut self, changed: bool) -> Self {
-        self.0 = self.0 & (!STATUS_CHANGED_BIT);
-        self.0 |= STATUS_CHANGED_BIT & ((changed as u8) << 2);
-        self
-    }
-
-    #[inline(always)]
-    pub(crate) fn set_closed(mut self) -> Self {
-        self.0 |= STATUS_CLOSED_BIT;
-        self
-    }
-
-    #[inline(always)]
-    pub(crate) fn set_success(mut self) -> Self {
-        self.0 |= STATUS_SUCCESS_BIT;
-        self
-    }
-
-    #[inline(always)]
-    pub(crate) fn set_changed(mut self) -> Self {
-        self.0 |= STATUS_CHANGED_BIT;
-        self
-    }
-}
 
 /*** Sensor State ***/
 
@@ -255,6 +172,7 @@ where
     S: From<C>,
     for<'a> &'a S: ShareStrategy<'a, Core = C>,
 {
+    /// Produces a sensor writer from an initial value.
     #[inline]
     pub fn from_value(value: C::Target) -> Self {
         Self(S::from(C::from(value)))
@@ -365,11 +283,15 @@ pub trait SensorObserve {
     /// as the most recent data version of the sensor.
     fn restore_checkpoint(&mut self, checkpoint: &Self::Checkpoint);
 
+    /// Mark the current sensor data as seen.
     fn mark_seen(&mut self);
+
     /// Mark the current sensor data as unseen.
     fn mark_unseen(&mut self);
+
     /// Returns true if the sensor data has been marked as unseen.
     fn has_changed(&self) -> bool;
+
     /// Returns true if all upstream writers has been dropped and no more updates can occur.
     fn is_closed(&self) -> bool;
 
@@ -434,12 +356,12 @@ impl Version {
 
     #[inline(always)]
     pub const fn increment(&mut self) {
-        self.0.wrapping_add(VERSION_BUMP);
+        self.0 = self.0.wrapping_add(VERSION_BUMP);
     }
 
     #[inline(always)]
     pub const fn decrement(&mut self) {
-        self.0.wrapping_sub(VERSION_BUMP);
+        self.0 = self.0.wrapping_sub(VERSION_BUMP);
     }
 }
 
@@ -758,57 +680,51 @@ struct FusedWaitChangedFut<
     CA: VersionFunctionality + Clone + Unpin,
     B: Future<Output = SymResult<CB>>,
     CB: VersionFunctionality + Clone + Unpin,
-    F: Fn() -> bool,
 > {
-    a: MaybeUninit<A>,
+    a: Option<A>,
     // Checkpoint for a.
     ca: CA,
-    a_valid: bool,
     // Checkpoint for b.
     b: B,
     cb: CB,
-    b_closed: F,
 }
 
+// impl<
+// A: Future<Output = SymResult<CA>>,
+// CA: VersionFunctionality + Clone + Unpin,
+// B: Future<Output = SymResult<CB>>,
+// CB: VersionFunctionality + Clone + Unpin,
+// F: Fn() -> bool> Drop for FusedWaitChangedFut<A, CA, B, CB, F> {
+//     fn drop(&mut self) {
+
+//     }
+// }
 impl<
         A: Future<Output = SymResult<CA>>,
         CA: VersionFunctionality + Clone + Unpin,
         B: Future<Output = SymResult<CB>>,
         CB: VersionFunctionality + Clone + Unpin,
-        F: Fn() -> bool,
-    > Future for FusedWaitChangedFut<A, CA, B, CB, F>
+    > Future for FusedWaitChangedFut<A, CA, B, CB>
 {
     type Output = SymResult<FusedVersion<CA, CB>>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
-        let Self {
-            a,
-            ca,
-            a_valid,
-            b,
-            cb,
-            b_closed,
-        } = unsafe { self.get_unchecked_mut() };
+        let Self { a, ca, b, cb } = unsafe { self.get_unchecked_mut() };
 
-        if *a_valid {
-            if let Poll::Ready(checkpoint_a_res) =
-                unsafe { Pin::new_unchecked(a.assume_init_mut()).poll(cx) }
-            {
-                match checkpoint_a_res {
-                    Ok(checkpoint) => {
-                        return Poll::Ready(Ok(FusedVersion {
-                            a: checkpoint,
-                            b: cb.clone(),
-                        }));
-                    }
-                    Err(checkpoint) => {
-                        *ca = checkpoint;
-
-                        unsafe {
-                            a.assume_init_drop();
-                        }
-                        *a_valid = false;
-                    }
+        if let Some(Poll::Ready(checkpoint_a_res)) = a
+            .as_mut()
+            .map(|a| unsafe { Pin::new_unchecked(a).poll(cx) })
+        {
+            match checkpoint_a_res {
+                Ok(checkpoint) => {
+                    return Poll::Ready(Ok(FusedVersion {
+                        a: checkpoint,
+                        b: cb.clone(),
+                    }));
+                }
+                Err(checkpoint) => {
+                    *ca = checkpoint;
+                    *a = None;
                 }
             }
         }
@@ -894,12 +810,10 @@ where
     fn wait_until_changed(&self) -> impl Future<Output = SymResult<Self::Checkpoint>> {
         let Self { a, b, .. } = self;
         FusedWaitChangedFut {
-            a: MaybeUninit::new(a.wait_until_changed()),
+            a: Some(a.wait_until_changed()),
             ca: a.save_checkpoint(),
-            a_valid: true,
             b: self.b.wait_until_changed(),
             cb: b.save_checkpoint(),
-            b_closed: move || b.is_closed(),
         }
     }
 

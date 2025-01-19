@@ -1,10 +1,10 @@
+use core::{pin::Pin, task::Poll};
 use paste::paste;
 use sensor_fuse::{
     prelude::*,
-    sensor_core::{alloc::AsyncCore, SensorCoreAsync},
+    sensor_core::{alloc::AsyncCore, no_alloc::AsyncSingleCore, SensorCoreAsync},
     SensorWriter, ShareStrategy,
 };
-use std::{ops::Deref, pin::Pin, sync::Arc, task::Poll};
 
 use wookie::{wookie, Wookie};
 
@@ -72,7 +72,7 @@ macro_rules! test_single_thread {
 fn test_read<C, S>()
 where
     C: SensorCoreAsync<Target = usize> + From<usize>,
-    S: Deref<Target = C> + From<C>,
+    S: From<C>,
     for<'a> &'a S: ShareStrategy<'a, Core = C>,
 {
     let writer = SensorWriter::from_value(0);
@@ -95,9 +95,9 @@ where
 
 fn test_write_read<C, S>()
 where
-C: SensorCoreAsync<Target = usize> + From<usize>,
-S: Deref<Target = C> + From<C>,
-for<'a> &'a S: ShareStrategy<'a, Core = C>,
+    C: SensorCoreAsync<Target = usize> + From<usize>,
+    S: From<C>,
+    for<'a> &'a S: ShareStrategy<'a, Core = C>,
 {
     let writer = SensorWriter::from_value(0);
     let observer = writer.spawn_observer();
@@ -129,9 +129,9 @@ for<'a> &'a S: ShareStrategy<'a, Core = C>,
 
 fn test_modify<C, S>()
 where
-C: SensorCoreAsync<Target = usize> + From<usize>,
-S: Deref<Target = C> + From<C>,
-for<'a> &'a S: ShareStrategy<'a, Core = C>,
+    C: SensorCoreAsync<Target = usize> + From<usize>,
+    S: From<C>,
+    for<'a> &'a S: ShareStrategy<'a, Core = C>,
 {
     let writer = SensorWriter::<_, S>::from_value(0);
     let observer = writer.spawn_observer();
@@ -157,9 +157,9 @@ for<'a> &'a S: ShareStrategy<'a, Core = C>,
 
 fn test_wait_changed<C, S>()
 where
-C: SensorCoreAsync<Target = usize> + From<usize>,
-S: Deref<Target = C> + From<C>,
-for<'a> &'a S: ShareStrategy<'a, Core = C>,
+    C: SensorCoreAsync<Target = usize> + From<usize>,
+    S: From<C>,
+    for<'a> &'a S: ShareStrategy<'a, Core = C>,
 {
     let writer = SensorWriter::from_value(0);
     let observer = writer.spawn_observer();
@@ -192,9 +192,9 @@ for<'a> &'a S: ShareStrategy<'a, Core = C>,
 
 fn test_wait_for<C, S>()
 where
-C: SensorCoreAsync<Target = usize> + From<usize>,
-S: Deref<Target = C> + From<C>,
-for<'a> &'a S: ShareStrategy<'a, Core = C>,
+    C: SensorCoreAsync<Target = usize> + From<usize>,
+    S: From<C>,
+    for<'a> &'a S: ShareStrategy<'a, Core = C>,
 {
     let writer = SensorWriter::from_value(0);
     let mut observer = writer.spawn_observer();
@@ -221,9 +221,8 @@ for<'a> &'a S: ShareStrategy<'a, Core = C>,
     assert_eq!(modify2.poll(), Poll::Ready(true));
     assert_eq!(wait_for.woken(), 2);
     match wait_for.poll() {
-        Poll::Ready((v, status)) => {
-            assert_eq!(*v, 2);
-            assert!(status.success());
+        Poll::Ready(res) => {
+            assert_eq!(res.ok().map(|v| *v), Some(2));
         }
         Poll::Pending => panic!(),
     };
@@ -231,9 +230,9 @@ for<'a> &'a S: ShareStrategy<'a, Core = C>,
 
 fn test_mapped_read<C, S>()
 where
-C: SensorCoreAsync<Target = usize> + From<usize>,
-S: Deref<Target = C> + From<C>,
-for<'a> &'a S: ShareStrategy<'a, Core = C>,
+    C: SensorCoreAsync<Target = usize> + From<usize>,
+    S: From<C>,
+    for<'a> &'a S: ShareStrategy<'a, Core = C>,
 {
     let writer = SensorWriter::from_value(0);
     let observer = writer.spawn_observer().map(|v| *v + 10);
@@ -259,9 +258,9 @@ for<'a> &'a S: ShareStrategy<'a, Core = C>,
 
 fn test_mapped_wait_changed<C, S>()
 where
-C: SensorCoreAsync<Target = usize> + From<usize>,
-S: Deref<Target = C> + From<C>,
-for<'a> &'a S: ShareStrategy<'a, Core = C>,
+    C: SensorCoreAsync<Target = usize> + From<usize>,
+    S: From<C>,
+    for<'a> &'a S: ShareStrategy<'a, Core = C>,
 {
     let writer = SensorWriter::from_value(0);
     let observer = writer.spawn_observer().map(|v| *v + 10);
@@ -294,9 +293,9 @@ for<'a> &'a S: ShareStrategy<'a, Core = C>,
 
 fn test_mapped_wait_for<C, S>()
 where
-C: SensorCoreAsync<Target = usize> + From<usize>,
-S: Deref<Target = C> + From<C>,
-for<'a> &'a S: ShareStrategy<'a, Core = C>,
+    C: SensorCoreAsync<Target = usize> + From<usize>,
+    S: From<C>,
+    for<'a> &'a S: ShareStrategy<'a, Core = C>,
 {
     let writer = SensorWriter::<_, S>::from_value(0);
     let mut observer = writer.spawn_observer().map(|v| *v + 10);
@@ -324,9 +323,8 @@ for<'a> &'a S: ShareStrategy<'a, Core = C>,
     assert_eq!(wait_for.woken(), 2);
 
     match wait_for.poll() {
-        Poll::Ready((v, status)) => {
-            assert_eq!(*v, 12);
-            assert!(status.success());
+        Poll::Ready(res) => {
+            assert_eq!(res.ok().map(|v| *v), Some(12));
         }
         Poll::Pending => panic!(),
     };
@@ -334,9 +332,9 @@ for<'a> &'a S: ShareStrategy<'a, Core = C>,
 
 fn test_fused_read<C, S>()
 where
-C: SensorCoreAsync<Target = usize> + From<usize>,
-S: Deref<Target = C> + From<C>,
-for<'a> &'a S: ShareStrategy<'a, Core = C>,
+    C: SensorCoreAsync<Target = usize> + From<usize>,
+    S: From<C>,
+    for<'a> &'a S: ShareStrategy<'a, Core = C>,
 {
     let writer = SensorWriter::from_value(0);
     let observer = writer.spawn_observer().map(|v| *v + 10);
@@ -362,9 +360,9 @@ for<'a> &'a S: ShareStrategy<'a, Core = C>,
 
 fn test_fused_wait_changed<C, S>()
 where
-C: SensorCoreAsync<Target = usize> + From<usize>,
-S: Deref<Target = C> + From<C>,
-for<'a> &'a S: ShareStrategy<'a, Core = C>,
+    C: SensorCoreAsync<Target = usize> + From<usize>,
+    S: From<C>,
+    for<'a> &'a S: ShareStrategy<'a, Core = C>,
 {
     let writer1 = SensorWriter::from_value(0);
     let writer2 = SensorWriter::from_value(0);
@@ -426,9 +424,9 @@ for<'a> &'a S: ShareStrategy<'a, Core = C>,
 
 fn test_fused_wait_for<C, S>()
 where
-C: SensorCoreAsync<Target = usize> + From<usize>,
-S: Deref<Target = C> + From<C>,
-for<'a> &'a S: ShareStrategy<'a, Core = C>,
+    C: SensorCoreAsync<Target = usize> + From<usize>,
+    S: From<C>,
+    for<'a> &'a S: ShareStrategy<'a, Core = C>,
 {
     let writer1 = SensorWriter::from_value(0);
     let writer2 = SensorWriter::from_value(0);
@@ -467,9 +465,8 @@ for<'a> &'a S: ShareStrategy<'a, Core = C>,
     assert_eq!(wait_for.woken(), 1);
 
     match wait_for.poll() {
-        Poll::Ready((v, status)) => {
-            assert_eq!(*v, 3);
-            assert!(status.success());
+        Poll::Ready(res) => {
+            assert_eq!(res.ok().map(|v| *v), Some(3));
         }
         Poll::Pending => panic!(),
     };
@@ -493,12 +490,12 @@ for<'a> &'a S: ShareStrategy<'a, Core = C>,
     assert_eq!(wait_for.woken(), 1);
 
     match wait_for.poll() {
-        Poll::Ready((v, status)) => {
-            assert_eq!(*v, 4);
-            assert!(status.success());
+        Poll::Ready(res) => {
+            assert_eq!(res.ok().map(|v| *v), Some(4));
         }
         Poll::Pending => panic!(),
     };
 }
 
-test_single_thread!(arc_alloc_async, Arc<AsyncCore<_>>);
+test_single_thread!(arc_alloc_async, AsyncCore<_>);
+test_single_thread!(no_alloc_async, AsyncSingleCore<_>);

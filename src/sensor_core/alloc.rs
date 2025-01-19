@@ -6,7 +6,7 @@ use core::{
     task::{Context, Poll, Waker},
 };
 use core::{hint::spin_loop, mem::MaybeUninit};
-use std::{cell::UnsafeCell, future::poll_fn};
+use std::future::poll_fn;
 
 use async_lock::{
     futures::{Read, Write},
@@ -14,9 +14,9 @@ use async_lock::{
 };
 use either::Either;
 
-use crate::{ObservationStatus, SymResult, Version, STATUS_CHANGED_BIT, STATUS_CLOSED_BIT};
+use crate::Version;
 
-use super::{SensorCore, SensorCoreAsync, CLOSED_BIT, VERSION_BUMP, VERSION_MASK};
+use super::{SensorCore, SensorCoreAsync, CLOSED_BIT, VERSION_BUMP};
 
 const INIT_BIT: usize = 1;
 const DROP_BIT: usize = 2;
@@ -146,7 +146,7 @@ impl<T> AsyncCore<T> {
             version: AtomicUsize::new(0),
             lock: RwLock::new(init),
             waiter_list: WakerList::new(),
-            writers: AtomicUsize::new(0),
+            writers: AtomicUsize::new(1),
         }
     }
 }

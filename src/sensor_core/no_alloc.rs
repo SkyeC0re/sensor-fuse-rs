@@ -12,12 +12,9 @@ use std::ptr::null_mut;
 
 use either::Either;
 
-use crate::{
-    ObservationStatus, SymResult, Version, STATUS_CHANGED_BIT, STATUS_CLOSED_BIT,
-    STATUS_SUCCESS_BIT,
-};
+use crate::Version;
 
-use super::{SensorCore, SensorCoreAsync, CLOSED_BIT, VERSION_BUMP};
+use super::{SensorCore, SensorCoreAsync};
 
 const BIT_NODE_TYPE: usize = 1;
 const BIT_READY: usize = 2;
@@ -50,6 +47,23 @@ struct Inner<T> {
     data: T,
 }
 
+impl<T> From<T> for AsyncSingleCore<T> {
+    #[inline(always)]
+    fn from(value: T) -> Self {
+        Self(UnsafeCell::new(Inner {
+            version: Version(0),
+            registered_writers: 1,
+            reader_count: 0,
+            queue_head: 0,
+            queue_tail: 0,
+            idle_reads_head: null_mut(),
+            idle_reads_tail: null_mut(),
+            waiters_head: null_mut(),
+            _types: PhantomData,
+            data: value,
+        }))
+    }
+}
 impl<T> Inner<T> {
     /// Either wakes the first set of queued readers or a single writer.
     /// Safety: should only be called with no active readers or writers.
@@ -75,6 +89,12 @@ impl<T> Inner<T> {
         self.reader_count = 0;
 
         loop {
+            // Ensure list coherence when the last element is removed.
+            if self.queue_head == 0 {
+                self.queue_tail = 0;
+                return;
+            }
+
             // No need to panic. Just leave the remaining readers for the next set.
             if (self.reader_count == MAX_READERS)
                 || (self.queue_head & BIT_NODE_TYPE == NODE_TYPE_WRITER)
@@ -89,12 +109,6 @@ impl<T> Inner<T> {
                 self.queue_head = node.next;
                 node.prev |= BIT_READY;
                 node.waker.assume_init_read().wake();
-            }
-
-            // Ensure list coherence when the last element is removed.
-            if self.queue_head == 0 {
-                self.queue_tail = 0;
-                return;
             }
         }
     }
@@ -112,7 +126,7 @@ impl<T> AsyncSingleCore<T> {
     }
 }
 
-#[repr(align(4))]
+#[repr(align(8))]
 struct Node {
     // Combination of pointer and node type.
     next: usize,
@@ -139,6 +153,10 @@ impl<'a, T> Drop for ReadGuard<'a, T> {
     #[inline]
     fn drop(&mut self) {
         let inner = unsafe { &mut (*self.0.get()) };
+
+        if inner.registered_writers == 0 {
+            return;
+        }
 
         if inner.reader_count == 1 {
             inner.wake_next_set();
@@ -270,7 +288,7 @@ impl<'a, T> Drop for ConditionalRead<'a, T> {
         };
 
         // Node has already been removed from the queue by a call to `fn@wake_next_set`, nothing to do.
-        if node.prev & BIT_READY == BIT_READY {
+        if node.prev & BIT_READY != 0 {
             return;
         }
 
@@ -280,29 +298,29 @@ impl<'a, T> Drop for ConditionalRead<'a, T> {
 
         let inner = unsafe { &mut *self.core.0.get() };
 
-        if node.prev >= PTR_MASK {
+        let prev_node = (node.prev & PTR_MASK) as *mut Node;
+        if prev_node != null_mut() {
             // Node is not a head, connect `prev` to `next`.
-            let prev_node = unsafe { &mut *((node.prev & PTR_MASK) as *mut Node) };
-            prev_node.next = node.next;
-        } else if (inner.queue_head & PTR_MASK) as *mut Node == node {
+            unsafe { (*prev_node).next = node.next };
+        } else if inner.idle_reads_head == node {
+            // Node is the idle readers queue head.
+            inner.idle_reads_head = node.next as *mut Node;
+        } else {
             // Node is the queue head.
             inner.queue_head = node.next;
-        } else {
-            // Node must be the idle readers head.
-            inner.idle_reads_head = node.next as *mut Node;
         }
 
-        if node.next >= PTR_MASK {
+        let next_node = (node.next & PTR_MASK) as *mut Node;
+        if next_node != null_mut() {
             // Node is not a tail, connect `next` to `prev`.
-            let next_node = unsafe { &mut *((node.next & PTR_MASK) as *mut Node) };
             // Safety: This node was not ready, it is impossible for the next node to be ready and therefore have that state overwritten.
-            next_node.prev = node.prev;
-        } else if (inner.queue_tail & PTR_MASK) as *mut Node == node {
+            unsafe { (*next_node).prev = node.prev };
+        } else if inner.idle_reads_tail == node {
+            // Node is the idle readers tail.
+            inner.idle_reads_tail = node.prev as *mut Node;
+        } else {
             // Node is the queue tail.
             inner.queue_tail = node.prev;
-        } else {
-            // Node must be the idle readers tail.
-            inner.idle_reads_tail = node.prev as *mut Node;
         }
     }
 }
@@ -369,7 +387,7 @@ impl<'a, T> Drop for Read<'a, T> {
         };
 
         // Node has already been removed from the queue by a call to `fn@wake_next_set`, nothing to do.
-        if node.prev & BIT_READY == BIT_READY {
+        if node.prev & BIT_READY != 0 {
             return;
         }
 
@@ -379,23 +397,23 @@ impl<'a, T> Drop for Read<'a, T> {
 
         let inner = unsafe { &mut *self.core.0.get() };
 
-        if node.prev >= PTR_MASK {
-            // Node is not a head, connect `prev` to `next`.
-            let prev_node = unsafe { &mut *((node.prev & PTR_MASK) as *mut Node) };
-            prev_node.next = node.next;
-        } else {
+        let prev_node = (node.prev & PTR_MASK) as *mut Node;
+        if prev_node.is_null() {
             // Node is the queue head.
             inner.queue_head = node.next;
+        } else {
+            // Node is not a head, connect `prev` to `next`.
+            unsafe { (*prev_node).next = node.next };
         }
 
-        if node.next >= PTR_MASK {
-            // Node is not a tail, connect `next` to `prev`.
-            let next_node = unsafe { &mut *((node.next & PTR_MASK) as *mut Node) };
-            // Safety: This node was not ready, it is impossible for the next node to be ready and therefore have that state overwritten.
-            next_node.prev = node.prev;
-        } else {
+        let next_node = (node.next & PTR_MASK) as *mut Node;
+        if next_node.is_null() {
             // Node is the queue tail.
             inner.queue_tail = node.prev;
+        } else {
+            // Node is not a tail, connect `next` to `prev`.
+            // Safety: This node was not ready, it is impossible for the next node to be ready and therefore have that state overwritten.
+            unsafe { (*next_node).prev = node.prev };
         }
     }
 }
@@ -436,11 +454,17 @@ impl<'a, T> Future for Write<'a, T> {
         // Get the pinned Node address.
         let node_addr: *mut Node = unsafe { s.node.as_mut().unwrap_unchecked() };
 
+        let node_addr = node_addr as usize | NODE_TYPE_WRITER;
+
         if inner.queue_head == 0 {
-            inner.queue_head = node_addr as usize;
+            inner.queue_head = node_addr;
+        } else {
+            // Safety: A non-zero head implies a non-zero tail.
+            let prev_tail = (inner.queue_tail & PTR_MASK) as *mut Node;
+            unsafe { (*prev_tail).next = node_addr }
         }
 
-        inner.queue_tail = node_addr as usize;
+        inner.queue_tail = node_addr;
 
         Poll::Pending
     }
@@ -454,7 +478,7 @@ impl<'a, T> Drop for Write<'a, T> {
         };
 
         // Node has already been removed from the queue by a call to `fn@wake_next_set`, nothing to do.
-        if node.prev & BIT_READY == BIT_READY {
+        if node.prev & BIT_READY != 0 {
             return;
         }
 
@@ -464,24 +488,24 @@ impl<'a, T> Drop for Write<'a, T> {
 
         let inner = unsafe { &mut *self.core.0.get() };
 
-        if node.prev >= PTR_MASK {
-            // Node is not a head, connect `prev` to `next` whilst ensuring ready bit is propogated correctly.
-            let prev_node = unsafe { &mut *((node.prev & PTR_MASK) as *mut Node) };
-            prev_node.next = node.next;
-        } else {
+        let prev_node = (node.prev & PTR_MASK) as *mut Node;
+        if prev_node.is_null() {
             // Node is the queue head.
             inner.queue_head = node.next;
-        };
-
-        if node.next >= PTR_MASK {
-            // Node is not a tail, connect `next` to `prev`.
-            let next_node = unsafe { &mut *((node.next & PTR_MASK) as *mut Node) };
-            // Safety: This node was not ready, it is impossible for the next node to be ready and therefore have that state overwritten.
-            next_node.prev = node.prev;
         } else {
+            // Node is not a head, connect `prev` to `next`.
+            unsafe { (*prev_node).next = node.next };
+        }
+
+        let next_node = (node.next & PTR_MASK) as *mut Node;
+        if next_node.is_null() {
             // Node is the queue tail.
             inner.queue_tail = node.prev;
-        };
+        } else {
+            // Node is not a tail, connect `next` to `prev`.
+            // Safety: This node was not ready, it is impossible for the next node to be ready and therefore have that state overwritten.
+            unsafe { (*next_node).prev = node.prev };
+        }
     }
 }
 
@@ -538,6 +562,42 @@ impl<'a, T> Future for WaitChanged<'a, T> {
     }
 }
 
+impl<'a, T> Drop for WaitChanged<'a, T> {
+    fn drop(&mut self) {
+        let node = match &mut self.node {
+            Either::Left(_) => return,
+            Either::Right(node) => node,
+        };
+
+        // Node has already been removed from the queue, nothing to do.
+        if node.prev & BIT_READY != 0 {
+            return;
+        }
+
+        unsafe {
+            node.waker.assume_init_drop();
+        }
+
+        let inner = unsafe { &mut *self.core.0.get() };
+
+        let prev_node = (node.prev & PTR_MASK) as *mut Node;
+        if prev_node.is_null() {
+            // Node is the change waiters head.
+            inner.waiters_head = node.next as *mut Node;
+        } else {
+            // Node is not a head, connect `prev` to `next`.
+            unsafe { (*prev_node).next = node.next };
+        };
+
+        let next_node = (node.next & PTR_MASK) as *mut Node;
+        if next_node != null_mut() {
+            // Node is not a tail, connect `next` to `prev`.
+            // Safety: This node was not ready, it is impossible for the next node to be ready and therefore have that state overwritten.
+            unsafe { (*next_node).prev = node.prev };
+        };
+    }
+}
+
 impl<T> SensorCore for AsyncSingleCore<T> {
     type Target = T;
 
@@ -557,7 +617,26 @@ impl<T> SensorCore for AsyncSingleCore<T> {
     }
     #[inline(always)]
     unsafe fn deregister_writer(&self) {
-        (*self.0.get()).registered_writers -= 1
+        let inner = &mut *self.0.get();
+        inner.registered_writers -= 1;
+
+        if inner.registered_writers == 0 {
+            inner.version.set_closed_bit();
+
+            let force_wake_list = |mut node: *mut Node| {
+                while !node.is_null() {
+                    (*node).prev |= BIT_READY;
+                    (*node).waker.assume_init_read().wake();
+                    node = (*node).next as *mut Node;
+                }
+            };
+
+            // Safety: Only reader nodes remain in this list.
+            force_wake_list(inner.queue_head as *mut Node);
+
+            force_wake_list(inner.idle_reads_head);
+            force_wake_list(inner.waiters_head);
+        }
     }
     #[inline(always)]
     fn version(&self) -> Version {
@@ -601,10 +680,12 @@ impl<T> SensorCore for AsyncSingleCore<T> {
         while inner.waiters_head != null_mut() {
             let node = unsafe { &mut *inner.waiters_head };
             inner.waiters_head = node.next as *mut Node;
-            node.next |= BIT_READY;
+            node.prev |= BIT_READY;
             unsafe { node.waker.assume_init_read().wake() };
         }
+        inner.waiters_head = null_mut();
     }
+
     #[inline]
     fn try_read(&self) -> Option<Self::ReadGuard<'_>> {
         let inner = unsafe { &mut (*self.0.get()) };

@@ -9,7 +9,7 @@ use core::{
     ops::{Deref, DerefMut},
 };
 
-use crate::{ObservationStatus, SymResult, Version, STATUS_SUCCESS_BIT};
+use crate::Version;
 
 // All credit to [Tokio's Watch Channel](https://docs.rs/tokio/latest/tokio/sync/watch/index.html). If it's not broken don't fix it.
 pub(crate) const CLOSED_BIT: usize = 1;
