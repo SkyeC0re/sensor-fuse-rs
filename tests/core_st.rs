@@ -1,31 +1,29 @@
 use paste::paste;
 use sensor_fuse::{
-    prelude::*, sensor_core::{alloc::AsyncCore, SensorCore}, SensorWriter, ShareStrategy,
+    prelude::*,
+    sensor_core::{alloc::AsyncCore, no_alloc::AsyncSingleCore, SensorCore},
+    SensorWriter, ShareStrategy,
 };
 use std::{ops::Deref, sync::Arc};
 
-macro_rules! test_core_with_owned_observer {
-    ($prefix:ident, $sensor_writer:ty) => {
-        paste! {
-            #[test]
-            fn [<$prefix _closed>]() {
-                test_closed::<_, $sensor_writer, _>();
-            }
-        }
-    };
-}
-
 macro_rules! test_core {
-    ($prefix:ident, $sensor_writer:ty) => {
+    ($prefix:ident, $core:ty) => {
         paste! {
             #[test]
             fn [<$prefix _change_observation>]() {
-                test_change_observation::<_, $sensor_writer>();
+                test_change_observation::<_, $core>();
             }
 
             #[test]
             fn [<$prefix _try_read_write>]() {
-                test_try_read_write::<_, $sensor_writer>();
+                test_try_read_write::<_, $core>();
+            }
+
+            paste! {
+                #[test]
+                fn [<$prefix _closed>]() {
+                    test_closed::<_, Arc<$core>, _>();
+                }
             }
 
         }
@@ -49,9 +47,9 @@ where
 
 fn test_change_observation<C, S>()
 where
-C: SensorCore<Target = usize> + From<usize>,
-S: From<C>,
-for<'a> &'a S: ShareStrategy<'a, Core = C>,
+    C: SensorCore<Target = usize> + From<usize>,
+    S: From<C>,
+    for<'a> &'a S: ShareStrategy<'a, Core = C>,
 {
     let writer = SensorWriter::from_value(0);
     let observer = writer.spawn_observer();
@@ -62,9 +60,9 @@ for<'a> &'a S: ShareStrategy<'a, Core = C>,
 
 fn test_try_read_write<C, S>()
 where
-C: SensorCore<Target = usize> + From<usize>,
-S: From<C>,
-for<'a> &'a S: ShareStrategy<'a, Core = C>,
+    C: SensorCore<Target = usize> + From<usize>,
+    S: From<C>,
+    for<'a> &'a S: ShareStrategy<'a, Core = C>,
 {
     let writer = SensorWriter::from_value(0);
     let write_guard = writer.try_write().unwrap();
@@ -73,5 +71,6 @@ for<'a> &'a S: ShareStrategy<'a, Core = C>,
     assert!(writer.try_read().is_some());
 }
 
-test_core!(arc_alloc_async, Arc<AsyncCore<_>>);
-test_core_with_owned_observer!(arc_alloc_async, Arc<AsyncCore<_>>);
+test_core!(alloc_async, AsyncCore<_>);
+
+test_core!(no_alloc_async, AsyncSingleCore<_>);

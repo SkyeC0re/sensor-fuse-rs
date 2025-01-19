@@ -5,65 +5,76 @@ use sensor_fuse::{
     sensor_core::{alloc::AsyncCore, no_alloc::AsyncSingleCore, SensorCoreAsync},
     SensorWriter, ShareStrategy,
 };
+use std::sync::Arc;
 
 use wookie::{wookie, Wookie};
 
 macro_rules! test_single_thread {
-    ($prefix:ident, $sensor_writer:ty) => {
+    ($prefix:ident, $core:ty) => {
         paste! {
             #[test]
             fn [<$prefix _read>]() {
-                test_read::<_, $sensor_writer>();
+                test_read::<_, $core>();
             }
 
             #[test]
             fn [<$prefix _write_read>]() {
-                test_write_read::<_, $sensor_writer>();
+                test_write_read::<_, $core>();
             }
 
             #[test]
             fn [<$prefix _modify>]() {
-                test_modify::<_, $sensor_writer>();
+                test_modify::<_, $core>();
             }
 
             #[test]
             fn [<$prefix _wait_changed>]() {
-                test_wait_changed::<_, $sensor_writer>();
+                test_wait_changed::<_, $core>();
             }
 
             #[test]
             fn [<$prefix _wait_for>]() {
-                test_wait_for::<_, $sensor_writer>();
+                test_wait_for::<_, $core>();
             }
 
             #[test]
             fn [<$prefix _mapped_read>]() {
-                test_mapped_read::<_, $sensor_writer>();
+                test_mapped_read::<_, $core>();
             }
 
             #[test]
             fn [<$prefix _mapped_wait_changed>]() {
-                test_mapped_wait_changed::<_, $sensor_writer>();
+                test_mapped_wait_changed::<_, $core>();
             }
 
             #[test]
             fn [<$prefix _mapped_wait_for>]() {
-                test_mapped_wait_for::<_, $sensor_writer>();
+                test_mapped_wait_for::<_, $core>();
             }
 
             #[test]
             fn [<$prefix _fused_read>]() {
-                test_fused_read::<_, $sensor_writer>();
+                test_fused_read::<_, $core>();
             }
 
             #[test]
             fn [<$prefix _fused_wait_changed>]() {
-                test_fused_wait_changed::<_, $sensor_writer>();
+                test_fused_wait_changed::<_, $core>();
             }
 
             #[test]
             fn [<$prefix _fused_wait_for>]() {
-                test_fused_wait_for::<_, $sensor_writer>();
+                test_fused_wait_for::<_, $core>();
+            }
+
+            #[test]
+            fn [<$prefix _closed_wait_changed>]() {
+                test_closed_wait_changed::<_, Arc<$core>>();
+            }
+
+            #[test]
+            fn [<$prefix _closed_wait_for>]() {
+                test_closed_wait_for::<_, Arc<$core>>();
             }
         }
     };
@@ -497,5 +508,57 @@ where
     };
 }
 
-test_single_thread!(arc_alloc_async, AsyncCore<_>);
+fn test_closed_wait_changed<C, S>()
+where
+    C: SensorCoreAsync<Target = usize> + From<usize>,
+    S: From<C>,
+    // Require that observers may outlast the last writer by requiring that the lifetime of the shared data
+    // is independent of the lifetime with which the writer is borrowed to create an observer.
+    for<'a> &'a S: ShareStrategy<'a, Core = C, Shared = Arc<C>>,
+{
+    let writer = SensorWriter::from_value(0);
+    let observer = writer.spawn_observer();
+
+    wookie!(wait_changed: observer.wait_until_changed());
+    assert!(wait_changed.poll().is_pending());
+
+    drop(writer);
+
+    assert_eq!(wait_changed.woken(), 1);
+
+    let version = match wait_changed.poll() {
+        Poll::Ready(Err(v)) => v,
+        _ => panic!(),
+    };
+
+    assert!(version.closed_bit_set());
+}
+
+fn test_closed_wait_for<C, S>()
+where
+    C: SensorCoreAsync<Target = usize> + From<usize>,
+    S: From<C>,
+    // Require that observers may outlast the last writer by requiring that the lifetime of the shared data
+    // is independent of the lifetime with which the writer is borrowed to create an observer.
+    for<'a> &'a S: ShareStrategy<'a, Core = C, Shared = Arc<C>>,
+{
+    let writer = SensorWriter::from_value(0);
+    let mut observer = writer.spawn_observer();
+
+    wookie!(wait_for: observer.wait_for(|v| *v == 2));
+    assert!(wait_for.poll().is_pending());
+
+    drop(writer);
+
+    assert_eq!(wait_for.woken(), 1);
+
+    let guard = match wait_for.poll() {
+        Poll::Ready(Err(v)) => v,
+        _ => panic!(),
+    };
+
+    assert_eq!(*guard, 0);
+}
+
+test_single_thread!(alloc_async, AsyncCore<_>);
 test_single_thread!(no_alloc_async, AsyncSingleCore<_>);
