@@ -4,7 +4,7 @@ use sensor_fuse::{
     sensor_core::{alloc::AsyncCore, no_alloc::AsyncSingleCore, SensorCore},
     SensorWriter, ShareStrategy,
 };
-use std::{ops::Deref, sync::Arc};
+use std::sync::Arc;
 
 macro_rules! test_core {
     ($prefix:ident, $core:ty) => {
@@ -19,25 +19,21 @@ macro_rules! test_core {
                 test_try_read_write::<_, $core>();
             }
 
-            paste! {
-                #[test]
-                fn [<$prefix _closed>]() {
-                    test_closed::<_, Arc<$core>, _>();
-                }
+            #[test]
+            fn [<$prefix _asdclosedd>]() {
+                test_closed::<_, Arc<$core>>();
             }
-
         }
     };
 }
 
-fn test_closed<C, S, R>()
+fn test_closed<C, S>()
 where
     C: SensorCore<Target = usize> + From<usize>,
     S: From<C>,
-    R: Deref<Target = C>,
     // Require that observers may outlast the last writer by requiring that the lifetime of the shared data
     // is independent of the lifetime with which the writer is borrowed to create an observer.
-    for<'a> &'a S: ShareStrategy<'a, Core = C, Shared = R>,
+    for<'a> &'a S: ShareStrategy<'a, Core = C, Shared = Arc<C>>,
 {
     let writer = SensorWriter::from_value(0);
     let observer = writer.spawn_observer();
