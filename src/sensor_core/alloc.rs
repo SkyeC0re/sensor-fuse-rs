@@ -201,6 +201,7 @@ impl<T> SensorCore for AsyncCore<T> {
     unsafe fn deregister_writer(&self) {
         if self.writers.fetch_sub(1, Ordering::Relaxed) == 1 {
             let _ = self.version.fetch_or(CLOSED_BIT, Ordering::Release);
+            self.waiter_list.wake_all();
         }
     }
 }
