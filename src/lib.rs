@@ -363,6 +363,14 @@ impl Version {
     pub const fn decrement(&mut self) {
         self.0 = self.0.wrapping_sub(VERSION_BUMP);
     }
+
+    #[inline(always)]
+    pub(crate) fn as_result(self) -> SymResult<Self> {
+        match self.closed_bit_set() {
+            true => Err(self),
+            false => Ok(self),
+        }
+    }
 }
 
 pub trait VersionFunctionality {

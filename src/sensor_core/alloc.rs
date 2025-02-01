@@ -382,6 +382,33 @@ impl Node {
         *node.get_mut().next.get_mut() = 0;
         *node.get_mut().state.get_mut() = 0;
     }
+
+    /// Cancels and drops the waker if the node has not been completed yet.
+    #[inline(always)]
+    unsafe fn cancel(node: *mut UnsafeCell<Self>) {
+        let node = (*node).get_mut();
+
+        let mut state = node.state.load(Ordering::Acquire);
+        if state & NODE_COMPLETE_BIT != 0 {
+            // Nothing to do.
+            return;
+        }
+
+        state = node.state.fetch_or(NODE_LOCK_BIT, Ordering::AcqRel);
+        if state & NODE_LOCK_BIT != 0 {
+            // Nothing to do.
+            return;
+        }
+
+        debug_assert_eq!(state, NODE_LOCK_BIT);
+
+        // Get waker first with a cheap bit level copy, allow other threads to continue and then spend the potential cost
+        // of dropping the waker.
+        let waker = node.waker.assume_init_read();
+        node.state
+            .store(state ^ (NODE_LOCK_BIT | NODE_CANCEL_BIT), Ordering::Release);
+        drop(waker);
+    }
 }
 
 struct MySensorCore<T> {
@@ -395,6 +422,14 @@ struct MySensorCore<T> {
     data: UnsafeCell<T>,
 }
 
+impl<T> MySensorCore<T> {
+    #[inline(always)]
+    fn version(&self) -> Version {
+        // Relaxed could work?
+        Version(self.version.load(Ordering::Acquire))
+    }
+}
+
 const SA_TYPE_FREE: usize = 0;
 const SA_TYPE_READ: usize = 1;
 const SA_TYPE_IDLE_READ: usize = 2;
@@ -402,7 +437,7 @@ const SA_TYPE_WAIT_CHANGED: usize = 3;
 const SA_MASK_TYPE: usize = 3;
 const SA_MASK_PTR: usize = !SA_MASK_TYPE;
 
-struct Observer<T, R: Deref<Target = MySensorCore<T>>> {
+struct MyObserver<T, R: Deref<Target = MySensorCore<T>>> {
     core: R,
     data: ObserverData,
 }
@@ -412,14 +447,14 @@ struct ObserverData {
     version: Version,
 }
 
-struct WaitChangedFut1<'a, T> {
+struct MyWaitChangedFut<'a, T> {
     observer_data: &'a mut ObserverData,
     core: &'a MySensorCore<T>,
     init: bool,
 }
 
-impl<'a, T> Future for WaitChangedFut1<'a, T> {
-    type Output = SymResult<()>;
+impl<'a, T> Future for MyWaitChangedFut<'a, T> {
+    type Output = SymResult<Version>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let node = (self.observer_data.static_area & SA_MASK_PTR) as *mut UnsafeCell<Node>;
@@ -427,10 +462,17 @@ impl<'a, T> Future for WaitChangedFut1<'a, T> {
             if unsafe { (*node).get_mut().state.load(Ordering::Acquire) & NODE_COMPLETE_BIT == 0 } {
                 return Poll::Pending;
             }
-        }
 
-        if self.observer_data.version.0 != self.core.version.load(Ordering::Acquire) {
-            return Poll::Ready(Ok(()));
+            let version = self.core.version();
+            if self.observer_data.version != version {
+                unsafe { Node::cancel(node) };
+                return Poll::Ready(version.as_result());
+            }
+        } else {
+            let version = self.core.version();
+            if self.observer_data.version != version {
+                return Poll::Ready(version.as_result());
+            }
         }
 
         // The version was unchanged. If `init == true` then we were not spuriosly awoken, which can only happen if
@@ -461,9 +503,9 @@ impl<'a, T> Future for WaitChangedFut1<'a, T> {
     }
 }
 
-impl<T, R: Deref<Target = MySensorCore<T>>> Observer<T, R> {
-    pub fn wait_changed(&mut self) -> WaitChangedFut1<T> {
-        WaitChangedFut1 {
+impl<T, R: Deref<Target = MySensorCore<T>>> MyObserver<T, R> {
+    pub fn wait_changed(&mut self) -> MyWaitChangedFut<T> {
+        MyWaitChangedFut {
             core: &self.core,
             observer_data: &mut self.data,
             init: false,
