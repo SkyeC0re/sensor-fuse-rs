@@ -6,7 +6,13 @@ use core::{
     task::{Context, Poll, Waker},
 };
 use core::{hint::spin_loop, mem::MaybeUninit};
-use std::future::poll_fn;
+use std::{
+    cell::UnsafeCell,
+    future::poll_fn,
+    marker::PhantomData,
+    ops::{BitXor, Deref},
+    sync::atomic::AtomicU8,
+};
 
 use async_lock::{
     futures::{Read, Write},
@@ -14,7 +20,7 @@ use async_lock::{
 };
 use either::Either;
 
-use crate::Version;
+use crate::{SymResult, Version};
 
 use super::{SensorCore, SensorCoreAsync, CLOSED_BIT, VERSION_BUMP};
 
@@ -285,5 +291,182 @@ mod tests {
         let _ = IsSend(core.wait_changed(Version(0)));
         let _ = IsSend(core.wait_for(|_| true, Version(0)));
         let _ = IsSend(core.write());
+    }
+}
+
+const NODE_COMPLETE_BIT: u8 = 8;
+const NODE_CANCEL_BIT: u8 = 4;
+const NODE_DROP_BIT: u8 = 2;
+const NODE_LOCK_BIT: u8 = 1;
+
+#[repr(align(4))]
+struct Node {
+    waker: MaybeUninit<Waker>,
+    // PTR | IS_LAST_BIT | TYPE_BIT
+    next: AtomicUsize,
+    // ... | COMPLETE_BIT | CANCEL_BIT | DROP_BIT | LOCK_BIT
+    state: AtomicU8,
+}
+
+impl Node {
+    /// Attempts to recycle an old allocation or discard it an create a new allocation if that fails.
+    /// If `None` is returned, the waker was reset inside the queue, otherwise exlusive ownership is guaranteed
+    /// over the (potentially newly allocated) Node.
+    ///
+    /// # Safety
+    ///
+    /// `None` can only ever be returned if `allow_in_queue_reset` is true.
+    #[inline(always)]
+    unsafe fn reuse_or_realloc(
+        node: *mut UnsafeCell<Self>,
+        waker: Waker,
+        allow_in_queue_reset: bool,
+    ) -> Option<&'static mut UnsafeCell<Self>> {
+        let old_node = &*(*node).get();
+        let mut state = old_node.state.load(Ordering::Acquire);
+        if state & NODE_COMPLETE_BIT != 0 {
+            // Free to re-use mutably. We are the sole owners.
+            Node::assume_exclusive_reset(node, waker);
+            return Some(&mut *node);
+        }
+
+        state = old_node.state.fetch_or(NODE_LOCK_BIT, Ordering::AcqRel);
+
+        if state & NODE_LOCK_BIT != 0 {
+            while state & NODE_LOCK_BIT != 0 {
+                spin_loop();
+                state = old_node.state.load(Ordering::Acquire);
+            }
+
+            debug_assert_ne!(state & NODE_COMPLETE_BIT, 0);
+
+            // Free to re-use mutably. We are the sole owners.
+            Node::assume_exclusive_reset(node, waker);
+            return Some(&mut *node);
+        }
+
+        if allow_in_queue_reset {
+            // Piggy back off of the fact that the node is still in an appropriate queue.
+
+            debug_assert_eq!(state, NODE_LOCK_BIT | NODE_CANCEL_BIT);
+
+            let _ = (*node).get_mut().waker.write(waker);
+            old_node.state.store(0, Ordering::Release);
+
+            return None;
+        }
+
+        // No attempts at recycling the allocation succeeded. Dump it and acquire a new one.
+        old_node
+            .state
+            .store(state ^ (NODE_LOCK_BIT | NODE_DROP_BIT), Ordering::Release);
+
+        let node = Box::new(UnsafeCell::new(Node {
+            waker: MaybeUninit::new(waker),
+            next: AtomicUsize::new(0),
+            state: AtomicU8::new(0),
+        }));
+
+        return Some(unsafe { &mut *Box::into_raw(node) });
+    }
+
+    /// Reset the node's values for a new future that is to be added to a queue.
+    ///
+    /// # Safety
+    ///
+    /// Behaviour is undefined if node is not in a completed (i.e. exclusive) state.
+    #[inline(always)]
+    unsafe fn assume_exclusive_reset(node: *mut UnsafeCell<Self>, waker: Waker) {
+        let node = &mut *node;
+        let _ = node.get_mut().waker.write(waker);
+        *node.get_mut().next.get_mut() = 0;
+        *node.get_mut().state.get_mut() = 0;
+    }
+}
+
+struct MySensorCore<T> {
+    queue_head: AtomicUsize,
+    queue_tail: AtomicUsize,
+    idle_reads_head: AtomicPtr<UnsafeCell<Node>>,
+    idle_reads_tail: AtomicPtr<UnsafeCell<Node>>,
+    change_waiters_head: AtomicPtr<UnsafeCell<Node>>,
+    num_writers: AtomicUsize,
+    version: AtomicUsize,
+    data: UnsafeCell<T>,
+}
+
+const SA_TYPE_FREE: usize = 0;
+const SA_TYPE_READ: usize = 1;
+const SA_TYPE_IDLE_READ: usize = 2;
+const SA_TYPE_WAIT_CHANGED: usize = 3;
+const SA_MASK_TYPE: usize = 3;
+const SA_MASK_PTR: usize = !SA_MASK_TYPE;
+
+struct Observer<T, R: Deref<Target = MySensorCore<T>>> {
+    core: R,
+    data: ObserverData,
+}
+
+struct ObserverData {
+    static_area: usize,
+    version: Version,
+}
+
+struct WaitChangedFut1<'a, T> {
+    observer_data: &'a mut ObserverData,
+    core: &'a MySensorCore<T>,
+    init: bool,
+}
+
+impl<'a, T> Future for WaitChangedFut1<'a, T> {
+    type Output = SymResult<()>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let node = (self.observer_data.static_area & SA_MASK_PTR) as *mut UnsafeCell<Node>;
+        if self.init {
+            if unsafe { (*node).get_mut().state.load(Ordering::Acquire) & NODE_COMPLETE_BIT == 0 } {
+                return Poll::Pending;
+            }
+        }
+
+        if self.observer_data.version.0 != self.core.version.load(Ordering::Acquire) {
+            return Poll::Ready(Ok(()));
+        }
+
+        // The version was unchanged. If `init == true` then we were not spuriosly awoken, which can only happen if
+        // we reused a canceled node in the queue whilst it has already been scheduled for awakening. Either case however
+        // demands (re)insertion into the queue.
+        if let Some(node) = unsafe {
+            Node::reuse_or_realloc(
+                node,
+                cx.waker().clone(),
+                self.observer_data.static_area & SA_MASK_TYPE == SA_TYPE_WAIT_CHANGED,
+            )
+        } {
+            let prev_head = self.core.change_waiters_head.swap(node, Ordering::AcqRel);
+
+            // Safety: No data initialization depends on the ordering of this.
+            let _ = node
+                .get_mut()
+                .next
+                .fetch_or(prev_head as usize, Ordering::Relaxed);
+
+            let node: *mut UnsafeCell<Node> = node;
+            self.observer_data.static_area = (node as usize) | SA_TYPE_WAIT_CHANGED;
+        }
+
+        self.init = true;
+
+        Poll::Pending
+    }
+}
+
+impl<T, R: Deref<Target = MySensorCore<T>>> Observer<T, R> {
+    pub fn wait_changed(&mut self) -> WaitChangedFut1<T> {
+        WaitChangedFut1 {
+            core: &self.core,
+            observer_data: &mut self.data,
+            init: false,
+        }
     }
 }

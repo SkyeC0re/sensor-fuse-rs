@@ -14,6 +14,7 @@ use tokio::{
     runtime::{self, Runtime},
     sync::watch,
 };
+
 #[derive(Default)]
 struct ContentionData {
     test_version: usize,
@@ -382,26 +383,6 @@ impl Drop for ContentionEnvironment {
     }
 }
 
-fn arc_async_r5_w5_o50_s0_observation(c: &mut BenchmarkGroup<WallTime>) {
-    let env = ContentionEnvironment::new(5, 5);
-
-    c.bench_function("arc_async_alloc_r5_w5_o50_s0_observation", |b| {
-        b.iter(|| {
-            env.bench_individual_observations_req(50, 0);
-        });
-    });
-}
-
-fn tokio_watch_r5_w5_o50_s0_observation(c: &mut BenchmarkGroup<WallTime>) {
-    let env = WatchContentionEnvironment::new(5, 5);
-
-    c.bench_function("tokio_watch_r5_w5_o50_s0_observation", |b| {
-        b.iter(|| {
-            env.bench_individual_observations_req(50, 0);
-        });
-    });
-}
-
 fn arc_async_r5_w5_o50_s10_observation(c: &mut BenchmarkGroup<WallTime>) {
     let env = ContentionEnvironment::new(5, 5);
 
@@ -422,8 +403,28 @@ fn tokio_watch_r5_w5_o50_s10_observation(c: &mut BenchmarkGroup<WallTime>) {
     });
 }
 
+fn arc_async_r5_w5_o50_s50_observation(c: &mut BenchmarkGroup<WallTime>) {
+    let env = ContentionEnvironment::new(5, 5);
+
+    c.bench_function("arc_async_alloc_r5_w5_o50_s50_observation", |b| {
+        b.iter(|| {
+            env.bench_individual_observations_req(50, 50);
+        });
+    });
+}
+
+fn tokio_watch_r5_w5_o50_s50_observation(c: &mut BenchmarkGroup<WallTime>) {
+    let env = WatchContentionEnvironment::new(5, 5);
+
+    c.bench_function("tokio_watch_r5_w5_o50_s50_observation", |b| {
+        b.iter(|| {
+            env.bench_individual_observations_req(50, 50);
+        });
+    });
+}
+
 fn arc_async_r5_w5_o50_s100_observation(c: &mut BenchmarkGroup<WallTime>) {
-    let env = ContentionEnvironment::new(10, 10);
+    let env = ContentionEnvironment::new(5, 5);
 
     c.bench_function("arc_async_alloc_r5_w5_o50_s100_observation", |b| {
         b.iter(|| {
@@ -433,31 +434,11 @@ fn arc_async_r5_w5_o50_s100_observation(c: &mut BenchmarkGroup<WallTime>) {
 }
 
 fn tokio_watch_r5_w5_o50_s100_observation(c: &mut BenchmarkGroup<WallTime>) {
-    let env = WatchContentionEnvironment::new(10, 10);
+    let env = WatchContentionEnvironment::new(5, 5);
 
     c.bench_function("tokio_watch_r5_w5_o50_s100_observation", |b| {
         b.iter(|| {
             env.bench_individual_observations_req(50, 100);
-        });
-    });
-}
-
-fn arc_async_r5_w5_o50_s0_writes(c: &mut BenchmarkGroup<WallTime>) {
-    let env = ContentionEnvironment::new(5, 5);
-
-    c.bench_function("arc_async_alloc_r5_w5_o50_s0_writes", |b| {
-        b.iter(|| {
-            env.bench_individual_writes_req(50, 0);
-        });
-    });
-}
-
-fn tokio_watch_r5_w5_o50_s0_writes(c: &mut BenchmarkGroup<WallTime>) {
-    let env = WatchContentionEnvironment::new(5, 5);
-
-    c.bench_function("tokio_watch_r5_w5_o50_s0_writes", |b| {
-        b.iter(|| {
-            env.bench_individual_writes_req(50, 0);
         });
     });
 }
@@ -482,8 +463,28 @@ fn tokio_watch_r5_w5_o50_s10_writes(c: &mut BenchmarkGroup<WallTime>) {
     });
 }
 
+fn arc_async_r5_w5_o50_s50_writes(c: &mut BenchmarkGroup<WallTime>) {
+    let env = ContentionEnvironment::new(5, 5);
+
+    c.bench_function("arc_async_alloc_r5_w5_o50_s50_writes", |b| {
+        b.iter(|| {
+            env.bench_individual_writes_req(50, 50);
+        });
+    });
+}
+
+fn tokio_watch_r5_w5_o50_s50_writes(c: &mut BenchmarkGroup<WallTime>) {
+    let env = WatchContentionEnvironment::new(5, 5);
+
+    c.bench_function("tokio_watch_r5_w5_o50_s50_writes", |b| {
+        b.iter(|| {
+            env.bench_individual_writes_req(50, 50);
+        });
+    });
+}
+
 fn arc_async_r5_w5_o50_s100_writes(c: &mut BenchmarkGroup<WallTime>) {
-    let env = ContentionEnvironment::new(10, 10);
+    let env = ContentionEnvironment::new(5, 5);
 
     c.bench_function("arc_async_alloc_r5_w5_o50_s100_writes", |b| {
         b.iter(|| {
@@ -493,9 +494,249 @@ fn arc_async_r5_w5_o50_s100_writes(c: &mut BenchmarkGroup<WallTime>) {
 }
 
 fn tokio_watch_r5_w5_o50_s100_writes(c: &mut BenchmarkGroup<WallTime>) {
-    let env = WatchContentionEnvironment::new(10, 10);
+    let env = WatchContentionEnvironment::new(5, 5);
 
     c.bench_function("tokio_watch_r5_w5_o50_s100_writes", |b| {
+        b.iter(|| {
+            env.bench_individual_writes_req(50, 100);
+        });
+    });
+}
+
+fn arc_async_r1_w10_o50_s10_observation(c: &mut BenchmarkGroup<WallTime>) {
+    let env = ContentionEnvironment::new(1, 10);
+
+    c.bench_function("arc_async_alloc_r1_w10_o50_s10_observation", |b| {
+        b.iter(|| {
+            env.bench_individual_observations_req(50, 10);
+        });
+    });
+}
+
+fn tokio_watch_r1_w10_o50_s10_observation(c: &mut BenchmarkGroup<WallTime>) {
+    let env = WatchContentionEnvironment::new(1, 10);
+
+    c.bench_function("tokio_watch_r1_w10_o50_s10_observation", |b| {
+        b.iter(|| {
+            env.bench_individual_observations_req(50, 10);
+        });
+    });
+}
+
+fn arc_async_r1_w10_o50_s50_observation(c: &mut BenchmarkGroup<WallTime>) {
+    let env = ContentionEnvironment::new(1, 10);
+
+    c.bench_function("arc_async_alloc_r1_w10_o50_s50_observation", |b| {
+        b.iter(|| {
+            env.bench_individual_observations_req(50, 50);
+        });
+    });
+}
+
+fn tokio_watch_r1_w10_o50_s50_observation(c: &mut BenchmarkGroup<WallTime>) {
+    let env = WatchContentionEnvironment::new(1, 10);
+
+    c.bench_function("tokio_watch_r1_w10_o50_s50_observation", |b| {
+        b.iter(|| {
+            env.bench_individual_observations_req(50, 50);
+        });
+    });
+}
+
+fn arc_async_r1_w10_o50_s100_observation(c: &mut BenchmarkGroup<WallTime>) {
+    let env = ContentionEnvironment::new(1, 10);
+
+    c.bench_function("arc_async_alloc_r1_w10_o50_s100_observation", |b| {
+        b.iter(|| {
+            env.bench_individual_observations_req(50, 100);
+        });
+    });
+}
+
+fn tokio_watch_r1_w10_o50_s100_observation(c: &mut BenchmarkGroup<WallTime>) {
+    let env = WatchContentionEnvironment::new(1, 10);
+
+    c.bench_function("tokio_watch_r1_w10_o50_s100_observation", |b| {
+        b.iter(|| {
+            env.bench_individual_observations_req(50, 100);
+        });
+    });
+}
+
+fn arc_async_r1_w10_o50_s10_writes(c: &mut BenchmarkGroup<WallTime>) {
+    let env = ContentionEnvironment::new(1, 10);
+
+    c.bench_function("arc_async_alloc_r1_w10_o50_s10_writes", |b| {
+        b.iter(|| {
+            env.bench_individual_writes_req(50, 10);
+        });
+    });
+}
+
+fn tokio_watch_r1_w10_o50_s10_writes(c: &mut BenchmarkGroup<WallTime>) {
+    let env = WatchContentionEnvironment::new(1, 10);
+
+    c.bench_function("tokio_watch_r1_w10_o50_s10_writes", |b| {
+        b.iter(|| {
+            env.bench_individual_writes_req(50, 10);
+        });
+    });
+}
+
+fn arc_async_r1_w10_o50_s50_writes(c: &mut BenchmarkGroup<WallTime>) {
+    let env = ContentionEnvironment::new(1, 10);
+
+    c.bench_function("arc_async_alloc_r1_w10_o50_s50_writes", |b| {
+        b.iter(|| {
+            env.bench_individual_writes_req(50, 50);
+        });
+    });
+}
+
+fn tokio_watch_r1_w10_o50_s50_writes(c: &mut BenchmarkGroup<WallTime>) {
+    let env = WatchContentionEnvironment::new(1, 10);
+
+    c.bench_function("tokio_watch_r1_w10_o50_s50_writes", |b| {
+        b.iter(|| {
+            env.bench_individual_writes_req(50, 50);
+        });
+    });
+}
+
+fn arc_async_r1_w10_o50_s100_writes(c: &mut BenchmarkGroup<WallTime>) {
+    let env = ContentionEnvironment::new(1, 10);
+
+    c.bench_function("arc_async_alloc_r1_w10_o50_s100_writes", |b| {
+        b.iter(|| {
+            env.bench_individual_writes_req(50, 100);
+        });
+    });
+}
+
+fn tokio_watch_r1_w10_o50_s100_writes(c: &mut BenchmarkGroup<WallTime>) {
+    let env = WatchContentionEnvironment::new(1, 10);
+
+    c.bench_function("tokio_watch_r1_w10_o50_s100_writes", |b| {
+        b.iter(|| {
+            env.bench_individual_writes_req(50, 100);
+        });
+    });
+}
+
+fn arc_async_r10_w1_o50_s10_observation(c: &mut BenchmarkGroup<WallTime>) {
+    let env = ContentionEnvironment::new(10, 1);
+
+    c.bench_function("arc_async_alloc_r10_w1_o50_s10_observation", |b| {
+        b.iter(|| {
+            env.bench_individual_observations_req(50, 10);
+        });
+    });
+}
+
+fn tokio_watch_r10_w1_o50_s10_observation(c: &mut BenchmarkGroup<WallTime>) {
+    let env = WatchContentionEnvironment::new(10, 1);
+
+    c.bench_function("tokio_watch_r10_w1_o50_s10_observation", |b| {
+        b.iter(|| {
+            env.bench_individual_observations_req(50, 10);
+        });
+    });
+}
+
+fn arc_async_r10_w1_o50_s50_observation(c: &mut BenchmarkGroup<WallTime>) {
+    let env = ContentionEnvironment::new(10, 1);
+
+    c.bench_function("arc_async_alloc_r10_w1_o50_s50_observation", |b| {
+        b.iter(|| {
+            env.bench_individual_observations_req(50, 50);
+        });
+    });
+}
+
+fn tokio_watch_r10_w1_o50_s50_observation(c: &mut BenchmarkGroup<WallTime>) {
+    let env = WatchContentionEnvironment::new(10, 1);
+
+    c.bench_function("tokio_watch_r10_w1_o50_s50_observation", |b| {
+        b.iter(|| {
+            env.bench_individual_observations_req(50, 50);
+        });
+    });
+}
+
+fn arc_async_r10_w1_o50_s100_observation(c: &mut BenchmarkGroup<WallTime>) {
+    let env = ContentionEnvironment::new(10, 1);
+
+    c.bench_function("arc_async_alloc_r10_w1_o50_s100_observation", |b| {
+        b.iter(|| {
+            env.bench_individual_observations_req(50, 100);
+        });
+    });
+}
+
+fn tokio_watch_r10_w1_o50_s100_observation(c: &mut BenchmarkGroup<WallTime>) {
+    let env = WatchContentionEnvironment::new(10, 1);
+
+    c.bench_function("tokio_watch_r10_w1_o50_s100_observation", |b| {
+        b.iter(|| {
+            env.bench_individual_observations_req(50, 100);
+        });
+    });
+}
+
+fn arc_async_r10_w1_o50_s10_writes(c: &mut BenchmarkGroup<WallTime>) {
+    let env = ContentionEnvironment::new(10, 1);
+
+    c.bench_function("arc_async_alloc_r10_w1_o50_s10_writes", |b| {
+        b.iter(|| {
+            env.bench_individual_writes_req(50, 10);
+        });
+    });
+}
+
+fn tokio_watch_r10_w1_o50_s10_writes(c: &mut BenchmarkGroup<WallTime>) {
+    let env = WatchContentionEnvironment::new(10, 1);
+
+    c.bench_function("tokio_watch_r10_w1_o50_s10_writes", |b| {
+        b.iter(|| {
+            env.bench_individual_writes_req(50, 10);
+        });
+    });
+}
+
+fn arc_async_r10_w1_o50_s50_writes(c: &mut BenchmarkGroup<WallTime>) {
+    let env = ContentionEnvironment::new(10, 1);
+
+    c.bench_function("arc_async_alloc_r10_w1_o50_s50_writes", |b| {
+        b.iter(|| {
+            env.bench_individual_writes_req(50, 50);
+        });
+    });
+}
+
+fn tokio_watch_r10_w1_o50_s50_writes(c: &mut BenchmarkGroup<WallTime>) {
+    let env = WatchContentionEnvironment::new(10, 1);
+
+    c.bench_function("tokio_watch_r10_w1_o50_s50_writes", |b| {
+        b.iter(|| {
+            env.bench_individual_writes_req(50, 50);
+        });
+    });
+}
+
+fn arc_async_r10_w1_o50_s100_writes(c: &mut BenchmarkGroup<WallTime>) {
+    let env = ContentionEnvironment::new(10, 1);
+
+    c.bench_function("arc_async_alloc_r10_w1_o50_s100_writes", |b| {
+        b.iter(|| {
+            env.bench_individual_writes_req(50, 100);
+        });
+    });
+}
+
+fn tokio_watch_r10_w1_o50_s100_writes(c: &mut BenchmarkGroup<WallTime>) {
+    let env = WatchContentionEnvironment::new(10, 1);
+
+    c.bench_function("tokio_watch_r10_w1_o50_s100_writes", |b| {
         b.iter(|| {
             env.bench_individual_writes_req(50, 100);
         });
@@ -508,12 +749,27 @@ pub fn bench_reads() {
 
     group.sampling_mode(criterion::SamplingMode::Linear);
 
-    // arc_async_r5_w5_o50_s0_observation(&mut group);
-    // tokio_watch_r5_w5_o50_s0_observation(&mut group);
-    // arc_async_r5_w5_o50_s10_observation(&mut group);
-    // tokio_watch_r5_w5_o50_s10_observation(&mut group);
-    arc_async_r5_w5_o50_s100_observation(&mut group);
-    tokio_watch_r5_w5_o50_s100_observation(&mut group);
+    arc_async_r5_w5_o50_s10_observation(&mut group);
+    tokio_watch_r5_w5_o50_s10_observation(&mut group);
+    arc_async_r5_w5_o50_s50_observation(&mut group);
+    tokio_watch_r5_w5_o50_s50_observation(&mut group);
+    // arc_async_r5_w5_o50_s100_observation(&mut group);
+    // tokio_watch_r5_w5_o50_s100_observation(&mut group);
+
+    arc_async_r1_w10_o50_s10_observation(&mut group);
+    tokio_watch_r1_w10_o50_s10_observation(&mut group);
+    arc_async_r1_w10_o50_s50_observation(&mut group);
+    tokio_watch_r1_w10_o50_s50_observation(&mut group);
+    // arc_async_r1_w10_o50_s100_observation(&mut group);
+    // tokio_watch_r1_w10_o50_s100_observation(&mut group);
+
+    arc_async_r10_w1_o50_s10_observation(&mut group);
+    tokio_watch_r10_w1_o50_s10_observation(&mut group);
+    arc_async_r10_w1_o50_s50_observation(&mut group);
+    tokio_watch_r10_w1_o50_s50_observation(&mut group);
+    // arc_async_r10_w1_o50_s100_observation(&mut group);
+    // tokio_watch_r10_w1_o50_s100_observation(&mut group);
+
     group.finish();
 }
 
@@ -523,12 +779,27 @@ pub fn bench_writes() {
 
     group.sampling_mode(criterion::SamplingMode::Linear);
 
-    // arc_async_r5_w5_o50_s0_writes(&mut group);
-    // tokio_watch_r5_w5_o50_s0_writes(&mut group);
-    // arc_async_r5_w5_o50_s10_writes(&mut group);
-    // tokio_watch_r5_w5_o50_s10_writes(&mut group);
-    arc_async_r5_w5_o50_s100_writes(&mut group);
-    tokio_watch_r5_w5_o50_s100_writes(&mut group);
+    arc_async_r5_w5_o50_s10_writes(&mut group);
+    tokio_watch_r5_w5_o50_s10_writes(&mut group);
+    arc_async_r5_w5_o50_s50_writes(&mut group);
+    tokio_watch_r5_w5_o50_s50_writes(&mut group);
+    // arc_async_r5_w5_o50_s100_writes(&mut group);
+    // tokio_watch_r5_w5_o50_s100_writes(&mut group);
+
+    arc_async_r1_w10_o50_s10_writes(&mut group);
+    tokio_watch_r1_w10_o50_s10_writes(&mut group);
+    arc_async_r1_w10_o50_s50_writes(&mut group);
+    tokio_watch_r1_w10_o50_s50_writes(&mut group);
+    // arc_async_r1_w10_o50_s100_writes(&mut group);
+    // tokio_watch_r1_w10_o50_s100_writes(&mut group);
+
+    arc_async_r10_w1_o50_s10_writes(&mut group);
+    tokio_watch_r10_w1_o50_s10_writes(&mut group);
+    arc_async_r10_w1_o50_s50_writes(&mut group);
+    tokio_watch_r10_w1_o50_s50_writes(&mut group);
+    // arc_async_r10_w1_o50_s100_writes(&mut group);
+    // tokio_watch_r10_w1_o50_s100_writes(&mut group);
+
     group.finish();
 }
 
