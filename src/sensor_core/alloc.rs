@@ -310,12 +310,12 @@ struct Node {
 
 impl Node {
     /// Attempts to recycle an old allocation or discard it an create a new allocation if that fails.
-    /// If `None` is returned, the waker was reset inside the queue, otherwise exlusive ownership is guaranteed
+    /// If `None` is returned for the node, the waker was reset inside the queue, otherwise exlusive ownership is guaranteed
     /// over the (potentially newly allocated) Node.
     ///
     /// # Safety
     ///
-    /// `None` can only ever be returned if `allow_in_queue_reset` is true.
+    /// It can be safely assumed that `None` can only ever be returned if `allow_in_queue_reset` is true.
     #[inline(always)]
     unsafe fn reuse_or_realloc(
         node: *mut UnsafeCell<Self>,
@@ -383,31 +383,108 @@ impl Node {
         *node.get_mut().state.get_mut() = 0;
     }
 
-    /// Cancels and drops the waker if the node has not been completed yet.
+    /// Cancels and drops the waker if the node has not been completed yet. Should not be called
+    /// twice without resetting the node.
+    ///
+    /// Returns whether a complete bit was detected.
     #[inline(always)]
-    unsafe fn cancel(node: *mut UnsafeCell<Self>) {
+    unsafe fn cancel(node: *mut UnsafeCell<Self>) -> bool {
         let node = (*node).get_mut();
 
         let mut state = node.state.load(Ordering::Acquire);
-        if state & NODE_COMPLETE_BIT != 0 {
-            // Nothing to do.
-            return;
+        debug_assert_eq!(state & NODE_CANCEL_BIT, 0);
+
+        if state & (NODE_COMPLETE_BIT) != 0 {
+            // We have already been completed. Nothing to do.
+            return true;
         }
 
         state = node.state.fetch_or(NODE_LOCK_BIT, Ordering::AcqRel);
         if state & NODE_LOCK_BIT != 0 {
-            // Nothing to do.
-            return;
+            // We are about to be completed. Nothing to do.
+            return true;
         }
 
         debug_assert_eq!(state, NODE_LOCK_BIT);
 
-        // Get waker first with a cheap bit level copy, allow other threads to continue and then spend the potential cost
+        // Get waker first with a cheap, bit level copy, allow other threads to continue and then spend the potential cost
         // of dropping the waker.
         let waker = node.waker.assume_init_read();
         node.state
             .store(state ^ (NODE_LOCK_BIT | NODE_CANCEL_BIT), Ordering::Release);
         drop(waker);
+
+        return false;
+    }
+
+    /// Wake the next element in the wait changed queue, skipping over cancelled nodes and appropriately dropping
+    /// drop requested nodes.
+    ///
+    /// # Safety
+    ///
+    /// Should only be called on a node that is in a queue and has itself been marked as completed.
+    #[inline(always)]
+    unsafe fn wake_next_wait_changed(mut node: *mut UnsafeCell<Self>) {
+        let mut next_ptr;
+        loop {
+            next_ptr = (*node).get_mut().next.load(Ordering::Acquire);
+
+            if next_ptr == 0 {
+                spin_loop();
+                continue;
+            }
+
+            if next_ptr == 1 {
+                break;
+            }
+        }
+    }
+
+    /// Attempt to complete wake this node if possible, and returns true if it was successfully completed and awoken.
+    ///
+    /// # Safety
+    ///
+    /// Should only be called on a node that is in a queue and has not been marked as completed (i.e. not previously cancelled or dropped).
+    /// After this call completes it is undefined behaviour to access the node again.
+    #[inline(always)]
+    unsafe fn complete_and_wake(node: *mut UnsafeCell<Self>) -> bool {
+        let mut state;
+        loop {
+            state = (*node)
+                .get_mut()
+                .state
+                .fetch_or(NODE_LOCK_BIT, Ordering::AcqRel);
+
+            if state & NODE_LOCK_BIT == 0 {
+                break;
+            }
+
+            spin_loop();
+        }
+
+        if state == NODE_DROP_BIT {
+            drop(Box::from_raw(node));
+            return false;
+        } else if state == NODE_CANCEL_BIT {
+            (*node).get_mut().state.store(
+                state ^ (NODE_LOCK_BIT | NODE_COMPLETE_BIT),
+                Ordering::Release,
+            );
+            return false;
+        }
+
+        debug_assert_eq!(state, 0);
+
+        // Get waker first with a cheap, bit level copy, allow other threads to continue and then spend the potential cost
+        // of waking.
+        let waker = (*node).get_mut().waker.assume_init_read();
+        (*node).get_mut().state.store(
+            state ^ (NODE_LOCK_BIT | NODE_COMPLETE_BIT),
+            Ordering::Release,
+        );
+        waker.wake();
+
+        true
     }
 }
 
@@ -453,6 +530,12 @@ struct MyWaitChangedFut<'a, T> {
     init: bool,
 }
 
+impl<'a, T> MyWaitChangedFut<'a, T> {
+    /// Wake the next future in the queue, if any.
+    #[inline(always)]
+    unsafe fn wake_next(node: *mut UnsafeCell<Node>) {}
+}
+
 impl<'a, T> Future for MyWaitChangedFut<'a, T> {
     type Output = SymResult<Version>;
 
@@ -465,7 +548,11 @@ impl<'a, T> Future for MyWaitChangedFut<'a, T> {
 
             let version = self.core.version();
             if self.observer_data.version != version {
-                unsafe { Node::cancel(node) };
+                // Do not rely on `Drop` trait to wake the next element. It may not be instantaneous.
+                if unsafe { Node::cancel(node) } {
+                    // TODO wake next.
+                }
+                self.init = false;
                 return Poll::Ready(version.as_result());
             }
         } else {
@@ -500,6 +587,16 @@ impl<'a, T> Future for MyWaitChangedFut<'a, T> {
         self.init = true;
 
         Poll::Pending
+    }
+}
+
+impl<'a, T> Drop for MyWaitChangedFut<'a, T> {
+    fn drop(&mut self) {
+        if self.init {
+            if unsafe { Node::cancel((self.observer_data.static_area & SA_MASK_PTR) as _) } {
+                // TODO WAke next
+            }
+        }
     }
 }
 
