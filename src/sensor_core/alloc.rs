@@ -383,10 +383,13 @@ impl Node {
         *node.get_mut().state.get_mut() = 0;
     }
 
-    /// Cancels and drops the waker if the node has not been completed yet. Should not be called
-    /// twice without resetting the node.
+    /// Cancels and drops the waker if the node has not been completed yet.
     ///
     /// Returns whether a complete bit was detected.
+    ///
+    /// # Safety
+    ///
+    /// It is undefined behaviour to call this twice on the same node without resetting it.
     #[inline(always)]
     unsafe fn cancel(node: *mut UnsafeCell<Self>) -> bool {
         let node = (*node).get_mut();
@@ -422,10 +425,27 @@ impl Node {
     ///
     /// # Safety
     ///
-    /// Should only be called on a node that is in a queue and has itself been marked as completed.
+    /// It is undefined behaviour to call this before a node is completed (or being completed) or to call this twice for
+    /// the same node for the same completion.
     #[inline(always)]
     unsafe fn wake_next_wait_changed(mut node: *mut UnsafeCell<Self>) {
         let mut next_ptr;
+        loop {
+            next_ptr = (*node).get_mut().next.load(Ordering::Acquire);
+
+            if next_ptr > 0 {
+                if next_ptr == 1 {
+                    return;
+                } else {
+                    break;
+                }
+            }
+
+            spin_loop();
+        }
+
+        node = next_ptr as *mut _;
+
         loop {
             next_ptr = (*node).get_mut().next.load(Ordering::Acquire);
 
@@ -434,9 +454,12 @@ impl Node {
                 continue;
             }
 
-            if next_ptr == 1 {
-                break;
+            // Responsibility was either shifted successfully or we have reached the end of the queue.
+            if Node::complete_and_wake(node) || next_ptr == 1 {
+                return;
             }
+
+            node = next_ptr as *mut _;
         }
     }
 
@@ -549,9 +572,12 @@ impl<'a, T> Future for MyWaitChangedFut<'a, T> {
             let version = self.core.version();
             if self.observer_data.version != version {
                 // Do not rely on `Drop` trait to wake the next element. It may not be instantaneous.
-                if unsafe { Node::cancel(node) } {
-                    // TODO wake next.
+                unsafe {
+                    if Node::cancel(node) {
+                        Node::wake_next_wait_changed(node);
+                    }
                 }
+
                 self.init = false;
                 return Poll::Ready(version.as_result());
             }
@@ -575,10 +601,9 @@ impl<'a, T> Future for MyWaitChangedFut<'a, T> {
             let prev_head = self.core.change_waiters_head.swap(node, Ordering::AcqRel);
 
             // Safety: No data initialization depends on the ordering of this.
-            let _ = node
-                .get_mut()
+            node.get_mut()
                 .next
-                .fetch_or(prev_head as usize, Ordering::Relaxed);
+                .store(prev_head as usize, Ordering::Relaxed);
 
             let node: *mut UnsafeCell<Node> = node;
             self.observer_data.static_area = (node as usize) | SA_TYPE_WAIT_CHANGED;
@@ -593,8 +618,11 @@ impl<'a, T> Future for MyWaitChangedFut<'a, T> {
 impl<'a, T> Drop for MyWaitChangedFut<'a, T> {
     fn drop(&mut self) {
         if self.init {
-            if unsafe { Node::cancel((self.observer_data.static_area & SA_MASK_PTR) as _) } {
-                // TODO WAke next
+            let node = (self.observer_data.static_area & SA_MASK_PTR) as _;
+            unsafe {
+                if Node::cancel(node) {
+                    Node::wake_next_wait_changed(node);
+                }
             }
         }
     }
