@@ -294,10 +294,10 @@ mod tests {
     }
 }
 
-const NODE_COMPLETE_BIT: u8 = 8;
-const NODE_CANCEL_BIT: u8 = 4;
-const NODE_DROP_BIT: u8 = 2;
-const NODE_LOCK_BIT: u8 = 1;
+// const Self::STATE_COMPLETE_BIT: u8 = 8;
+// const Self::STATE_CANCEL_BIT: u8 = 4;
+// const Self::STATE_DROP_BIT: u8 = 2;
+// const Self::STATE_LOCK_BIT: u8 = 1;
 
 #[repr(align(4))]
 struct Node {
@@ -309,6 +309,14 @@ struct Node {
 }
 
 impl Node {
+    const STATE_LOCK_BIT: u8 = 0b1;
+    const STATE_DROP_BIT: u8 = 0b10;
+    const STATE_CANCEL_BIT: u8 = 0b100;
+    const STATE_COMPLETE_BIT: u8 = 0b1000;
+
+    const NEXT_PTR_MASK: usize = !0b11;
+    const WAIT_CHANGED_TAIL: usize = 0b1;
+
     /// Attempts to recycle an old allocation or discard it an create a new allocation if that fails.
     /// If `None` is returned for the node, the waker was reset inside the queue, otherwise exlusive ownership is guaranteed
     /// over the (potentially newly allocated) Node.
@@ -324,21 +332,23 @@ impl Node {
     ) -> Option<&'static mut UnsafeCell<Self>> {
         let old_node = &*(*node).get();
         let mut state = old_node.state.load(Ordering::Acquire);
-        if state & NODE_COMPLETE_BIT != 0 {
+        if state & Self::STATE_COMPLETE_BIT != 0 {
             // Free to re-use mutably. We are the sole owners.
             Node::assume_exclusive_reset(node, waker);
             return Some(&mut *node);
         }
 
-        state = old_node.state.fetch_or(NODE_LOCK_BIT, Ordering::AcqRel);
+        state = old_node
+            .state
+            .fetch_or(Self::STATE_LOCK_BIT, Ordering::AcqRel);
 
-        if state & NODE_LOCK_BIT != 0 {
-            while state & NODE_LOCK_BIT != 0 {
+        if state & Self::STATE_LOCK_BIT != 0 {
+            while state & Self::STATE_LOCK_BIT != 0 {
                 spin_loop();
                 state = old_node.state.load(Ordering::Acquire);
             }
 
-            debug_assert_ne!(state & NODE_COMPLETE_BIT, 0);
+            debug_assert_ne!(state & Self::STATE_COMPLETE_BIT, 0);
 
             // Free to re-use mutably. We are the sole owners.
             Node::assume_exclusive_reset(node, waker);
@@ -348,7 +358,7 @@ impl Node {
         if allow_in_queue_reset {
             // Piggy back off of the fact that the node is still in an appropriate queue.
 
-            debug_assert_eq!(state, NODE_LOCK_BIT | NODE_CANCEL_BIT);
+            debug_assert_eq!(state, Self::STATE_LOCK_BIT | Self::STATE_CANCEL_BIT);
 
             let _ = (*node).get_mut().waker.write(waker);
             old_node.state.store(0, Ordering::Release);
@@ -357,9 +367,10 @@ impl Node {
         }
 
         // No attempts at recycling the allocation succeeded. Dump it and acquire a new one.
-        old_node
-            .state
-            .store(state ^ (NODE_LOCK_BIT | NODE_DROP_BIT), Ordering::Release);
+        old_node.state.store(
+            state ^ (Self::STATE_LOCK_BIT | Self::STATE_DROP_BIT),
+            Ordering::Release,
+        );
 
         let node = Box::new(UnsafeCell::new(Node {
             waker: MaybeUninit::new(waker),
@@ -395,26 +406,28 @@ impl Node {
         let node = (*node).get_mut();
 
         let mut state = node.state.load(Ordering::Acquire);
-        debug_assert_eq!(state & NODE_CANCEL_BIT, 0);
+        debug_assert_eq!(state & Self::STATE_CANCEL_BIT, 0);
 
-        if state & (NODE_COMPLETE_BIT) != 0 {
+        if state & (Self::STATE_COMPLETE_BIT) != 0 {
             // We have already been completed. Nothing to do.
             return true;
         }
 
-        state = node.state.fetch_or(NODE_LOCK_BIT, Ordering::AcqRel);
-        if state & NODE_LOCK_BIT != 0 {
+        state = node.state.fetch_or(Self::STATE_LOCK_BIT, Ordering::AcqRel);
+        if state & Self::STATE_LOCK_BIT != 0 {
             // We are about to be completed. Nothing to do.
             return true;
         }
 
-        debug_assert_eq!(state, NODE_LOCK_BIT);
+        debug_assert_eq!(state, Self::STATE_LOCK_BIT);
 
         // Get waker first with a cheap, bit level copy, allow other threads to continue and then spend the potential cost
         // of dropping the waker.
         let waker = node.waker.assume_init_read();
-        node.state
-            .store(state ^ (NODE_LOCK_BIT | NODE_CANCEL_BIT), Ordering::Release);
+        node.state.store(
+            state ^ (Self::STATE_LOCK_BIT | Self::STATE_CANCEL_BIT),
+            Ordering::Release,
+        );
         drop(waker);
 
         return false;
@@ -427,39 +440,40 @@ impl Node {
     ///
     /// It is undefined behaviour to call this before a node is completed (or being completed) or to call this twice for
     /// the same node for the same completion.
+    /// After this call completes it is undefined behaviour to access the node again.
     #[inline(always)]
-    unsafe fn wake_next_wait_changed(mut node: *mut UnsafeCell<Self>) {
+    unsafe fn assume_wait_changed_wake(mut node: *mut UnsafeCell<Self>) {
+        let mut next_node;
+        loop {
+            next_node = Node::assume_wait_changed_next_node(node);
+
+            // Responsibility was either shifted successfully or we have reached the end of the queue.
+            if Node::complete_and_wake(node) || next_node.is_null() {
+                return;
+            }
+
+            node = next_node;
+        }
+    }
+
+    /// Find the next node in the list. Assumes that the node is uncompleted and in the wait changed queue.
+    ///
+    /// # Safety
+    ///
+    /// This function should only be called on nodes that are in queue, and for which the caller either is the sole
+    /// arbiter of the node's completion or can guarantee that the node has been cancelled before this call and has
+    /// not been reset.
+    #[inline(always)]
+    unsafe fn assume_wait_changed_next_node(node: *mut UnsafeCell<Self>) -> *mut UnsafeCell<Self> {
         let mut next_ptr;
         loop {
             next_ptr = (*node).get_mut().next.load(Ordering::Acquire);
 
             if next_ptr > 0 {
-                if next_ptr == 1 {
-                    return;
-                } else {
-                    break;
-                }
+                return (next_ptr & Self::NEXT_PTR_MASK) as *mut _;
             }
 
             spin_loop();
-        }
-
-        node = next_ptr as *mut _;
-
-        loop {
-            next_ptr = (*node).get_mut().next.load(Ordering::Acquire);
-
-            if next_ptr == 0 {
-                spin_loop();
-                continue;
-            }
-
-            // Responsibility was either shifted successfully or we have reached the end of the queue.
-            if Node::complete_and_wake(node) || next_ptr == 1 {
-                return;
-            }
-
-            node = next_ptr as *mut _;
         }
     }
 
@@ -476,21 +490,21 @@ impl Node {
             state = (*node)
                 .get_mut()
                 .state
-                .fetch_or(NODE_LOCK_BIT, Ordering::AcqRel);
+                .fetch_or(Self::STATE_LOCK_BIT, Ordering::AcqRel);
 
-            if state & NODE_LOCK_BIT == 0 {
+            if state & Self::STATE_LOCK_BIT == 0 {
                 break;
             }
 
             spin_loop();
         }
 
-        if state == NODE_DROP_BIT {
+        if state == Self::STATE_DROP_BIT {
             drop(Box::from_raw(node));
             return false;
-        } else if state == NODE_CANCEL_BIT {
+        } else if state == Self::STATE_CANCEL_BIT {
             (*node).get_mut().state.store(
-                state ^ (NODE_LOCK_BIT | NODE_COMPLETE_BIT),
+                state ^ (Self::STATE_LOCK_BIT | Self::STATE_COMPLETE_BIT),
                 Ordering::Release,
             );
             return false;
@@ -502,7 +516,7 @@ impl Node {
         // of waking.
         let waker = (*node).get_mut().waker.assume_init_read();
         (*node).get_mut().state.store(
-            state ^ (NODE_LOCK_BIT | NODE_COMPLETE_BIT),
+            state ^ (Self::STATE_LOCK_BIT | Self::STATE_COMPLETE_BIT),
             Ordering::Release,
         );
         waker.wake();
@@ -516,8 +530,10 @@ struct MySensorCore<T> {
     queue_tail: AtomicUsize,
     idle_reads_head: AtomicPtr<UnsafeCell<Node>>,
     idle_reads_tail: AtomicPtr<UnsafeCell<Node>>,
-    change_waiters_head: AtomicPtr<UnsafeCell<Node>>,
+    change_waiters_head: AtomicUsize,
     num_writers: AtomicUsize,
+    writes_queued: AtomicUsize,
+    readers: AtomicUsize,
     version: AtomicUsize,
     data: UnsafeCell<T>,
 }
@@ -527,6 +543,64 @@ impl<T> MySensorCore<T> {
     fn version(&self) -> Version {
         // Relaxed could work?
         Version(self.version.load(Ordering::Acquire))
+    }
+
+    #[inline(always)]
+    fn wake_waiters(&self) {
+        // Swap the tail sentinal value in, taking effective ownership of the current queue and allowing
+        // the next queue to start populating.
+        // `Ordering::AcqRel` is not needed here, the sentinal indicator is sufficient.
+        let node = self
+            .change_waiters_head
+            .swap(Node::WAIT_CHANGED_TAIL, Ordering::Acquire);
+
+        if node == Node::WAIT_CHANGED_TAIL {
+            return;
+        }
+
+        unsafe { Node::assume_wait_changed_wake(node as *mut _) };
+    }
+
+    #[inline]
+    fn try_read(&self) -> Option<ReadGuard<T>> {
+        if self.writes_queued.load(Ordering::Relaxed) != 0 {
+            return None;
+        }
+
+        let mut readers = self.readers.load(Ordering::Relaxed);
+        while readers < usize::MAX - 1 {
+            match self.readers.compare_exchange_weak(
+                readers,
+                readers + 1,
+                Ordering::Acquire,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return Some(ReadGuard { core: self }),
+                Err(e) => readers = e,
+            }
+
+            spin_loop();
+        }
+
+        None
+    }
+}
+
+pub struct ReadGuard<'a, T> {
+    core: &'a MySensorCore<T>,
+}
+
+impl<'a, T> Deref for ReadGuard<'a, T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        unsafe { &*self.core.data.get() }
+    }
+}
+
+impl<'a, T> Drop for ReadGuard<'a, T> {
+    fn drop(&mut self) {
+        todo!()
     }
 }
 
@@ -565,7 +639,9 @@ impl<'a, T> Future for MyWaitChangedFut<'a, T> {
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let node = (self.observer_data.static_area & SA_MASK_PTR) as *mut UnsafeCell<Node>;
         if self.init {
-            if unsafe { (*node).get_mut().state.load(Ordering::Acquire) & NODE_COMPLETE_BIT == 0 } {
+            if unsafe {
+                (*node).get_mut().state.load(Ordering::Acquire) & Node::STATE_COMPLETE_BIT == 0
+            } {
                 return Poll::Pending;
             }
 
@@ -574,7 +650,10 @@ impl<'a, T> Future for MyWaitChangedFut<'a, T> {
                 // Do not rely on `Drop` trait to wake the next element. It may not be instantaneous.
                 unsafe {
                     if Node::cancel(node) {
-                        Node::wake_next_wait_changed(node);
+                        let next_node = Node::assume_wait_changed_next_node(node);
+                        if next_node != null_mut() {
+                            Node::assume_wait_changed_wake(node);
+                        }
                     }
                 }
 
@@ -598,12 +677,14 @@ impl<'a, T> Future for MyWaitChangedFut<'a, T> {
                 self.observer_data.static_area & SA_MASK_TYPE == SA_TYPE_WAIT_CHANGED,
             )
         } {
-            let prev_head = self.core.change_waiters_head.swap(node, Ordering::AcqRel);
+            let node_ptr: *mut UnsafeCell<Node> = node;
+            let prev_head = self
+                .core
+                .change_waiters_head
+                .swap(node_ptr as usize, Ordering::AcqRel);
 
             // Safety: No data initialization depends on the ordering of this.
-            node.get_mut()
-                .next
-                .store(prev_head as usize, Ordering::Relaxed);
+            node.get_mut().next.store(prev_head, Ordering::Relaxed);
 
             let node: *mut UnsafeCell<Node> = node;
             self.observer_data.static_area = (node as usize) | SA_TYPE_WAIT_CHANGED;
@@ -621,7 +702,10 @@ impl<'a, T> Drop for MyWaitChangedFut<'a, T> {
             let node = (self.observer_data.static_area & SA_MASK_PTR) as _;
             unsafe {
                 if Node::cancel(node) {
-                    Node::wake_next_wait_changed(node);
+                    let next_node = Node::assume_wait_changed_next_node(node);
+                    if next_node != null_mut() {
+                        Node::assume_wait_changed_wake(next_node);
+                    }
                 }
             }
         }
