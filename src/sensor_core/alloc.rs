@@ -10,7 +10,7 @@ use std::{
     cell::UnsafeCell,
     future::poll_fn,
     marker::PhantomData,
-    ops::{BitXor, Deref},
+    ops::{BitXor, Deref, DerefMut},
     sync::atomic::AtomicU8,
 };
 
@@ -22,7 +22,7 @@ use either::Either;
 
 use crate::{SymResult, Version};
 
-use super::{SensorCore, SensorCoreAsync, CLOSED_BIT, VERSION_BUMP};
+use super::{no_alloc::WaitChanged, SensorCore, SensorCoreAsync, CLOSED_BIT, VERSION_BUMP};
 
 const INIT_BIT: usize = 1;
 const DROP_BIT: usize = 2;
@@ -584,6 +584,23 @@ impl<T> MySensorCore<T> {
 
         None
     }
+
+    #[inline]
+    fn try_write(&self) -> Option<WriteGuard<T>> {
+        if self.readers.load(Ordering::Relaxed) != 0 {
+            return None;
+        }
+
+        if self
+            .readers
+            .compare_exchange(0, usize::MAX, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            return None;
+        }
+
+        Some(WriteGuard { core: self })
+    }
 }
 
 pub struct ReadGuard<'a, T> {
@@ -593,12 +610,36 @@ pub struct ReadGuard<'a, T> {
 impl<'a, T> Deref for ReadGuard<'a, T> {
     type Target = T;
 
-    fn deref(&self) -> &Self::Target {
+    fn deref(&self) -> &T {
         unsafe { &*self.core.data.get() }
     }
 }
 
 impl<'a, T> Drop for ReadGuard<'a, T> {
+    fn drop(&mut self) {
+        todo!()
+    }
+}
+
+pub struct WriteGuard<'a, T> {
+    core: &'a MySensorCore<T>,
+}
+
+impl<'a, T> Deref for WriteGuard<'a, T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        unsafe { &*self.core.data.get() }
+    }
+}
+
+impl<'a, T> DerefMut for WriteGuard<'a, T> {
+    fn deref_mut(&mut self) -> &mut T {
+        unsafe { &mut *self.core.data.get() }
+    }
+}
+
+impl<'a, T> Drop for WriteGuard<'a, T> {
     fn drop(&mut self) {
         todo!()
     }
@@ -621,16 +662,64 @@ struct ObserverData {
     version: Version,
 }
 
-struct MyWaitChangedFut<'a, T> {
+impl<T, R: Deref<Target = MySensorCore<T>>> MyObserver<T, R> {
+    pub fn wait_changed(&mut self) -> MyWaitChangedFut<T> {
+        MyWaitChangedFut {
+            core: &self.core,
+            observer_data: &mut self.data,
+            init: false,
+        }
+    }
+}
+
+struct MyReadFut<'a, T> {
     observer_data: &'a mut ObserverData,
     core: &'a MySensorCore<T>,
     init: bool,
 }
 
-impl<'a, T> MyWaitChangedFut<'a, T> {
-    /// Wake the next future in the queue, if any.
-    #[inline(always)]
-    unsafe fn wake_next(node: *mut UnsafeCell<Node>) {}
+impl<'a, T> Future for MyReadFut<'a, T> {
+    type Output = SymResult<ReadGuard<'a, T>>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let node = (self.observer_data.static_area & SA_MASK_PTR) as *mut UnsafeCell<Node>;
+        if self.init {
+            if unsafe {
+                (*node).get_mut().state.load(Ordering::Acquire) & Node::STATE_COMPLETE_BIT == 0
+            } {
+                return Poll::Pending;
+            }
+
+            // TODO: wake next reader in queue.
+
+            self.init = false;
+            let version = self.core.version();
+            self.observer_data.version = version;
+            let guard = ReadGuard { core: self.core };
+            return Poll::Ready(match version.closed_bit_set() {
+                true => Err(guard),
+                false => Ok(guard),
+            });
+        }
+
+        if let Some(guard) = self.core.try_read() {
+            let version = self.core.version();
+            return Poll::Ready(match version.closed_bit_set() {
+                true => Err(guard),
+                false => Ok(guard),
+            });
+        }
+
+        // TODO add self to queue and retry getting readguard. If try_read succeeds, cancel node, else pending.
+
+        todo!()
+    }
+}
+
+struct MyWaitChangedFut<'a, T> {
+    observer_data: &'a mut ObserverData,
+    core: &'a MySensorCore<T>,
+    init: bool,
 }
 
 impl<'a, T> Future for MyWaitChangedFut<'a, T> {
@@ -708,16 +797,6 @@ impl<'a, T> Drop for MyWaitChangedFut<'a, T> {
                     }
                 }
             }
-        }
-    }
-}
-
-impl<T, R: Deref<Target = MySensorCore<T>>> MyObserver<T, R> {
-    pub fn wait_changed(&mut self) -> MyWaitChangedFut<T> {
-        MyWaitChangedFut {
-            core: &self.core,
-            observer_data: &mut self.data,
-            init: false,
         }
     }
 }
