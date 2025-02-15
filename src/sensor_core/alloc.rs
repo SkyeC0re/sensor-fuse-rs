@@ -11,6 +11,7 @@ use std::{
     future::poll_fn,
     marker::PhantomData,
     mem,
+    num::NonZeroUsize,
     ops::{BitXor, Deref, DerefMut},
     sync::atomic::AtomicU8,
 };
@@ -538,8 +539,7 @@ impl Node {
         true
     }
 
-    /// Locks the given node and returns the state. After the function returns, the lock bit is guaranteed to be set.
-    ///
+    /// Locks the given node and returns the state just before the lock bit was set.
     /// # Safety
     ///
     /// Should only be called on nodes that are guaranteed to not get dropped.
@@ -602,16 +602,12 @@ impl<T> MySensorCore<T> {
             return None;
         }
 
-        if self.try_prioritized_raw_read() {
-            return Some(ReadGuard { core: self });
-        }
-
-        None
+        self.try_prioritized_read()
     }
 
     // Get a prioritized read lock. Returns true if a lock was acquired, or false if a writer was detected.
     #[inline(always)]
-    fn try_prioritized_raw_read(&self) -> bool {
+    fn try_prioritized_read(&self) -> Option<ReadGuard<T>> {
         let mut readers = self.readers.load(Ordering::Relaxed);
         while readers < usize::MAX - 1 {
             match self.readers.compare_exchange_weak(
@@ -620,14 +616,14 @@ impl<T> MySensorCore<T> {
                 Ordering::Acquire,
                 Ordering::Relaxed,
             ) {
-                Ok(_) => return true,
+                Ok(_) => return Some(ReadGuard { core: self }),
                 Err(e) => readers = e,
             }
 
             spin_loop();
         }
 
-        false
+        None
     }
 
     #[inline]
@@ -651,54 +647,68 @@ impl<T> MySensorCore<T> {
     ///
     /// The caller must have a readguard. `node_ptr` must point to an actual node in the queue.
     #[inline(always)]
-    unsafe fn wake_next_reader(&self, node_ptr: usize) {
-        let node = (node_ptr & Node::NEXT_PTR_MASK) as *mut Node;
+    unsafe fn wake_next_reader(&self, mut node_ptr: NonZeroUsize) {
+        let node = (node_ptr.get() & Node::NEXT_PTR_MASK) as *mut Node;
 
-        // We have a readguard, this can only fail because we have reached the maximum amount of readers.
+        // We already have a readguard, this can only fail because we have reached the maximum amount of readers.
         // In this case, leave the current node in the queue and come back to it later.
-        if !self.try_prioritized_raw_read() {
-            self.queue_head.store(node_ptr, Ordering::Relaxed);
-            return;
-        }
+        let readguard = match self.try_prioritized_read() {
+            Some(v) => v,
+            None => {
+                self.queue_head.store(node_ptr.get(), Ordering::Relaxed);
+                return;
+            }
+        };
 
-        let next_is_writer = node_ptr & Node::NEXT_DATA_MASK != 0;
+        loop {
+            let state = Node::lock(node);
 
-        if Node::complete_and_wake(node, next_is_writer) {
-            if next_is_writer {
-                self.queue_head.store(node_ptr, Ordering::Relaxed);
+            if state & (Node::STATE_DROP_BIT | Node::STATE_CANCEL_BIT) != 0 {
+                debug_assert_eq!(state & !(Node::STATE_DROP_BIT | Node::STATE_CANCEL_BIT), 0);
+
+                // Safety: We have a readguard, which will have to be dropped with a happens-before relationship with any other
+                // thread that may read the queue head before that thread will actually read the queue head.
+                let next_node_ptr = self.try_reset_queue(node_ptr);
+
+                if state == Node::STATE_DROP_BIT {
+                    drop(Box::from_raw(node));
+                } else {
+                    // Relaxed ordering is sufficient here, nothing was changed.
+                    (*node)
+                        .state
+                        .store(state | Node::STATE_COMPLETE_BIT, Ordering::Relaxed);
+                }
+
+                match next_node_ptr {
+                    Some(next_node_ptr) => {
+                        node_ptr = next_node_ptr;
+                        continue;
+                    }
+                    // Nothing to do, list is cleared.
+                    None => return,
+                }
+            }
+
+            debug_assert_eq!(state, 0);
+
+            // Uncancelled write detected. Stop waking here.
+            if node_ptr.get() & Node::NEXT_DATA_MASK != 0 {
+                // Relaxed ordering is sufficient here, nothing was changed.
+                (*node).state.store(0, Ordering::Relaxed);
                 return;
             }
 
-            // Continue?
-        }
+            // Get waker first with a cheap, bit level copy, allow other threads to continue and then spend the potential cost
+            // of waking.
+            let waker = (*node).waker.assume_init_read();
+            (*node)
+                .state
+                .store(Node::STATE_COMPLETE_BIT, Ordering::Release);
+            waker.wake();
 
-        // TODO goto next.
-
-        let mut next_ptr = (*node).next.load(Ordering::Acquire);
-
-        if next_ptr != 0 {
-            return next_ptr;
-        }
-
-        // No data initialization depends on this ordering, `Ordering::Relaxed` is sufficient.
-        if self
-            .queue_tail
-            .compare_exchange(posssible_tail, 0, Ordering::Relaxed, Ordering::Relaxed)
-            .is_ok()
-        {
-            self.queue_head.store(0, Ordering::Relaxed);
-            return 0;
-        };
-
-        // List could not be emptied, a new element has joined.
-        loop {
-            next_ptr = (*node).next.load(Ordering::Acquire);
-
-            if next_ptr != 0 {
-                return next_ptr;
-            }
-
-            spin_loop();
+            // Pass the readguard forward to the awoken node.
+            mem::forget(readguard);
+            return;
         }
     }
 
@@ -735,6 +745,46 @@ impl<T> MySensorCore<T> {
 
             if next_ptr != 0 {
                 return next_ptr;
+            }
+
+            spin_loop();
+        }
+    }
+
+    /// Try to reset the Read-Write queue given non-zero typed node that is currently part of the queue.
+    ///
+    /// # Safety
+    ///
+    /// Only relaxed orderings are used in this process, so it is the callers responsibility to ensure that it impossible
+    /// that another queue clearing thread will see the head zeroed without the tail being zeroed by ensuring a happens-before
+    /// relationship exists.
+    #[inline(always)]
+    unsafe fn try_reset_queue(&self, possible_tail_node: NonZeroUsize) -> Option<NonZeroUsize> {
+        let node = possible_tail_node.get() as *mut Node;
+
+        if let some_node @ Some(..) = NonZeroUsize::new((*node).next.load(Ordering::Relaxed)) {
+            return some_node;
+        }
+
+        if self
+            .queue_tail
+            .compare_exchange(
+                possible_tail_node.get(),
+                0,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            )
+            .is_ok()
+        {
+            self.queue_head.store(0, Ordering::Relaxed);
+            return None;
+        }
+
+        // A new node has attached to the tail, we cannot reset the queue.
+
+        loop {
+            if let some_node @ Some(..) = NonZeroUsize::new((*node).next.load(Ordering::Relaxed)) {
+                return some_node;
             }
 
             spin_loop();
