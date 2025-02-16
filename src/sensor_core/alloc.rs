@@ -11,8 +11,9 @@ use std::{
     future::poll_fn,
     marker::PhantomData,
     mem,
-    num::NonZeroUsize,
+    num::{NonZero, NonZeroUsize},
     ops::{BitXor, Deref, DerefMut},
+    ptr::NonNull,
     sync::atomic::AtomicU8,
 };
 
@@ -310,13 +311,6 @@ struct Node {
     state: AtomicU8,
 }
 
-#[derive(PartialEq, Eq, Clone, Copy)]
-enum CompletionStatus {
-    Awoken,
-    Retired,
-    Locked(u8),
-}
-
 impl Node {
     const STATE_LOCK_BIT: u8 = 0b1;
     const STATE_DROP_BIT: u8 = 0b10;
@@ -324,6 +318,10 @@ impl Node {
     const STATE_COMPLETE_BIT: u8 = 0b1000;
 
     const NEXT_DATA_MASK: usize = 0b11;
+    // Whether the node in the Read-Write is a write node.
+    const NEXT_IS_WRITER_BIT: usize = 0b1;
+    // Sentinal bit used for various purposes depending on what context the node is being used in.
+    const NEXT_SENTINEL_BIT: usize = 0b10;
     const NEXT_PTR_MASK: usize = !Self::NEXT_DATA_MASK;
     const WAIT_CHANGED_TAIL: usize = 0b1;
 
@@ -332,6 +330,9 @@ impl Node {
     /// over the (potentially newly allocated) Node.
     ///
     /// # Safety
+    ///
+    /// After this function returns with a mutable reference, it is up to the caller to ensure that the non-atomic modifications
+    /// made to the node by this function as part of the reset process is appropriately released.
     ///
     /// It can be safely assumed that `None` can only ever be returned if `allow_in_queue_reset` is true.
     #[inline(always)]
@@ -342,6 +343,7 @@ impl Node {
     ) -> Option<&'static mut Self> {
         let old_node = &mut *node;
         let mut state = old_node.state.load(Ordering::Acquire);
+
         if state & Self::STATE_COMPLETE_BIT != 0 {
             // Free to re-use mutably. We are the sole owners.
             Node::assume_exclusive_reset(node, waker);
@@ -350,7 +352,7 @@ impl Node {
 
         state = old_node
             .state
-            .fetch_or(Self::STATE_LOCK_BIT, Ordering::AcqRel);
+            .fetch_or(Self::STATE_LOCK_BIT, Ordering::Acquire);
 
         if state & Self::STATE_LOCK_BIT != 0 {
             while state & Self::STATE_LOCK_BIT != 0 {
@@ -365,11 +367,10 @@ impl Node {
             return Some(&mut *node);
         }
 
+        debug_assert_eq!(state, Self::STATE_CANCEL_BIT);
+
         if allow_in_queue_reset {
             // Piggy back off of the fact that the node is still in an appropriate queue.
-
-            debug_assert_eq!(state, Self::STATE_LOCK_BIT | Self::STATE_CANCEL_BIT);
-
             let _ = (*node).waker.write(waker);
             old_node.state.store(0, Ordering::Release);
 
@@ -377,10 +378,9 @@ impl Node {
         }
 
         // No attempts at recycling the allocation succeeded. Dump it and acquire a new one.
-        old_node.state.store(
-            state ^ (Self::STATE_LOCK_BIT | Self::STATE_DROP_BIT),
-            Ordering::Release,
-        );
+        old_node
+            .state
+            .store(Self::STATE_DROP_BIT, Ordering::Release);
 
         let node = Box::new(Node {
             waker: MaybeUninit::new(waker),
@@ -645,17 +645,17 @@ impl<T> MySensorCore<T> {
 
     /// # Safety
     ///
-    /// The caller must have a readguard. `node_ptr` must point to an actual node in the queue.
+    /// The caller must have a readguard. `node_ptr` must point to an actual node in the Read-Write queue.
     #[inline(always)]
-    unsafe fn wake_next_reader(&self, mut node_ptr: NonZeroUsize) {
-        let node = (node_ptr.get() & Node::NEXT_PTR_MASK) as *mut Node;
+    unsafe fn wake_next_reader(&self, mut node_ptr: usize) {
+        let node = (node_ptr & Node::NEXT_PTR_MASK) as *mut Node;
 
         // We already have a readguard, this can only fail because we have reached the maximum amount of readers.
         // In this case, leave the current node in the queue and come back to it later.
         let readguard = match self.try_prioritized_read() {
             Some(v) => v,
             None => {
-                self.queue_head.store(node_ptr.get(), Ordering::Relaxed);
+                self.queue_head.store(node_ptr, Ordering::Relaxed);
                 return;
             }
         };
@@ -692,7 +692,7 @@ impl<T> MySensorCore<T> {
             debug_assert_eq!(state, 0);
 
             // Uncancelled write detected. Stop waking here.
-            if node_ptr.get() & Node::NEXT_DATA_MASK != 0 {
+            if node_ptr & Node::NEXT_DATA_MASK != 0 {
                 // Relaxed ordering is sufficient here, nothing was changed.
                 (*node).state.store(0, Ordering::Relaxed);
                 return;
@@ -706,74 +706,72 @@ impl<T> MySensorCore<T> {
                 .store(Node::STATE_COMPLETE_BIT, Ordering::Release);
             waker.wake();
 
-            // Pass the readguard forward to the awoken node.
+            // Pass the readguard to the awoken node.
             mem::forget(readguard);
             return;
         }
     }
 
-    /// Find the next node in the list. Assumes that the node is uncompleted and in the wait changed queue.
-    ///
-    /// # Safety
-    ///
-    /// This function should only be called on nodes that are in queue, and for which the caller either is the sole
-    /// arbiter of the node's completion or can guarantee that the node has been cancelled before this call and has
-    /// not been reset.
-    #[inline(always)]
-    unsafe fn assume_read_wake_node(&self, curr_node: usize) {
-        let node = (curr_node & Node::NEXT_PTR_MASK) as *mut Node;
+    // /// Find the next node in the list. Assumes that the node is uncompleted and in the wait changed queue.
+    // ///
+    // /// # Safety
+    // ///
+    // /// This function should only be called on nodes that are in queue, and for which the caller either is the sole
+    // /// arbiter of the node's completion or can guarantee that the node has been cancelled before this call and has
+    // /// not been reset.
+    // #[inline(always)]
+    // unsafe fn assume_read_wake_node(&self, curr_node: usize) {
+    //     let node = (curr_node & Node::NEXT_PTR_MASK) as *mut Node;
 
-        let mut next_ptr = (*node).next.load(Ordering::Acquire);
+    //     let mut next_ptr = (*node).next.load(Ordering::Acquire);
 
-        if next_ptr != 0 {
-            return next_ptr;
-        }
+    //     if next_ptr != 0 {
+    //         return next_ptr;
+    //     }
 
-        // No data initialization depends on this ordering, `Ordering::Relaxed` is sufficient.
-        if self
-            .queue_tail
-            .compare_exchange(curr_node, 0, Ordering::Relaxed, Ordering::Relaxed)
-            .is_ok()
-        {
-            self.queue_head.store(0, Ordering::Relaxed);
-            return 0;
-        };
+    //     // No data initialization depends on this ordering, `Ordering::Relaxed` is sufficient.
+    //     if self
+    //         .queue_tail
+    //         .compare_exchange(curr_node, 0, Ordering::Relaxed, Ordering::Relaxed)
+    //         .is_ok()
+    //     {
+    //         self.queue_head.store(0, Ordering::Relaxed);
+    //         return 0;
+    //     };
 
-        // List could not be emptied, a new element has joined.
-        loop {
-            next_ptr = (*node).next.load(Ordering::Acquire);
+    //     // List could not be emptied, a new element has joined.
+    //     loop {
+    //         next_ptr = (*node).next.load(Ordering::Acquire);
 
-            if next_ptr != 0 {
-                return next_ptr;
-            }
+    //         if next_ptr != 0 {
+    //             return next_ptr;
+    //         }
 
-            spin_loop();
-        }
-    }
+    //         spin_loop();
+    //     }
+    // }
 
     /// Try to reset the Read-Write queue given non-zero typed node that is currently part of the queue.
     ///
     /// # Safety
     ///
+    /// `possible_tail_node` should point to a valid node inside the the Read-Write queue.
+    ///
     /// Only relaxed orderings are used in this process, so it is the callers responsibility to ensure that it impossible
     /// that another queue clearing thread will see the head zeroed without the tail being zeroed by ensuring a happens-before
     /// relationship exists.
     #[inline(always)]
-    unsafe fn try_reset_queue(&self, possible_tail_node: NonZeroUsize) -> Option<NonZeroUsize> {
-        let node = possible_tail_node.get() as *mut Node;
+    unsafe fn try_reset_queue(&self, possible_tail_node: usize) -> Option<usize> {
+        let node = (possible_tail_node & Node::NEXT_PTR_MASK) as *mut Node;
 
-        if let some_node @ Some(..) = NonZeroUsize::new((*node).next.load(Ordering::Relaxed)) {
-            return some_node;
+        let mut next = (*node).next.load(Ordering::Relaxed);
+        if next != 0 {
+            return Some(next);
         }
 
         if self
             .queue_tail
-            .compare_exchange(
-                possible_tail_node.get(),
-                0,
-                Ordering::Relaxed,
-                Ordering::Relaxed,
-            )
+            .compare_exchange(possible_tail_node, 0, Ordering::Relaxed, Ordering::Relaxed)
             .is_ok()
         {
             self.queue_head.store(0, Ordering::Relaxed);
@@ -783,8 +781,9 @@ impl<T> MySensorCore<T> {
         // A new node has attached to the tail, we cannot reset the queue.
 
         loop {
-            if let some_node @ Some(..) = NonZeroUsize::new((*node).next.load(Ordering::Relaxed)) {
-                return some_node;
+            next = (*node).next.load(Ordering::Relaxed);
+            if next != 0 {
+                return Some(next);
             }
 
             spin_loop();
@@ -834,7 +833,7 @@ impl<'a, T> Drop for WriteGuard<'a, T> {
     }
 }
 
-const SA_TYPE_FREE: usize = 0;
+const SA_TYPE_WRITE: usize = 0;
 const SA_TYPE_READ: usize = 1;
 const SA_TYPE_IDLE_READ: usize = 2;
 const SA_TYPE_WAIT_CHANGED: usize = 3;
@@ -871,20 +870,24 @@ impl<'a, T> Future for MyReadFut<'a, T> {
     type Output = SymResult<ReadGuard<'a, T>>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let node = (self.observer_data.static_area & SA_MASK_PTR) as *mut UnsafeCell<Node>;
+        let node = (self.observer_data.static_area & SA_MASK_PTR) as *mut Node;
         if self.init {
-            if unsafe {
-                (*node).get_mut().state.load(Ordering::Acquire) & Node::STATE_COMPLETE_BIT == 0
-            } {
+            if unsafe { (*node).state.load(Ordering::Acquire) & Node::STATE_COMPLETE_BIT == 0 } {
                 return Poll::Pending;
             }
 
-            // TODO: wake next reader in queue.
+            // Whoever woke us has generated a readguard for us.
+            let guard = ReadGuard { core: self.core };
+
+            unsafe {
+                if let Some(next_ptr) = self.core.try_reset_queue(node as usize) {
+                    self.core.wake_next_reader(next_ptr);
+                }
+            }
 
             self.init = false;
             let version = self.core.version();
             self.observer_data.version = version;
-            let guard = ReadGuard { core: self.core };
             return Poll::Ready(match version.closed_bit_set() {
                 true => Err(guard),
                 false => Ok(guard),
@@ -899,9 +902,78 @@ impl<'a, T> Future for MyReadFut<'a, T> {
             });
         }
 
-        // TODO add self to queue and retry getting readguard. If try_read succeeds, cancel node, else pending.
+        let node_type = self.observer_data.static_area & SA_MASK_TYPE;
+        let new_static_area = if let Some(node) = unsafe {
+            Node::reuse_or_realloc(
+                node,
+                cx.waker().clone(),
+                node_type == SA_TYPE_READ || node_type == SA_TYPE_WRITE,
+            )
+        } {
+            let new_static_area: *mut Node = node;
+            let old_tail = self
+                .core
+                .queue_tail
+                // `AcqRel` needed here to ensure `reuse_or_realloc` invariants for both this node and the old tail.
+                .swap(new_static_area as usize, Ordering::AcqRel);
 
-        todo!()
+            if old_tail == 0 {
+                self.core
+                    .queue_head
+                    .store(new_static_area as usize, Ordering::Release);
+
+                // We are the new queue head, see if we can awake immediately, so as to not stall if we just missed a waking of readers.
+                if let Some(guard) = self.core.try_prioritized_read() {
+                    match self.core.queue_head.compare_exchange(
+                        new_static_area as usize,
+                        (new_static_area as usize) | Node::NEXT_SENTINEL_BIT,
+                        Ordering::Relaxed,
+                        Ordering::Relaxed,
+                    ) {
+                        Ok(_) => unsafe {
+                            // We are now responsible for waking.
+                            if let Some(next_node) =
+                                self.core.try_reset_queue(new_static_area as usize)
+                            {
+                                self.core.wake_next_reader(next_node);
+                            }
+
+                            // Safety: We again have exlusive access to our node.
+                            node.waker.assume_init_drop();
+                            *node.state.get_mut() = Node::STATE_COMPLETE_BIT;
+                            self.observer_data.static_area =
+                                new_static_area as usize | SA_TYPE_READ;
+
+                            let version = self.core.version();
+                            self.observer_data.version = version;
+                            return Poll::Ready(match version.closed_bit_set() {
+                                true => Err(guard),
+                                false => Ok(guard),
+                            });
+                        },
+                        Err(_) => {
+                            // We are not responsible for waking and have been or are about to be awoken. Wait until we are awoken via this mechanism,
+                            // so as to guarantee that the node will completed and reusable.
+                        }
+                    }
+                }
+            } else {
+                unsafe {
+                    (*((old_tail & Node::NEXT_PTR_MASK) as *mut Node))
+                        .next
+                        .store(new_static_area as usize, Ordering::Release)
+                };
+            }
+
+            new_static_area
+        } else {
+            node
+        };
+
+        self.observer_data.static_area = new_static_area as usize | SA_TYPE_READ;
+        self.init = true;
+
+        Poll::Pending
     }
 }
 
