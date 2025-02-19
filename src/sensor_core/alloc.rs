@@ -596,7 +596,7 @@ impl<T> MySensorCore<T> {
         unsafe { Node::assume_wait_changed_wake(node as *mut _) };
     }
 
-    #[inline]
+    #[inline(always)]
     fn try_read(&self) -> Option<ReadGuard<T>> {
         if self.writes_queued.load(Ordering::Relaxed) != 0 {
             return None;
@@ -605,7 +605,7 @@ impl<T> MySensorCore<T> {
         self.try_prioritized_read()
     }
 
-    // Get a prioritized read lock. Returns true if a lock was acquired, or false if a writer was detected.
+    /// Get a prioritized read lock.
     #[inline(always)]
     fn try_prioritized_read(&self) -> Option<ReadGuard<T>> {
         let mut readers = self.readers.load(Ordering::Relaxed);
@@ -626,12 +626,18 @@ impl<T> MySensorCore<T> {
         None
     }
 
-    #[inline]
+    #[inline(always)]
     fn try_write(&self) -> Option<WriteGuard<T>> {
-        if self.readers.load(Ordering::Relaxed) != 0 {
+        if self.writes_queued.load(Ordering::Relaxed) != 0 {
             return None;
         }
 
+        self.try_prioritized_write()
+    }
+
+    /// Get a prioritized read lock.
+    #[inline(always)]
+    fn try_prioritized_write(&self) -> Option<WriteGuard<T>> {
         if self
             .readers
             .compare_exchange(0, usize::MAX, Ordering::Acquire, Ordering::Relaxed)
@@ -666,17 +672,14 @@ impl<T> MySensorCore<T> {
             if state & (Node::STATE_DROP_BIT | Node::STATE_CANCEL_BIT) != 0 {
                 debug_assert_eq!(state & !(Node::STATE_DROP_BIT | Node::STATE_CANCEL_BIT), 0);
 
-                // Safety: We have a readguard, which will have to be dropped with a happens-before relationship with any other
-                // thread that may read the queue head before that thread will actually read the queue head.
                 let next_node_ptr = self.try_reset_queue(node_ptr);
 
                 if state == Node::STATE_DROP_BIT {
                     drop(Box::from_raw(node));
                 } else {
-                    // Relaxed ordering is sufficient here, nothing was changed.
                     (*node)
                         .state
-                        .store(state | Node::STATE_COMPLETE_BIT, Ordering::Relaxed);
+                        .store(state | Node::STATE_COMPLETE_BIT, Ordering::Release);
                 }
 
                 match next_node_ptr {
@@ -693,7 +696,7 @@ impl<T> MySensorCore<T> {
 
             // Uncancelled write detected. Stop waking here.
             if node_ptr & Node::NEXT_DATA_MASK != 0 {
-                // Relaxed ordering is sufficient here, nothing was changed.
+                // Relaxed ordering is sufficient here, nothing was changed and we do not require any other data.
                 (*node).state.store(0, Ordering::Relaxed);
                 return;
             }
@@ -708,6 +711,97 @@ impl<T> MySensorCore<T> {
 
             // Pass the readguard to the awoken node.
             mem::forget(readguard);
+            return;
+        }
+    }
+
+    /// # Safety
+    ///
+    /// ???
+    #[inline(always)]
+    unsafe fn wake_next_in_queue(&self) {
+        let mut node_ptr = self.queue_head.load(Ordering::Acquire);
+
+        if node_ptr == 0 || node_ptr & Node::NEXT_SENTINEL_BIT != 0 {
+            // Either the queue is empty or someone else has taken the responsibility to wake the next element.
+            return;
+        }
+
+        if self
+            .queue_head
+            .compare_exchange(
+                node_ptr,
+                node_ptr & Node::NEXT_SENTINEL_BIT,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            )
+            .is_err()
+        {
+            return;
+        }
+
+        let node = (node_ptr & Node::NEXT_PTR_MASK) as *mut Node;
+
+        loop {
+            let state = Node::lock(node);
+
+            if state & (Node::STATE_DROP_BIT | Node::STATE_CANCEL_BIT) != 0 {
+                debug_assert_eq!(state & !(Node::STATE_DROP_BIT | Node::STATE_CANCEL_BIT), 0);
+
+                let next_node_ptr = self.try_reset_queue(node_ptr);
+
+                if state == Node::STATE_DROP_BIT {
+                    drop(Box::from_raw(node));
+                } else {
+                    (*node)
+                        .state
+                        .store(state | Node::STATE_COMPLETE_BIT, Ordering::Release);
+                }
+
+                match next_node_ptr {
+                    Some(next_node_ptr) => {
+                        node_ptr = next_node_ptr;
+                        continue;
+                    }
+                    // Nothing to do, list is cleared.
+                    None => return,
+                }
+            }
+
+            debug_assert_eq!(state, 0);
+
+            if node_ptr & Node::NEXT_DATA_MASK != 0 {
+                match self.try_write() {
+                    Some(write_guard) => {
+                        mem::forget(write_guard);
+                    }
+                    None => {
+                        // Relaxed ordering is sufficient here, nothing was changed and we don't access `next_node_ptr`.
+                        (*node).state.store(0, Ordering::Relaxed);
+                        return;
+                    }
+                }
+            } else {
+                match self.try_read() {
+                    Some(read_guard) => {
+                        mem::forget(read_guard);
+                    }
+                    None => {
+                        // Relaxed ordering is sufficient here, nothing was changed and we don't access `next_node_ptr`.
+                        (*node).state.store(0, Ordering::Relaxed);
+                        return;
+                    }
+                }
+            };
+
+            // Get waker first with a cheap, bit level copy, allow other threads to continue and then spend the potential cost
+            // of waking.
+            let waker = (*node).waker.assume_init_read();
+            (*node)
+                .state
+                .store(Node::STATE_COMPLETE_BIT, Ordering::Release);
+            waker.wake();
+
             return;
         }
     }
@@ -756,14 +850,11 @@ impl<T> MySensorCore<T> {
     /// # Safety
     ///
     /// `possible_tail_node` should point to a valid node inside the the Read-Write queue.
-    ///
-    /// Only relaxed orderings are used in this process, so it is the callers responsibility to ensure that it impossible
-    /// that another queue clearing thread will see the head zeroed without the tail being zeroed by ensuring a happens-before
-    /// relationship exists.
     #[inline(always)]
     unsafe fn try_reset_queue(&self, possible_tail_node: usize) -> Option<usize> {
         let node = (possible_tail_node & Node::NEXT_PTR_MASK) as *mut Node;
 
+        // Ensure that loading the next node creates a happens-before relationship.
         let mut next = (*node).next.load(Ordering::Relaxed);
         if next != 0 {
             return Some(next);
@@ -781,6 +872,7 @@ impl<T> MySensorCore<T> {
         // A new node has attached to the tail, we cannot reset the queue.
 
         loop {
+            // Ensure that loading the next node creates a happens-before relationship.
             next = (*node).next.load(Ordering::Relaxed);
             if next != 0 {
                 return Some(next);
@@ -805,7 +897,15 @@ impl<'a, T> Deref for ReadGuard<'a, T> {
 
 impl<'a, T> Drop for ReadGuard<'a, T> {
     fn drop(&mut self) {
-        todo!()
+        let remaining = self.core.readers.fetch_sub(1, Ordering::Relaxed);
+
+        debug_assert!(remaining != 0);
+
+        if remaining != 1 {
+            return;
+        }
+
+        unsafe { self.core.wake_next_in_queue() };
     }
 }
 
