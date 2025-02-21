@@ -406,7 +406,9 @@ impl Node {
 
     /// Cancels and drops the waker if the node has not been completed yet.
     ///
-    /// Returns whether a complete bit was detected.
+    /// Returns true if our cancellation was succesful. In this case the cancellation was announced before
+    /// the completion could occur, otherwise the completion has occured with the implications which follows
+    /// for it.
     ///
     /// # Safety
     ///
@@ -420,16 +422,27 @@ impl Node {
 
         if state & (Self::STATE_COMPLETE_BIT) != 0 {
             // We have already been completed. Nothing to do.
-            return true;
+            return false;
         }
 
-        state = node.state.fetch_or(Self::STATE_LOCK_BIT, Ordering::AcqRel);
-        if state & Self::STATE_LOCK_BIT != 0 {
-            // We are about to be completed. Nothing to do.
-            return true;
+        // A perceived lock state does not guarantee that we are about to be completed (as is the case for a write node).
+        // Wait until we have a lock to guarantee our state.
+        loop {
+            while state & Self::STATE_LOCK_BIT != 0 {
+                spin_loop();
+                state = node.state.load(Ordering::Relaxed);
+            }
+
+            state = node.state.fetch_or(Self::STATE_LOCK_BIT, Ordering::AcqRel);
+            if state & Self::STATE_LOCK_BIT == 0 {
+                break;
+            }
         }
 
-        debug_assert_eq!(state, Self::STATE_LOCK_BIT);
+        if state & Self::STATE_COMPLETE_BIT != 0 {
+            // We have already been completed. Nothing to do.
+            return false;
+        }
 
         // Get waker first with a cheap, bit level copy, allow other threads to continue and then spend the potential cost
         // of dropping the waker.
@@ -440,7 +453,7 @@ impl Node {
         );
         drop(waker);
 
-        return false;
+        true
     }
 
     /// Wake the next element in the wait changed queue, skipping over cancelled nodes and appropriately dropping
@@ -545,17 +558,23 @@ impl Node {
     /// Should only be called on nodes that are guaranteed to not get dropped.
     #[inline(always)]
     unsafe fn lock(node: *mut Self) -> u8 {
-        let mut state;
+        let mut state = (*node).state.load(Ordering::Relaxed);
+
+        // A perceived lock state does not guarantee that we are about to be completed (as is the case for a write node).
+        // Wait until we have a lock to guarantee our state.
         loop {
+            while state & Self::STATE_LOCK_BIT != 0 {
+                spin_loop();
+                state = (*node).state.load(Ordering::Relaxed);
+            }
+
             state = (*node)
                 .state
-                .fetch_or(Self::STATE_LOCK_BIT, Ordering::AcqRel);
+                .fetch_or(Self::STATE_LOCK_BIT, Ordering::Acquire);
 
             if state & Self::STATE_LOCK_BIT == 0 {
                 return state;
             }
-
-            spin_loop();
         }
     }
 }
@@ -1087,7 +1106,24 @@ impl<'a, T> Future for MyReadFut<'a, T> {
 
 impl<'a, T> Drop for MyReadFut<'a, T> {
     fn drop(&mut self) {
-        todo!()
+        if !self.init {
+            return;
+        }
+
+        let node = (self.observer_data.static_area & SA_MASK_PTR) as *mut Node;
+
+        if unsafe { Node::cancel(node) } {
+            return;
+        }
+
+        // We have a readguard and are responsible for waking the next read future as well.
+
+        unsafe {
+            if let Some(next_ptr) = self.core.try_reset_queue(node as usize) {
+                self.core.wake_next_reader(next_ptr);
+                drop(ReadGuard { core: self.core });
+            }
+        }
     }
 }
 
@@ -1111,7 +1147,7 @@ impl<'a, T> Future for MyWaitChangedFut<'a, T> {
             if self.observer_data.version != version {
                 // Do not rely on `Drop` trait to wake the next element. It may not be instantaneous.
                 unsafe {
-                    if Node::cancel(node) {
+                    if !Node::cancel(node) {
                         let next_node = Node::assume_wait_changed_next_node(node);
                         if next_node != null_mut() {
                             Node::assume_wait_changed_wake(node);
@@ -1160,15 +1196,20 @@ impl<'a, T> Future for MyWaitChangedFut<'a, T> {
 
 impl<'a, T> Drop for MyWaitChangedFut<'a, T> {
     fn drop(&mut self) {
-        if self.init {
-            let node = (self.observer_data.static_area & SA_MASK_PTR) as _;
-            unsafe {
-                if Node::cancel(node) {
-                    let next_node = Node::assume_wait_changed_next_node(node);
-                    if next_node != null_mut() {
-                        Node::assume_wait_changed_wake(next_node);
-                    }
-                }
+        if !self.init {
+            return;
+        }
+
+        let node = (self.observer_data.static_area & SA_MASK_PTR) as _;
+
+        if unsafe { Node::cancel(node) } {
+            return;
+        }
+
+        unsafe {
+            let next_node = Node::assume_wait_changed_next_node(node);
+            if next_node != null_mut() {
+                Node::assume_wait_changed_wake(next_node);
             }
         }
     }
