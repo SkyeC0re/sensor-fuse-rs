@@ -719,11 +719,13 @@ impl<T> MySensorCore<T> {
     ///
     /// ???
     #[inline(always)]
-    unsafe fn wake_next_in_queue(&self) {
+    unsafe fn wake_next_in_queue(&self, holds_write_guard: bool) {
         let mut node_ptr = self.queue_head.load(Ordering::Acquire);
 
         if node_ptr == 0 || node_ptr & Node::NEXT_SENTINEL_BIT != 0 {
             // Either the queue is empty or someone else has taken the responsibility to wake the next element.
+
+            debug_assert!(!holds_write_guard || Node::NEXT_SENTINEL_BIT == 0);
             return;
         }
 
@@ -771,25 +773,31 @@ impl<T> MySensorCore<T> {
             debug_assert_eq!(state, 0);
 
             if node_ptr & Node::NEXT_DATA_MASK != 0 {
-                match self.try_write() {
-                    Some(write_guard) => {
-                        mem::forget(write_guard);
-                    }
-                    None => {
-                        // Relaxed ordering is sufficient here, nothing was changed and we don't access `next_node_ptr`.
-                        (*node).state.store(0, Ordering::Relaxed);
-                        return;
+                if !holds_write_guard {
+                    match self.try_write() {
+                        Some(write_guard) => {
+                            mem::forget(write_guard);
+                        }
+                        None => {
+                            // Relaxed ordering is sufficient here, nothing was changed and we don't access `next_node_ptr`.
+                            (*node).state.store(0, Ordering::Relaxed);
+                            return;
+                        }
                     }
                 }
             } else {
-                match self.try_read() {
-                    Some(read_guard) => {
-                        mem::forget(read_guard);
-                    }
-                    None => {
-                        // Relaxed ordering is sufficient here, nothing was changed and we don't access `next_node_ptr`.
-                        (*node).state.store(0, Ordering::Relaxed);
-                        return;
+                if holds_write_guard {
+                    self.readers.store(1, Ordering::Relaxed);
+                } else {
+                    match self.try_read() {
+                        Some(read_guard) => {
+                            mem::forget(read_guard);
+                        }
+                        None => {
+                            // Relaxed ordering is sufficient here, nothing was changed and we don't access `next_node_ptr`.
+                            (*node).state.store(0, Ordering::Relaxed);
+                            return;
+                        }
                     }
                 }
             };
@@ -854,8 +862,8 @@ impl<T> MySensorCore<T> {
     unsafe fn try_reset_queue(&self, possible_tail_node: usize) -> Option<usize> {
         let node = (possible_tail_node & Node::NEXT_PTR_MASK) as *mut Node;
 
-        // Ensure that loading the next node creates a happens-before relationship.
-        let mut next = (*node).next.load(Ordering::Relaxed);
+        // Ensure that the next node's data is populated before any access to it.
+        let mut next = (*node).next.load(Ordering::Acquire);
         if next != 0 {
             return Some(next);
         }
@@ -872,8 +880,8 @@ impl<T> MySensorCore<T> {
         // A new node has attached to the tail, we cannot reset the queue.
 
         loop {
-            // Ensure that loading the next node creates a happens-before relationship.
-            next = (*node).next.load(Ordering::Relaxed);
+            // Ensure that the next node's data is populated before any access to it.
+            next = (*node).next.load(Ordering::Acquire);
             if next != 0 {
                 return Some(next);
             }
@@ -905,7 +913,7 @@ impl<'a, T> Drop for ReadGuard<'a, T> {
             return;
         }
 
-        unsafe { self.core.wake_next_in_queue() };
+        unsafe { self.core.wake_next_in_queue(false) };
     }
 }
 
@@ -929,7 +937,7 @@ impl<'a, T> DerefMut for WriteGuard<'a, T> {
 
 impl<'a, T> Drop for WriteGuard<'a, T> {
     fn drop(&mut self) {
-        todo!()
+        unsafe { self.core.wake_next_in_queue(true) };
     }
 }
 
@@ -1074,6 +1082,12 @@ impl<'a, T> Future for MyReadFut<'a, T> {
         self.init = true;
 
         Poll::Pending
+    }
+}
+
+impl<'a, T> Drop for MyReadFut<'a, T> {
+    fn drop(&mut self) {
+        todo!()
     }
 }
 
