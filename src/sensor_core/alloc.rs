@@ -342,26 +342,18 @@ impl Node {
         allow_in_queue_reset: bool,
     ) -> Option<&'static mut Self> {
         let old_node = &mut *node;
-        let mut state = old_node.state.load(Ordering::Acquire);
 
+        // Write free initial check for completion.
+        let mut state = old_node.state.load(Ordering::Acquire);
         if state & Self::STATE_COMPLETE_BIT != 0 {
             // Free to re-use mutably. We are the sole owners.
             Node::assume_exclusive_reset(node, waker);
             return Some(&mut *node);
         }
 
-        state = old_node
-            .state
-            .fetch_or(Self::STATE_LOCK_BIT, Ordering::Acquire);
+        state = Self::lock(node);
 
-        if state & Self::STATE_LOCK_BIT != 0 {
-            while state & Self::STATE_LOCK_BIT != 0 {
-                spin_loop();
-                state = old_node.state.load(Ordering::Acquire);
-            }
-
-            debug_assert_ne!(state & Self::STATE_COMPLETE_BIT, 0);
-
+        if state & Self::STATE_COMPLETE_BIT != 0 {
             // Free to re-use mutably. We are the sole owners.
             Node::assume_exclusive_reset(node, waker);
             return Some(&mut *node);
@@ -433,7 +425,7 @@ impl Node {
                 state = node.state.load(Ordering::Relaxed);
             }
 
-            state = node.state.fetch_or(Self::STATE_LOCK_BIT, Ordering::AcqRel);
+            state = node.state.fetch_or(Self::STATE_LOCK_BIT, Ordering::Acquire);
             if state & Self::STATE_LOCK_BIT == 0 {
                 break;
             }
@@ -833,45 +825,6 @@ impl<T> MySensorCore<T> {
         }
     }
 
-    // /// Find the next node in the list. Assumes that the node is uncompleted and in the wait changed queue.
-    // ///
-    // /// # Safety
-    // ///
-    // /// This function should only be called on nodes that are in queue, and for which the caller either is the sole
-    // /// arbiter of the node's completion or can guarantee that the node has been cancelled before this call and has
-    // /// not been reset.
-    // #[inline(always)]
-    // unsafe fn assume_read_wake_node(&self, curr_node: usize) {
-    //     let node = (curr_node & Node::NEXT_PTR_MASK) as *mut Node;
-
-    //     let mut next_ptr = (*node).next.load(Ordering::Acquire);
-
-    //     if next_ptr != 0 {
-    //         return next_ptr;
-    //     }
-
-    //     // No data initialization depends on this ordering, `Ordering::Relaxed` is sufficient.
-    //     if self
-    //         .queue_tail
-    //         .compare_exchange(curr_node, 0, Ordering::Relaxed, Ordering::Relaxed)
-    //         .is_ok()
-    //     {
-    //         self.queue_head.store(0, Ordering::Relaxed);
-    //         return 0;
-    //     };
-
-    //     // List could not be emptied, a new element has joined.
-    //     loop {
-    //         next_ptr = (*node).next.load(Ordering::Acquire);
-
-    //         if next_ptr != 0 {
-    //             return next_ptr;
-    //         }
-
-    //         spin_loop();
-    //     }
-    // }
-
     /// Try to reset the Read-Write queue given non-zero typed node that is currently part of the queue.
     ///
     /// # Safety
@@ -892,7 +845,10 @@ impl<T> MySensorCore<T> {
             .compare_exchange(possible_tail_node, 0, Ordering::Relaxed, Ordering::Relaxed)
             .is_ok()
         {
-            self.queue_head.store(0, Ordering::Relaxed);
+            // Ensure that when another thread reads the queue head, that when it observes a zeroed head, that a non-zero tail can only
+            // exist because a new node is in the process of being attached and will soon update the queue head and that that tail
+            // does not still contain `possible_tail_node`.
+            self.queue_head.store(0, Ordering::Release);
             return None;
         }
 
@@ -1053,35 +1009,41 @@ impl<'a, T> Future for MyReadFut<'a, T> {
                 if let Some(guard) = self.core.try_prioritized_read() {
                     match self.core.queue_head.compare_exchange(
                         new_static_area as usize,
-                        (new_static_area as usize) | Node::NEXT_SENTINEL_BIT,
+                        new_static_area as usize | Node::NEXT_SENTINEL_BIT,
                         Ordering::Relaxed,
                         Ordering::Relaxed,
                     ) {
                         Ok(_) => unsafe {
-                            // We are now responsible for waking.
-                            if let Some(next_node) =
-                                self.core.try_reset_queue(new_static_area as usize)
-                            {
-                                self.core.wake_next_reader(next_node);
-                            }
-
-                            // Safety: We again have exlusive access to our node.
+                            // We have exlusive access to our node again, as we won the race to set the sentinel bit. We immediately complete ourselves.
                             node.waker.assume_init_drop();
                             *node.state.get_mut() = Node::STATE_COMPLETE_BIT;
-                            self.observer_data.static_area =
-                                new_static_area as usize | SA_TYPE_READ;
-
-                            let version = self.core.version();
-                            self.observer_data.version = version;
-                            return Poll::Ready(match version.closed_bit_set() {
-                                true => Err(guard),
-                                false => Ok(guard),
-                            });
                         },
                         Err(_) => {
-                            // We are not responsible for waking and have been or are about to be awoken. Wait until we are awoken via this mechanism,
-                            // so as to guarantee that the node will completed and reusable.
+                            // We are not responsible for waking but have been or are about to be awoken (the only function that could have set the sentinel bit is `wake_next_in_queue`).
+                            // Wait until we are awoken via this mechanism, so as to guarantee that the node will completed and reusable.
+                            while node.state.load(Ordering::Acquire) & Node::STATE_COMPLETE_BIT == 0
+                            {
+                                spin_loop();
+                            }
                         }
+                    }
+
+                    unsafe {
+                        // We are now responsible for waking.
+                        if let Some(next_node) = self.core.try_reset_queue(new_static_area as usize)
+                        {
+                            self.core.wake_next_reader(next_node);
+                        }
+
+                        // Safety: We again have exlusive access to our node.
+                        self.observer_data.static_area = new_static_area as usize | SA_TYPE_READ;
+
+                        let version = self.core.version();
+                        self.observer_data.version = version;
+                        return Poll::Ready(match version.closed_bit_set() {
+                            true => Err(guard),
+                            false => Ok(guard),
+                        });
                     }
                 }
             } else {
