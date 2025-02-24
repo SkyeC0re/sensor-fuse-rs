@@ -311,9 +311,9 @@ impl Node {
 
     const NEXT_DATA_MASK: usize = 0b11;
     // Whether the node in the Read-Write is a write node.
-    const NEXT_IS_WRITER_BIT: usize = 0b1;
+    const NEXT_IS_WRITER_BIT: usize = 0b10;
     // Sentinal bit used for various purposes depending on what context the node is being used in.
-    const NEXT_SENTINEL_BIT: usize = 0b10;
+    const NEXT_SENTINEL_BIT: usize = 0b1;
     const NEXT_PTR_MASK: usize = !Self::NEXT_DATA_MASK;
     const WAIT_CHANGED_TAIL: usize = 0b1;
 
@@ -725,29 +725,51 @@ impl<T> MySensorCore<T> {
     unsafe fn wake_next_in_queue(&self, holds_write_guard: bool) {
         let mut node_ptr = self.queue_head.load(Ordering::Acquire);
 
-        if node_ptr == 0 || node_ptr & Node::NEXT_SENTINEL_BIT != 0 {
+        if node_ptr <= Node::NEXT_SENTINEL_BIT {
             // Either the queue is empty or someone else has taken the responsibility to wake the next element.
-
-            debug_assert!(!holds_write_guard || Node::NEXT_SENTINEL_BIT == 0);
             return;
         }
 
-        if self
-            .queue_head
-            .compare_exchange(
-                node_ptr,
-                node_ptr & Node::NEXT_SENTINEL_BIT,
-                Ordering::Relaxed,
-                Ordering::Relaxed,
-            )
-            .is_err()
-        {
-            return;
+        // There is something in the queue. Either it is because we are holding a write guard, or it is likely a write
+        // following some reads. The common path of this latter case combined with the guarantees we get by having
+        // a write guard before setting the sentinel bit, makes this a good place to force a write guard if we do not
+        // already have one. If we cannot aqcuire one now, then it becomes whoever is blocking us' responsibility to wake.
+        if !holds_write_guard {
+            match self.try_prioritized_write() {
+                Some(guard) => {
+                    mem::forget(guard);
+                }
+                None => return,
+            }
         }
 
-        let node = (node_ptr & Node::NEXT_PTR_MASK) as *mut Node;
+        node_ptr = self.queue_head.load(Ordering::Acquire);
+
+        if node_ptr == 0 {
+            // Someone has intercepted us. Attempt a forceful write guard drop, blocking
+            // new elements from entering the queue.
+            match self.queue_head.compare_exchange(
+                0,
+                Node::NEXT_SENTINEL_BIT,
+                Ordering::Relaxed,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    self.readers.store(0, Ordering::Relaxed);
+                    self.queue_head.store(0, Ordering::Release);
+                    return;
+                }
+                Err(new_node_ptr) => {
+                    // We have a write guard, sentinel bit could not have been set.
+                    debug_assert_ne!(new_node_ptr, Node::NEXT_SENTINEL_BIT);
+
+                    node_ptr = new_node_ptr;
+                }
+            }
+        }
 
         loop {
+            let node = (node_ptr & Node::NEXT_PTR_MASK) as *mut Node;
             let state = Node::lock(node);
 
             if state & (Node::STATE_DROP_BIT | Node::STATE_CANCEL_BIT) != 0 {
@@ -763,51 +785,39 @@ impl<T> MySensorCore<T> {
                         .store(state | Node::STATE_COMPLETE_BIT, Ordering::Release);
                 }
 
-                match next_node_ptr {
-                    Some(next_node_ptr) => {
-                        node_ptr = next_node_ptr;
+                if let Some(next_node_ptr) = next_node_ptr {
+                    node_ptr = next_node_ptr;
+                    continue;
+                }
+
+                // List is cleared. We have a write guard. Attempt a forceful write guard drop.
+                match self.queue_head.compare_exchange(
+                    0,
+                    Node::NEXT_SENTINEL_BIT,
+                    Ordering::Relaxed,
+                    Ordering::Acquire,
+                ) {
+                    Ok(_) => {
+                        self.readers.store(0, Ordering::Relaxed);
+                        self.queue_head.store(0, Ordering::Release);
+                        return;
+                    }
+                    Err(new_node_ptr) => {
+                        // We have a write guard, sentinel bit could not have been set.
+                        debug_assert_ne!(new_node_ptr, Node::NEXT_SENTINEL_BIT);
+
+                        node_ptr = new_node_ptr;
                         continue;
                     }
-                    // Nothing to do, list is cleared.
-                    None => return,
                 }
             }
 
             debug_assert_eq!(state, 0);
 
-            // TODO bad strategy, is this fails we need to unset the sentinel bit, at which point we may again need to
-            // check if the lock isnt empty and perhaps redo this process. Instead force all callers of this function
-            // to do so with a write guard to ensure that we always win the the sentinel bit race (the other thread discovers a write guard held
-            // by us and stops).
-            if node_ptr & Node::NEXT_IS_WRITER_BIT != 0 {
-                if !holds_write_guard {
-                    match self.try_write() {
-                        Some(write_guard) => {
-                            mem::forget(write_guard);
-                        }
-                        None => {
-                            // Relaxed ordering is sufficient here, nothing was changed and we don't access `next_node_ptr`.
-                            (*node).state.store(0, Ordering::Relaxed);
-                            return;
-                        }
-                    }
-                }
-            } else {
-                if holds_write_guard {
-                    self.readers.store(1, Ordering::Relaxed);
-                } else {
-                    match self.try_read() {
-                        Some(read_guard) => {
-                            mem::forget(read_guard);
-                        }
-                        None => {
-                            // Relaxed ordering is sufficient here, nothing was changed and we don't access `next_node_ptr`.
-                            (*node).state.store(0, Ordering::Relaxed);
-                            return;
-                        }
-                    }
-                }
-            };
+            // Appropriately downgrade the lock for readers.
+            if node_ptr & Node::NEXT_IS_WRITER_BIT == 0 {
+                self.readers.store(1, Ordering::Relaxed);
+            }
 
             // Get waker first with a cheap, bit level copy, allow other threads to continue and then spend the potential cost
             // of waking.
@@ -999,47 +1009,33 @@ impl<'a, T> Future for MyReadFut<'a, T> {
                 .swap(new_static_area as usize, Ordering::AcqRel);
 
             if old_tail == 0 {
-                // Ensure that the head is also properly zeroed.
-                while self.core.queue_head.load(Ordering::Relaxed) != 0 {
+                // Ensure that the head is also properly zeroed. This will block on both a head still being cleared out and a sentinel bit being set on
+                // a zeroed head.
+                while self
+                    .core
+                    .queue_head
+                    .compare_exchange_weak(
+                        0,
+                        new_static_area as usize,
+                        Ordering::Release,
+                        Ordering::Relaxed,
+                    )
+                    .is_err()
+                {
                     spin_loop();
                 }
 
-                self.core
-                    .queue_head
-                    .store(new_static_area as usize, Ordering::Release);
-
                 // We are the new queue head, see if we can awake immediately, in case the lock has become inactive whilst we were inserted.
                 if let Some(guard) = self.core.try_prioritized_read() {
-                    match self.core.queue_head.compare_exchange(
-                        new_static_area as usize,
-                        new_static_area as usize | Node::NEXT_SENTINEL_BIT,
-                        Ordering::Relaxed,
-                        Ordering::Relaxed,
-                    ) {
-                        Ok(_) => unsafe {
-                            // We have exlusive access to our node again, as we won the race to set the sentinel bit. We immediately complete ourselves.
-                            node.waker.assume_init_drop();
-                            *node.state.get_mut() = Node::STATE_COMPLETE_BIT;
-                        },
-                        Err(_) => {
-                            // We are not responsible for waking but have been or are about to be awoken (the only function that could have set the sentinel bit is `wake_next_in_queue`).
-                            // Wait until we are awoken via this mechanism, so as to guarantee that the node will completed and reusable.
-                            while node.state.load(Ordering::Acquire) & Node::STATE_COMPLETE_BIT == 0
-                            {
-                                spin_loop();
-                            }
-
-                            // Drop the additional readguard that was handed over to us.
-                            drop(ReadGuard { core: self.core })
-                        }
-                    }
-
                     unsafe {
                         // We are now responsible for waking.
                         if let Some(next_node) = self.core.try_reset_queue(new_static_area as usize)
                         {
                             self.core.wake_next_reader(next_node);
                         }
+
+                        node.waker.assume_init_drop();
+                        *node.state.get_mut() = Node::STATE_COMPLETE_BIT;
 
                         // Safety: We again have exlusive access to our node.
                         self.observer_data.static_area = new_static_area as usize | SA_TYPE_READ;
@@ -1133,46 +1129,25 @@ impl<'a, T> Future for MyWriteFut<'a, T> {
                 .swap(typed_static_area, Ordering::AcqRel);
 
             if old_tail == 0 {
-                // Ensure that the head is also properly zeroed.
-                while self.core.queue_head.load(Ordering::Relaxed) != 0 {
+                // Ensure that the head is also properly zeroed. This will block on both a head still being cleared out and a sentinel bit being set on
+                // a zeroed head.
+                while self
+                    .core
+                    .queue_head
+                    .compare_exchange_weak(
+                        0,
+                        typed_static_area,
+                        Ordering::Release,
+                        Ordering::Relaxed,
+                    )
+                    .is_err()
+                {
                     spin_loop();
                 }
 
-                self.core
-                    .queue_head
-                    .store(typed_static_area, Ordering::Release);
-
                 // We are the new queue head, see if we can awake immediately, in case the lock has become inactive whilst we were inserted.
                 if let Some(guard) = self.core.try_prioritized_write() {
-                    while self
-                        .core
-                        .queue_head
-                        .compare_exchange_weak(
-                            new_static_area as usize,
-                            typed_static_area | Node::NEXT_SENTINEL_BIT,
-                            Ordering::Relaxed,
-                            Ordering::Relaxed,
-                        )
-                        .is_err()
-                    {
-                        // Another thread is attempting to wake the next element in the queue via `wake_next_in_queue`, but will fail as soon
-                        // as it discovers us as the head with a write guard. Wait for this to happen before continuing. Important to note here is that
-                        // although highly unlikely, it is possible to observe the sentinel bit being set, unset and then reset multiple times, *not just once*.
-                        // Take for example a last read guard being dropped but not setting the sentinel bit just yet. In that time another readguard is aqcuired
-                        // and dropped and have also not set the sentinel bit just yet. We then add ourselves to the queue because we initially observed one of those readguards
-                        // but then aqcuire a write guard in the time when both readguards have removed themselves from the reader count, but neither has yet gotten around to setting
-                        // (and checking) the sentinel bit as part of their `wake_next_in_queue` calls. It is for this reason that we must ensure that we set the sentinel bit,
-                        // instead of just waiting for the sentinel bit to become unset after an initial collision.
-                        spin_loop();
-                    }
-
                     unsafe {
-                        // We are now responsible for waking.
-                        if let Some(next_node) = self.core.try_reset_queue(new_static_area as usize)
-                        {
-                            self.core.wake_next_reader(next_node);
-                        }
-
                         // Safety: We again have exlusive access to our node.
                         node.waker.assume_init_drop();
                         *node.state.get_mut() = Node::STATE_COMPLETE_BIT;
