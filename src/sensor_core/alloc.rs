@@ -661,8 +661,8 @@ impl<T> MySensorCore<T> {
 
         // We already have a readguard, this can only fail because we have reached the maximum amount of readers.
         // In this case, leave the current node in the queue and come back to it later.
-        let readguard = match self.try_prioritized_read() {
-            Some(v) => v,
+        match self.try_prioritized_read() {
+            Some(guard) => mem::forget(guard),
             None => {
                 self.queue_head.store(node_ptr, Ordering::Relaxed);
                 return;
@@ -691,7 +691,11 @@ impl<T> MySensorCore<T> {
                         continue;
                     }
                     // Nothing to do, list is cleared.
-                    None => return,
+                    None => {
+                        // Safety: We have two read guards, and can simply decrease the reader count here.
+                        let _ = self.readers.fetch_sub(1, Ordering::Relaxed);
+                        return;
+                    }
                 }
             }
 
@@ -699,6 +703,9 @@ impl<T> MySensorCore<T> {
 
             // Uncancelled write detected. Stop waking here.
             if node_ptr & Node::NEXT_IS_WRITER_BIT != 0 {
+                // Safety: We have two read guards, and can simply decrease the reader count here.
+                let _ = self.readers.fetch_sub(1, Ordering::Relaxed);
+
                 // Relaxed ordering is sufficient here, nothing was changed and we do not require any other data.
                 (*node).state.store(0, Ordering::Relaxed);
                 return;
@@ -712,8 +719,7 @@ impl<T> MySensorCore<T> {
                 .store(Node::STATE_COMPLETE_BIT, Ordering::Release);
             waker.wake();
 
-            // Pass the readguard to the awoken node.
-            mem::forget(readguard);
+            // Implicitly pass the extrenuous read guard to the awoken node.
             return;
         }
     }
@@ -736,9 +742,7 @@ impl<T> MySensorCore<T> {
         // already have one. If we cannot aqcuire one now, then it becomes whoever is blocking us' responsibility to wake.
         if !holds_write_guard {
             match self.try_prioritized_write() {
-                Some(guard) => {
-                    mem::forget(guard);
-                }
+                Some(guard) => mem::forget(guard),
                 None => return,
             }
         }
