@@ -11,6 +11,7 @@ use std::{
     future::poll_fn,
     mem,
     ops::{Deref, DerefMut},
+    ptr::NonNull,
     sync::atomic::AtomicU8,
 };
 
@@ -19,6 +20,7 @@ use async_lock::{
     RwLock, RwLockReadGuard, RwLockWriteGuard,
 };
 use either::Either;
+use futures::FutureExt;
 
 use crate::{SymResult, Version};
 
@@ -305,8 +307,11 @@ struct Node {
 
 impl Node {
     const STATE_LOCK_BIT: u8 = 0b1;
-    const STATE_DROP_BIT: u8 = 0b10;
-    const STATE_CANCEL_BIT: u8 = 0b100;
+
+    // Safety:  `Node::cancel` relies on the fact that these are sequential.
+    const STATE_CANCEL_BIT: u8 = 0b10;
+    const STATE_DROP_BIT: u8 = 0b100;
+
     const STATE_COMPLETE_BIT: u8 = 0b1000;
 
     const NEXT_DATA_MASK: usize = 0b11;
@@ -388,17 +393,19 @@ impl Node {
         *node.state.get_mut() = 0;
     }
 
-    /// Cancels and drops the waker if the node has not been completed yet.
+    /// Cancels or detaches the node if it has not been completed yet.
     ///
-    /// Returns true if our cancellation was succesful. In this case the cancellation was announced before
-    /// the completion could occur, otherwise the completion has occured with the implications which follows
-    /// for it.
+    /// Returns the waker if our cancellation or detaching was succesful. In this case the cancellation or detachment
+    ///  was announced before the completion could occur, otherwise the completion has occured with the
+    /// implications which follows from it.
     ///
     /// # Safety
     ///
     /// It is undefined behaviour to call this twice on the same node without resetting it.
+    ///
+    /// If `detach = true`, it is also undefined behaviour to access the node again if the waker was returned.
     #[inline(always)]
-    unsafe fn cancel(node: *mut Self) -> bool {
+    unsafe fn cancel(node: *mut Self) -> Option<Waker> {
         let node = &mut *node;
 
         let mut state = node.state.load(Ordering::Acquire);
@@ -406,7 +413,7 @@ impl Node {
 
         if state & (Self::STATE_COMPLETE_BIT) != 0 {
             // We have already been completed. Nothing to do.
-            return false;
+            return None;
         }
 
         // A perceived lock state does not guarantee that we are about to be completed (as is the case for a write node).
@@ -425,7 +432,7 @@ impl Node {
 
         if state & Self::STATE_COMPLETE_BIT != 0 {
             // We have already been completed. Nothing to do.
-            return false;
+            return None;
         }
 
         // Get waker first with a cheap, bit level copy, allow other threads to continue and then spend the potential cost
@@ -435,9 +442,8 @@ impl Node {
             state ^ (Self::STATE_LOCK_BIT | Self::STATE_CANCEL_BIT),
             Ordering::Release,
         );
-        drop(waker);
 
-        true
+        Some(waker)
     }
 
     /// Wake the next element in the wait changed queue, skipping over cancelled nodes and appropriately dropping
@@ -938,16 +944,48 @@ impl<'a, T> Drop for WriteGuard<'a, T> {
     }
 }
 
-const SA_TYPE_WRITE: usize = 0;
-const SA_TYPE_READ: usize = 1;
-const SA_TYPE_IDLE_READ: usize = 2;
-const SA_TYPE_WAIT_CHANGED: usize = 3;
-const SA_MASK_TYPE: usize = 3;
-const SA_MASK_PTR: usize = !SA_MASK_TYPE;
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+enum StaticRegionState {
+    Uninitialized = 0,
+    Free = 1,
+    Write = 2,
+    Read = 3,
+    IdleRead = 4,
+    WaitChanged = 5,
+}
+
+struct StaticRegion {
+    node: *mut Node,
+    state: StaticRegionState,
+}
+
+impl StaticRegion {
+    #[inline(always)]
+    const fn new() -> Self {
+        Self {
+            node: null_mut(),
+            state: StaticRegionState::Uninitialized,
+        }
+    }
+
+    #[inline(always)]
+    fn ensure_init(&mut self) {
+        if self.state == StaticRegionState::Uninitialized {
+            self.node = Box::into_raw(Box::new(Node {
+                waker: MaybeUninit::uninit(),
+                next: AtomicUsize::new(0),
+                state: AtomicU8::new(Node::STATE_COMPLETE_BIT),
+            }));
+            self.state = StaticRegionState::Free;
+        }
+    }
+}
 
 struct MyObserver<T, R: Deref<Target = MySensorCore<T>>> {
     core: R,
-    data: ObserverData,
+    static_area: StaticRegion,
+    version: Version,
 }
 
 struct ObserverData {
@@ -957,16 +995,36 @@ struct ObserverData {
 
 impl<T, R: Deref<Target = MySensorCore<T>>> MyObserver<T, R> {
     pub fn wait_changed(&mut self) -> MyWaitChangedFut<T> {
+        self.static_area.ensure_init();
         MyWaitChangedFut {
             core: &self.core,
-            observer_data: &mut self.data,
+            static_area: &mut self.static_area,
+            version: self.version,
             init: false,
+        }
+    }
+
+    pub fn read(&mut self) -> MyReadFut<T> {
+        self.static_area.ensure_init();
+        MyReadFut {
+            static_area: &mut self.static_area,
+            core: &self.core,
+            init: false,
+        }
+    }
+
+    pub fn wait_for<F: FnMut(&T) -> bool>(&mut self, condition: F) -> MyWaitForFut<T, F> {
+        self.static_area.ensure_init();
+        MyWaitForFut {
+            version: self.version,
+            condition,
+            read: self.read(),
         }
     }
 }
 
 struct MyReadFut<'a, T> {
-    observer_data: &'a mut ObserverData,
+    static_area: &'a mut StaticRegion,
     core: &'a MySensorCore<T>,
     init: bool,
 }
@@ -975,7 +1033,7 @@ impl<'a, T> Future for MyReadFut<'a, T> {
     type Output = ReadGuard<'a, T>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let node = (self.observer_data.static_area & SA_MASK_PTR) as *mut Node;
+        let node = self.static_area.node;
         if self.init {
             if unsafe { (*node).state.load(Ordering::Acquire) & Node::STATE_COMPLETE_BIT == 0 } {
                 return Poll::Pending;
@@ -997,20 +1055,20 @@ impl<'a, T> Future for MyReadFut<'a, T> {
             return Poll::Ready(guard);
         }
 
-        let node_type = self.observer_data.static_area & SA_MASK_TYPE;
-        let new_static_area = if let Some(node) = unsafe {
+        let node_type = self.static_area.state;
+        let new_static_node = if let Some(node) = unsafe {
             Node::reuse_or_realloc(
                 node,
                 cx.waker().clone(),
-                node_type == SA_TYPE_READ || node_type == SA_TYPE_WRITE,
+                node_type == StaticRegionState::Read || node_type == StaticRegionState::Write,
             )
         } {
-            let new_static_area: *mut Node = node;
+            let node_as_ptr: *mut Node = node;
             let old_tail = self
                 .core
                 .queue_tail
                 // `AcqRel` needed here to ensure `reuse_or_realloc` invariants for both this node and the old tail.
-                .swap(new_static_area as usize, Ordering::AcqRel);
+                .swap(node_as_ptr as usize, Ordering::AcqRel);
 
             if old_tail == 0 {
                 // Ensure that the head is also properly zeroed. This will block on both a head still being cleared out and a sentinel bit being set on
@@ -1020,7 +1078,7 @@ impl<'a, T> Future for MyReadFut<'a, T> {
                     .queue_head
                     .compare_exchange_weak(
                         0,
-                        new_static_area as usize,
+                        node_as_ptr as usize,
                         Ordering::Release,
                         Ordering::Relaxed,
                     )
@@ -1033,16 +1091,18 @@ impl<'a, T> Future for MyReadFut<'a, T> {
                 if let Some(guard) = self.core.try_prioritized_read() {
                     unsafe {
                         // We are now responsible for waking.
-                        if let Some(next_node) = self.core.try_reset_queue(new_static_area as usize)
-                        {
+                        if let Some(next_node) = self.core.try_reset_queue(node_as_ptr as usize) {
                             self.core.wake_next_reader(next_node);
                         }
 
+                        // Safety: We again have exlusive access to our node.
                         node.waker.assume_init_drop();
                         *node.state.get_mut() = Node::STATE_COMPLETE_BIT;
 
-                        // Safety: We again have exlusive access to our node.
-                        self.observer_data.static_area = new_static_area as usize | SA_TYPE_READ;
+                        *self.static_area = StaticRegion {
+                            node,
+                            state: StaticRegionState::Read,
+                        };
 
                         return Poll::Ready(guard);
                     }
@@ -1051,16 +1111,19 @@ impl<'a, T> Future for MyReadFut<'a, T> {
                 unsafe {
                     (*((old_tail & Node::NEXT_PTR_MASK) as *mut Node))
                         .next
-                        .store(new_static_area as usize, Ordering::Release)
+                        .store(node_as_ptr as usize, Ordering::Release)
                 };
             }
 
-            new_static_area
+            node_as_ptr
         } else {
             node
         };
 
-        self.observer_data.static_area = new_static_area as usize | SA_TYPE_READ;
+        *self.static_area = StaticRegion {
+            node: new_static_node,
+            state: StaticRegionState::Read,
+        };
         self.init = true;
 
         Poll::Pending
@@ -1073,9 +1136,9 @@ impl<'a, T> Drop for MyReadFut<'a, T> {
             return;
         }
 
-        let node = (self.observer_data.static_area & SA_MASK_PTR) as *mut Node;
+        let node = self.static_area.node;
 
-        if unsafe { Node::cancel(node) } {
+        if unsafe { Node::cancel(node).is_some() } {
             return;
         }
 
@@ -1090,8 +1153,64 @@ impl<'a, T> Drop for MyReadFut<'a, T> {
     }
 }
 
+struct MyWaitForFut<'a, T, F: FnMut(&T) -> bool> {
+    condition: F,
+    read: MyReadFut<'a, T>,
+    version: Version,
+}
+
+impl<'a, T, F: FnMut(&T) -> bool> Future for MyWaitForFut<'a, T, F> {
+    type Output = (ReadGuard<'a, T>, Version);
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        // Safety: Only `F` is potentially unpin which does not move.
+        let s = unsafe { self.get_unchecked_mut() };
+
+        let guard = match s.read.poll_unpin(cx) {
+            Poll::Ready(guard) => guard,
+            Poll::Pending => return Poll::Pending,
+        };
+
+        let new_version = s.read.core.version();
+        if new_version.closed_bit_set() || (new_version != s.version && (s.condition)(&guard)) {
+            return Poll::Ready((guard, new_version));
+        }
+        s.version = new_version;
+
+        let core = s.read.core;
+        let node = s.read.static_area.node;
+
+        let old_tail = core.idle_reads_tail.swap(node, Ordering::AcqRel);
+        if old_tail.is_null() {
+            // Ensure that the head is also properly zeroed.
+            while core
+                .idle_reads_head
+                .compare_exchange_weak(null_mut(), node, Ordering::Release, Ordering::Relaxed)
+                .is_err()
+            {
+                spin_loop();
+            }
+        } else {
+            unsafe {
+                (*old_tail).next.store(node as usize, Ordering::Release);
+            }
+        }
+
+        // We do not have to check for a version change here. It may have occurred, but not due to actual
+        // value changes. As such we are allowed to pretend that the condition is still false.
+
+        *s.read.static_area = StaticRegion {
+            node,
+            state: StaticRegionState::IdleRead,
+        };
+        s.read.init = true;
+
+        Poll::Pending
+    }
+}
+
 struct MyWriteFut<'a, T> {
-    static_area: &'a mut usize,
+    static_area: &'a mut StaticRegion,
     core: &'a MySensorCore<T>,
     init: bool,
 }
@@ -1100,7 +1219,7 @@ impl<'a, T> Future for MyWriteFut<'a, T> {
     type Output = WriteGuard<'a, T>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let node = (*self.static_area & SA_MASK_PTR) as *mut Node;
+        let node = self.static_area.node;
         if self.init {
             if unsafe { (*node).state.load(Ordering::Acquire) & Node::STATE_COMPLETE_BIT == 0 } {
                 return Poll::Pending;
@@ -1116,16 +1235,16 @@ impl<'a, T> Future for MyWriteFut<'a, T> {
             return Poll::Ready(guard);
         }
 
-        let node_type = *self.static_area & SA_MASK_TYPE;
-        let new_static_area = if let Some(node) = unsafe {
+        let node_type = self.static_area.state;
+        let new_static_node = if let Some(node) = unsafe {
             Node::reuse_or_realloc(
                 node,
                 cx.waker().clone(),
-                node_type == SA_TYPE_READ || node_type == SA_TYPE_WRITE,
+                node_type == StaticRegionState::Read || node_type == StaticRegionState::Write,
             )
         } {
-            let new_static_area: *mut Node = node;
-            let typed_static_area = new_static_area as usize | Node::NEXT_IS_WRITER_BIT;
+            let node_as_ptr: *mut Node = node;
+            let typed_static_area = node_as_ptr as usize | Node::NEXT_IS_WRITER_BIT;
             let old_tail = self
                 .core
                 .queue_tail
@@ -1156,7 +1275,10 @@ impl<'a, T> Future for MyWriteFut<'a, T> {
                         node.waker.assume_init_drop();
                         *node.state.get_mut() = Node::STATE_COMPLETE_BIT;
 
-                        *self.static_area = new_static_area as usize | SA_TYPE_WRITE;
+                        *self.static_area = StaticRegion {
+                            node,
+                            state: StaticRegionState::Write,
+                        };
                     }
 
                     return Poll::Ready(guard);
@@ -1165,16 +1287,19 @@ impl<'a, T> Future for MyWriteFut<'a, T> {
                 unsafe {
                     (*((old_tail & Node::NEXT_PTR_MASK) as *mut Node))
                         .next
-                        .store(new_static_area as usize, Ordering::Release)
+                        .store(node_as_ptr as usize, Ordering::Release)
                 };
             }
 
-            new_static_area
+            node_as_ptr
         } else {
             node
         };
 
-        *self.static_area = new_static_area as usize | SA_TYPE_WRITE;
+        *self.static_area = StaticRegion {
+            node: new_static_node,
+            state: StaticRegionState::Write,
+        };
         self.init = true;
 
         Poll::Pending
@@ -1187,9 +1312,7 @@ impl<'a, T> Drop for MyWriteFut<'a, T> {
             return;
         }
 
-        let node = (*self.static_area & SA_MASK_PTR) as *mut Node;
-
-        if unsafe { Node::cancel(node) } {
+        if unsafe { Node::cancel(self.static_area.node).is_some() } {
             return;
         }
 
@@ -1199,8 +1322,9 @@ impl<'a, T> Drop for MyWriteFut<'a, T> {
 }
 
 struct MyWaitChangedFut<'a, T> {
-    observer_data: &'a mut ObserverData,
+    static_area: &'a mut StaticRegion,
     core: &'a MySensorCore<T>,
+    version: Version,
     init: bool,
 }
 
@@ -1208,17 +1332,17 @@ impl<'a, T> Future for MyWaitChangedFut<'a, T> {
     type Output = SymResult<Version>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let node = (self.observer_data.static_area & SA_MASK_PTR) as *mut Node;
+        let node = self.static_area.node;
         if self.init {
             if unsafe { (*node).state.load(Ordering::Acquire) & Node::STATE_COMPLETE_BIT == 0 } {
                 return Poll::Pending;
             }
 
-            let version = self.core.version();
-            if self.observer_data.version != version {
+            let curr_version = self.core.version();
+            if self.version != curr_version {
                 // Do not rely on `Drop` trait to wake the next element. It may not be instantaneous.
                 unsafe {
-                    if !Node::cancel(node) {
+                    if Node::cancel(node).is_none() {
                         let next_node = Node::assume_wait_changed_next_node(node);
                         if next_node != null_mut() {
                             Node::assume_wait_changed_wake(node);
@@ -1227,12 +1351,12 @@ impl<'a, T> Future for MyWaitChangedFut<'a, T> {
                 }
 
                 self.init = false;
-                return Poll::Ready(version.as_result());
+                return Poll::Ready(curr_version.as_result());
             }
         } else {
-            let version = self.core.version();
-            if self.observer_data.version != version {
-                return Poll::Ready(version.as_result());
+            let curr_version = self.core.version();
+            if self.version != curr_version {
+                return Poll::Ready(curr_version.as_result());
             }
         }
 
@@ -1243,7 +1367,7 @@ impl<'a, T> Future for MyWaitChangedFut<'a, T> {
             Node::reuse_or_realloc(
                 node,
                 cx.waker().clone(),
-                self.observer_data.static_area & SA_MASK_TYPE == SA_TYPE_WAIT_CHANGED,
+                self.static_area.state == StaticRegionState::WaitChanged,
             )
         } {
             let node_ptr: *mut Node = node;
@@ -1254,9 +1378,10 @@ impl<'a, T> Future for MyWaitChangedFut<'a, T> {
 
             // Safety: No data initialization depends on the ordering of this.
             node.next.store(prev_head, Ordering::Relaxed);
-
-            let node: *mut Node = node;
-            self.observer_data.static_area = (node as usize) | SA_TYPE_WAIT_CHANGED;
+            *self.static_area = StaticRegion {
+                node,
+                state: StaticRegionState::WaitChanged,
+            };
         }
 
         self.init = true;
@@ -1271,9 +1396,9 @@ impl<'a, T> Drop for MyWaitChangedFut<'a, T> {
             return;
         }
 
-        let node = (self.observer_data.static_area & SA_MASK_PTR) as _;
+        let node = self.static_area.node;
 
-        if unsafe { Node::cancel(node) } {
+        if unsafe { Node::cancel(node).is_some() } {
             return;
         }
 
