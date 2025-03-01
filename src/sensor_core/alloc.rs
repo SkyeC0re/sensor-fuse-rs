@@ -11,7 +11,6 @@ use std::{
     future::poll_fn,
     mem,
     ops::{Deref, DerefMut},
-    ptr::NonNull,
     sync::atomic::AtomicU8,
 };
 
@@ -406,9 +405,7 @@ impl Node {
     /// If `detach = true`, it is also undefined behaviour to access the node again if the waker was returned.
     #[inline(always)]
     unsafe fn cancel(node: *mut Self) -> Option<Waker> {
-        let node = &mut *node;
-
-        let mut state = node.state.load(Ordering::Acquire);
+        let mut state = (*node).state.load(Ordering::Acquire);
         debug_assert_eq!(state & Self::STATE_CANCEL_BIT, 0);
 
         if state & (Self::STATE_COMPLETE_BIT) != 0 {
@@ -418,17 +415,7 @@ impl Node {
 
         // A perceived lock state does not guarantee that we are about to be completed (as is the case for a write node).
         // Wait until we have a lock to guarantee our state.
-        loop {
-            while state & Self::STATE_LOCK_BIT != 0 {
-                spin_loop();
-                state = node.state.load(Ordering::Relaxed);
-            }
-
-            state = node.state.fetch_or(Self::STATE_LOCK_BIT, Ordering::Acquire);
-            if state & Self::STATE_LOCK_BIT == 0 {
-                break;
-            }
-        }
+        state = Node::lock(node);
 
         if state & Self::STATE_COMPLETE_BIT != 0 {
             // We have already been completed. Nothing to do.
@@ -437,11 +424,10 @@ impl Node {
 
         // Get waker first with a cheap, bit level copy, allow other threads to continue and then spend the potential cost
         // of dropping the waker.
-        let waker = node.waker.assume_init_read();
-        node.state.store(
-            state ^ (Self::STATE_LOCK_BIT | Self::STATE_CANCEL_BIT),
-            Ordering::Release,
-        );
+        let waker = (*node).waker.assume_init_read();
+        (*node)
+            .state
+            .store(state | Self::STATE_CANCEL_BIT, Ordering::Release);
 
         Some(waker)
     }
@@ -499,18 +485,7 @@ impl Node {
     /// After this call completes it is undefined behaviour to access the node again, except for the case where `retired_only=true` and true is returned.
     #[inline(always)]
     unsafe fn complete_and_wake(node: *mut Self, retired_only: bool) -> bool {
-        let mut state;
-        loop {
-            state = (*node)
-                .state
-                .fetch_or(Self::STATE_LOCK_BIT, Ordering::AcqRel);
-
-            if state & Self::STATE_LOCK_BIT == 0 {
-                break;
-            }
-
-            spin_loop();
-        }
+        let state = Node::lock(node);
 
         if state == Self::STATE_DROP_BIT {
             drop(Box::from_raw(node));
@@ -586,7 +561,7 @@ impl<T> MySensorCore<T> {
     #[inline(always)]
     fn version(&self) -> Version {
         // Relaxed could work?
-        Version(self.version.load(Ordering::Acquire))
+        Version(self.version.load(Ordering::Relaxed))
     }
 
     #[inline(always)]
@@ -602,7 +577,53 @@ impl<T> MySensorCore<T> {
             return;
         }
 
-        unsafe { Node::assume_wait_changed_wake(node as *mut _) };
+        unsafe {
+            Node::assume_wait_changed_wake(node as *mut _);
+        }
+    }
+
+    #[inline(always)]
+    fn activate_idle_reads(&self) {
+        let idle_head = self.idle_reads_head.swap(null_mut(), Ordering::Acquire);
+
+        if idle_head == null_mut() {
+            return;
+        }
+
+        // Safety, when a new node is inserted, the head is set last with an acquire ordering. This cannot be zero
+        // if the head was non-zero.
+        let idle_tail = self.idle_reads_tail.swap(null_mut(), Ordering::Relaxed);
+
+        let old_tail = self.queue_tail.swap(idle_tail as usize, Ordering::AcqRel);
+
+        if old_tail == 0 {
+            // Ensure that the head is also properly zeroed. This will block on both a head still being cleared out and a sentinel bit being set on
+            // a zeroed head.
+            while self
+                .queue_head
+                .compare_exchange_weak(0, idle_head as usize, Ordering::Release, Ordering::Relaxed)
+                .is_err()
+            {
+                spin_loop();
+            }
+
+            // We are the new queue head, see if we can awake immediately, in case the lock has become inactive whilst we were inserted.
+            unsafe { self.wake_next_in_queue(false) };
+        } else {
+            unsafe {
+                (*((old_tail & Node::NEXT_PTR_MASK) as *mut Node))
+                    .next
+                    .store(idle_head as usize, Ordering::Release)
+            };
+        }
+    }
+
+    #[inline]
+    fn bump_version(&self) {
+        let _ = self.version.fetch_add(VERSION_BUMP, Ordering::Relaxed);
+
+        self.wake_waiters();
+        self.activate_idle_reads();
     }
 
     #[inline(always)]
@@ -988,11 +1009,6 @@ struct MyObserver<T, R: Deref<Target = MySensorCore<T>>> {
     version: Version,
 }
 
-struct ObserverData {
-    static_area: usize,
-    version: Version,
-}
-
 impl<T, R: Deref<Target = MySensorCore<T>>> MyObserver<T, R> {
     pub fn wait_changed(&mut self) -> MyWaitChangedFut<T> {
         self.static_area.ensure_init();
@@ -1345,7 +1361,7 @@ impl<'a, T> Future for MyWaitChangedFut<'a, T> {
                     if Node::cancel(node).is_none() {
                         let next_node = Node::assume_wait_changed_next_node(node);
                         if next_node != null_mut() {
-                            Node::assume_wait_changed_wake(node);
+                            Node::assume_wait_changed_wake(next_node);
                         }
                     }
                 }
