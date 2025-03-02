@@ -11,7 +11,7 @@ use std::{
     future::poll_fn,
     mem,
     ops::{Deref, DerefMut},
-    sync::atomic::AtomicU8,
+    sync::{atomic::AtomicU8, Arc},
 };
 
 use async_lock::{
@@ -557,6 +557,8 @@ struct MySensorCore<T> {
     data: UnsafeCell<T>,
 }
 
+unsafe impl<T> Sync for MySensorCore<T> where T: Send + Sync {}
+
 impl<T> MySensorCore<T> {
     #[inline(always)]
     fn version(&self) -> Version {
@@ -682,6 +684,8 @@ impl<T> MySensorCore<T> {
     /// # Safety
     ///
     /// The caller must have a readguard. `node_ptr` must point to an actual node in the Read-Write queue.
+    ///
+    /// `node_ptr` must be properly initialized from the perspective of the thread calling this function.
     #[inline(always)]
     unsafe fn wake_next_reader(&self, mut node_ptr: usize) {
         let node = (node_ptr & Node::NEXT_PTR_MASK) as *mut Node;
@@ -697,12 +701,11 @@ impl<T> MySensorCore<T> {
         };
 
         loop {
+            let next_node_ptr = self.try_reset_queue(node_ptr);
             let state = Node::lock(node);
 
             if state & (Node::STATE_DROP_BIT | Node::STATE_CANCEL_BIT) != 0 {
                 debug_assert_eq!(state & !(Node::STATE_DROP_BIT | Node::STATE_CANCEL_BIT), 0);
-
-                let next_node_ptr = self.try_reset_queue(node_ptr);
 
                 if state == Node::STATE_DROP_BIT {
                     drop(Box::from_raw(node));
@@ -733,9 +736,15 @@ impl<T> MySensorCore<T> {
                 // Safety: We have two read guards, and can simply decrease the reader count here.
                 let _ = self.readers.fetch_sub(1, Ordering::Relaxed);
 
-                // Relaxed ordering is sufficient here, nothing was changed and we do not require any other data.
-                (*node).state.store(0, Ordering::Relaxed);
+                self.queue_head.store(node_ptr, Ordering::Relaxed);
+
+                (*node).state.store(0, Ordering::Release);
                 return;
+            }
+
+            // Update the list head to points to the element **after** this node.
+            if let Some(next_node_ptr) = next_node_ptr {
+                self.queue_head.store(next_node_ptr, Ordering::Relaxed);
             }
 
             // Get waker first with a cheap, bit level copy, allow other threads to continue and then spend the potential cost
@@ -756,7 +765,7 @@ impl<T> MySensorCore<T> {
     /// If `holds_write_guard` is true caller is implicity passing a write guard to this function.
     #[inline(always)]
     unsafe fn wake_next_in_queue(&self, holds_write_guard: bool) {
-        let mut node_ptr = self.queue_head.load(Ordering::Acquire);
+        let mut node_ptr = self.queue_head.load(Ordering::Relaxed);
 
         if node_ptr <= Node::NEXT_SENTINEL_BIT {
             // Either the queue is empty or someone else has taken the responsibility to wake the next element.
@@ -768,45 +777,45 @@ impl<T> MySensorCore<T> {
         // a write guard before setting the sentinel bit, makes this a good place to force a write guard if we do not
         // already have one. If we cannot aqcuire one now, then it becomes whoever is blocking us' responsibility to wake.
         if !holds_write_guard {
-            match self.try_prioritized_write() {
-                Some(guard) => mem::forget(guard),
+            let guard = match self.try_prioritized_write() {
+                Some(guard) => guard,
                 None => return,
-            }
-        }
+            };
 
-        node_ptr = self.queue_head.load(Ordering::Acquire);
+            mem::forget(guard);
+            node_ptr = self.queue_head.load(Ordering::Acquire);
 
-        if node_ptr == 0 {
-            // Someone has intercepted us. Attempt a forceful write guard drop, blocking
-            // new elements from entering the queue.
-            match self.queue_head.compare_exchange(
-                0,
-                Node::NEXT_SENTINEL_BIT,
-                Ordering::Relaxed,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => {
-                    self.readers.store(0, Ordering::Relaxed);
-                    self.queue_head.store(0, Ordering::Release);
-                    return;
-                }
-                Err(new_node_ptr) => {
-                    // We have a write guard, sentinel bit could not have been set.
-                    debug_assert_ne!(new_node_ptr, Node::NEXT_SENTINEL_BIT);
+            if node_ptr == 0 {
+                // Someone has intercepted us. Attempt a forceful write guard drop, blocking
+                // new elements from entering the queue.
+                match self.queue_head.compare_exchange(
+                    0,
+                    Node::NEXT_SENTINEL_BIT,
+                    Ordering::Relaxed,
+                    Ordering::Acquire,
+                ) {
+                    Ok(_) => {
+                        self.readers.store(0, Ordering::Relaxed);
+                        self.queue_head.store(0, Ordering::Release);
+                        return;
+                    }
+                    Err(new_node_ptr) => {
+                        // We have a write guard, sentinel bit could not have been set.
+                        debug_assert_ne!(new_node_ptr, Node::NEXT_SENTINEL_BIT);
 
-                    node_ptr = new_node_ptr;
+                        node_ptr = new_node_ptr;
+                    }
                 }
             }
         }
 
         loop {
             let node = (node_ptr & Node::NEXT_PTR_MASK) as *mut Node;
+            let next_node_ptr = self.try_reset_queue(node_ptr);
             let state = Node::lock(node);
 
             if state & (Node::STATE_DROP_BIT | Node::STATE_CANCEL_BIT) != 0 {
                 debug_assert_eq!(state & !(Node::STATE_DROP_BIT | Node::STATE_CANCEL_BIT), 0);
-
-                let next_node_ptr = self.try_reset_queue(node_ptr);
 
                 if state == Node::STATE_DROP_BIT {
                     drop(Box::from_raw(node));
@@ -837,6 +846,7 @@ impl<T> MySensorCore<T> {
                         // We have a write guard, sentinel bit could not have been set.
                         debug_assert_ne!(new_node_ptr, Node::NEXT_SENTINEL_BIT);
 
+                        // Another node has been added to the queue, see if we can wake it.
                         node_ptr = new_node_ptr;
                         continue;
                     }
@@ -848,6 +858,11 @@ impl<T> MySensorCore<T> {
             // Appropriately downgrade the lock for readers.
             if node_ptr & Node::NEXT_IS_WRITER_BIT == 0 {
                 self.readers.store(1, Ordering::Relaxed);
+            }
+
+            // Update the list head to points to the element **after** this node.
+            if let Some(next_node_ptr) = next_node_ptr {
+                self.queue_head.store(next_node_ptr, Ordering::Release);
             }
 
             // Get waker first with a cheap, bit level copy, allow other threads to continue and then spend the potential cost
@@ -866,9 +881,35 @@ impl<T> MySensorCore<T> {
     ///
     /// # Safety
     ///
+    /// Must be called with either a read or write guard.
+    ///
     /// `possible_tail_node` should point to a valid node inside the the Read-Write queue.
+    ///
+    /// `possible_tail_node` must be properly initialized from the perspective of the thread calling this function.
     #[inline(always)]
     unsafe fn try_reset_queue(&self, possible_tail_node: usize) -> Option<usize> {
+        let next_node = self.try_reset_queue_tail(possible_tail_node);
+        if next_node.is_none() {
+            // Ensure that when another thread reads the queue head, that when it observes a zeroed head, that a non-zero tail can only
+            // exist because a new node is in the process of being attached and will soon update the queue head and that that tail
+            // does not still contain `possible_tail_node`.
+            self.queue_head.store(0, Ordering::Release);
+        }
+
+        next_node
+    }
+
+    /// Try to reset the Read-Write queue tail given a non-zero typed node that is currently in the queue.
+    ///
+    /// # Safety
+    ///
+    /// Must be called with either a read or write guard.
+    ///
+    /// `possible_tail_node` should point to a valid node inside the the Read-Write queue.
+    ///
+    /// `possible_tail_node` must be properly initialized from the perspective of the thread calling this function.
+    #[inline(always)]
+    unsafe fn try_reset_queue_tail(&self, possible_tail_node: usize) -> Option<usize> {
         let node = (possible_tail_node & Node::NEXT_PTR_MASK) as *mut Node;
 
         // Ensure that the next node's data is populated before any access to it.
@@ -882,10 +923,6 @@ impl<T> MySensorCore<T> {
             .compare_exchange(possible_tail_node, 0, Ordering::Relaxed, Ordering::Relaxed)
             .is_ok()
         {
-            // Ensure that when another thread reads the queue head, that when it observes a zeroed head, that a non-zero tail can only
-            // exist because a new node is in the process of being attached and will soon update the queue head and that that tail
-            // does not still contain `possible_tail_node`.
-            self.queue_head.store(0, Ordering::Release);
             return None;
         }
 
@@ -922,18 +959,6 @@ impl<'a, T> Drop for ReadGuard<'a, T> {
         debug_assert!(remaining != 0);
 
         if remaining != 1 {
-            return;
-        }
-
-        // We were just the last reader. Try to reacquire ourselves, to maintain the invariants of `wake_next_in_queue`. If
-        // we could not, then someone else is holding the lock and it is no longer our responsibility to wake the next element
-        // in the queue.
-        if self
-            .core
-            .readers
-            .compare_exchange(0, 1, Ordering::Relaxed, Ordering::Relaxed)
-            .is_err()
-        {
             return;
         }
 
@@ -980,6 +1005,11 @@ struct StaticRegion {
     node: *mut Node,
     state: StaticRegionState,
 }
+
+// Safety: we guarantee that `node` always represents an allocated `Node` value
+// generated by `Box::into_raw` (or null).
+unsafe impl Send for StaticRegion {}
+unsafe impl Sync for StaticRegion {}
 
 impl StaticRegion {
     #[inline(always)]
@@ -1225,6 +1255,54 @@ impl<'a, T, F: FnMut(&T) -> bool> Future for MyWaitForFut<'a, T, F> {
     }
 }
 
+struct MyWriter<T, R: Deref<Target = MySensorCore<T>>> {
+    core: R,
+    static_area: StaticRegion,
+}
+
+impl<T, R: Deref<Target = MySensorCore<T>>> MyWriter<T, R> {
+    pub fn write(&mut self) -> MyWriteFut<T> {
+        self.static_area.ensure_init();
+        MyWriteFut {
+            core: &self.core,
+            static_area: &mut self.static_area,
+            init: false,
+        }
+    }
+}
+
+impl<T> MyWriter<T, Arc<MySensorCore<T>>> {
+    pub fn new(init: T) -> Self {
+        Self {
+            core: Arc::new(MySensorCore {
+                queue_head: AtomicUsize::new(0),
+                queue_tail: AtomicUsize::new(0),
+                idle_reads_head: AtomicPtr::new(null_mut()),
+                idle_reads_tail: AtomicPtr::new(null_mut()),
+                change_waiters_head: AtomicUsize::new(Node::WAIT_CHANGED_TAIL),
+                num_writers: AtomicUsize::new(1),
+                writes_queued: AtomicUsize::new(0),
+                readers: AtomicUsize::new(0),
+                version: AtomicUsize::new(0),
+                data: UnsafeCell::new(init),
+            }),
+            static_area: StaticRegion::new(),
+        }
+    }
+}
+
+impl<T, R: Deref<Target = MySensorCore<T>> + Clone> MyWriter<T, R> {
+    pub fn subscribe(&self) -> MyObserver<T, R> {
+        let mut version = self.core.version();
+        version.decrement();
+        MyObserver {
+            core: self.core.clone(),
+            static_area: StaticRegion::new(),
+            version,
+        }
+    }
+}
+
 struct MyWriteFut<'a, T> {
     static_area: &'a mut StaticRegion,
     core: &'a MySensorCore<T>,
@@ -1244,6 +1322,7 @@ impl<'a, T> Future for MyWriteFut<'a, T> {
             self.init = false;
 
             // Whoever woke us has generated a write guard for us.
+            let _ = self.core.writes_queued.fetch_sub(1, Ordering::Relaxed);
             return Poll::Ready(WriteGuard { core: self.core });
         }
 
@@ -1256,7 +1335,7 @@ impl<'a, T> Future for MyWriteFut<'a, T> {
             Node::reuse_or_realloc(
                 node,
                 cx.waker().clone(),
-                node_type == StaticRegionState::Read || node_type == StaticRegionState::Write,
+                node_type == StaticRegionState::Write,
             )
         } {
             let node_as_ptr: *mut Node = node;
@@ -1268,28 +1347,21 @@ impl<'a, T> Future for MyWriteFut<'a, T> {
                 .swap(typed_static_area, Ordering::AcqRel);
 
             if old_tail == 0 {
-                // Ensure that the head is also properly zeroed. This will block on both a head still being cleared out and a sentinel bit being set on
-                // a zeroed head.
-                while self
-                    .core
-                    .queue_head
-                    .compare_exchange_weak(
-                        0,
-                        typed_static_area,
-                        Ordering::Release,
-                        Ordering::Relaxed,
-                    )
-                    .is_err()
-                {
-                    spin_loop();
-                }
-
                 // We are the new queue head, see if we can awake immediately, in case the lock has become inactive whilst we were inserted.
                 if let Some(guard) = self.core.try_prioritized_write() {
                     unsafe {
                         // Safety: We again have exlusive access to our node.
                         node.waker.assume_init_drop();
                         *node.state.get_mut() = Node::STATE_COMPLETE_BIT;
+
+                        if let Some(next_node) = self
+                            .core
+                            .try_reset_queue_tail(node_as_ptr as usize | Node::NEXT_IS_WRITER_BIT)
+                        {
+                            // Safety: we do not need to wait for the head to be zeroed, we have a write guard, so
+                            // no one could have set the sentinel bit and the head will have been set.
+                            self.core.queue_head.store(next_node, Ordering::Release);
+                        }
 
                         *self.static_area = StaticRegion {
                             node,
@@ -1298,6 +1370,23 @@ impl<'a, T> Future for MyWriteFut<'a, T> {
                     }
 
                     return Poll::Ready(guard);
+                } else {
+                    // Ensure that the head is also properly zeroed, then announce ourselves as the new head.
+                    // This will block on both a head still being cleared out and a sentinel bit being set on
+                    // a zeroed head.
+                    while self
+                        .core
+                        .queue_head
+                        .compare_exchange_weak(
+                            0,
+                            typed_static_area,
+                            Ordering::Release,
+                            Ordering::Relaxed,
+                        )
+                        .is_err()
+                    {
+                        spin_loop();
+                    }
                 }
             } else {
                 unsafe {
@@ -1317,6 +1406,7 @@ impl<'a, T> Future for MyWriteFut<'a, T> {
             state: StaticRegionState::Write,
         };
         self.init = true;
+        let _ = self.core.writes_queued.fetch_add(1, Ordering::Relaxed);
 
         Poll::Pending
     }
@@ -1329,6 +1419,7 @@ impl<'a, T> Drop for MyWriteFut<'a, T> {
         }
 
         if unsafe { Node::cancel(self.static_area.node).is_some() } {
+            let _ = self.core.writes_queued.fetch_sub(1, Ordering::Relaxed);
             return;
         }
 
@@ -1423,6 +1514,43 @@ impl<'a, T> Drop for MyWaitChangedFut<'a, T> {
             if next_node != null_mut() {
                 Node::assume_wait_changed_wake(next_node);
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use std::thread;
+
+    use futures::executor::block_on;
+
+    use super::MyWriter;
+
+    #[test]
+    fn test_this() {
+        let mut writer = MyWriter::new(5);
+
+        for i in 0..3 {
+            let mut reader = writer.subscribe();
+
+            thread::spawn(move || {
+                let val = *block_on(reader.wait_for(|x| *x > 100)).0;
+                println!("FOUND {val} > 100 for thread {i}");
+            });
+        }
+
+        println!("Heree");
+        for i in -1000..103 {
+            println!("{i} start");
+            let mut guard = block_on(writer.write());
+
+            println!("THIS");
+
+            *guard = i;
+            guard.core.bump_version();
+
+            drop(guard);
+            println!("{i} end");
         }
     }
 }
