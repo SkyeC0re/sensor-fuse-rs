@@ -725,11 +725,12 @@ impl<T> MySensorCore<T> {
         }
 
         loop {
-            let next_node_ptr = self.try_reset_queue(node);
             let state = Node::lock(node);
 
             if state & (Node::STATE_DROP_BIT | Node::STATE_CANCEL_BIT) != 0 {
                 debug_assert_eq!(state & !(Node::STATE_DROP_BIT | Node::STATE_CANCEL_BIT), 0);
+
+                let next_node_ptr = self.try_reset_queue(node);
 
                 if state == Node::STATE_DROP_BIT {
                     drop(Box::from_raw(node));
@@ -1154,15 +1155,13 @@ impl<'a, T> Future for MyReadFut<'a, T> {
                 // We are the new queue head, see if we can awake immediately, in case the lock has become inactive whilst we were inserted.
                 if let Some(guard) = self.core.try_prioritized_read() {
                     unsafe {
-                        // No one can jump over us here.
-                        let next_node = self.core.try_reset_queue(node);
-
                         // We were awoken. Have we been removed from the queue?
-                        let has_extra_guard = Node::cancel(node).is_none();
-
-                        // We are now responsible for waking.
-                        if !next_node.is_null() {
-                            self.core.wake_next_reader(next_node, has_extra_guard);
+                        if Node::cancel(node).is_none() {
+                            // No one can jump over us here and we are now responsible for waking the next node.
+                            let next_node = self.core.try_reset_queue(node);
+                            if !next_node.is_null() {
+                                self.core.wake_next_reader(next_node, true);
+                            }
                         }
 
                         // Safety: We again have exlusive access to our node.
