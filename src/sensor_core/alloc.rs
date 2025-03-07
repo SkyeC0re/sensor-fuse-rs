@@ -631,14 +631,32 @@ impl<T> MySensorCore<T> {
             // a zeroed head.
             while self
                 .queue_head
-                .compare_exchange_weak(null_mut(), idle_head, Ordering::Release, Ordering::Relaxed)
+                .compare_exchange_weak(
+                    null_mut(),
+                    unsafe { Node::sentinel() },
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                )
                 .is_err()
             {
                 spin_loop();
             }
 
-            // We are the new queue head, see if we can awake immediately, in case the lock has become inactive whilst we were inserted.
-            unsafe { self.wake_next_in_queue(false) };
+            let guard = match self.try_prioritized_read() {
+                Some(guard) => guard,
+                None => {
+                    self.queue_head.store(idle_head, Ordering::Release);
+                    return;
+                }
+            };
+
+            self.queue_head.store(null_mut(), Ordering::Relaxed);
+            unsafe { self.wake_next_reader(idle_head, guard) };
+
+            // // TODO Fix. Must get readguard first....
+
+            // // We are the new queue head, see if we can awake immediately, in case the lock has become inactive whilst we were inserted.
+            // unsafe { self.wake_next_in_queue(false) };
         } else {
             unsafe { (*old_tail).next.store(idle_head, Ordering::Release) };
         }
@@ -711,18 +729,18 @@ impl<T> MySensorCore<T> {
     ///
     /// `node_ptr` must be properly initialized from the perspective of the thread calling this function.
     #[inline(always)]
-    unsafe fn wake_next_reader(&self, mut node: *mut Node, has_extra_guard: bool) {
-        if !has_extra_guard {
-            // We already have a readguard, this can only fail because we have reached the maximum amount of readers.
-            // In this case, leave the current node in the queue and come back to it later.
-            match self.try_prioritized_read() {
-                Some(guard) => mem::forget(guard),
-                None => {
-                    self.queue_head.store(node, Ordering::Release);
-                    return;
-                }
-            };
-        }
+    unsafe fn wake_next_reader(&self, mut node: *mut Node, guard: ReadGuard<T>) {
+        // if !has_extra_guard {
+        //     // We already have a readguard, this can only fail because we have reached the maximum amount of readers.
+        //     // In this case, leave the current node in the queue and come back to it later.
+        //     match self.try_prioritized_read() {
+        //         Some(guard) => mem::forget(guard),
+        //         None => {
+        //             self.queue_head.store(node, Ordering::Release);
+        //             return;
+        //         }
+        //     };
+        // }
 
         loop {
             let state = Node::lock(node);
@@ -730,7 +748,7 @@ impl<T> MySensorCore<T> {
             if state & (Node::STATE_DROP_BIT | Node::STATE_CANCEL_BIT) != 0 {
                 debug_assert_eq!(state & !(Node::STATE_DROP_BIT | Node::STATE_CANCEL_BIT), 0);
 
-                let next_node_ptr = self.try_reset_queue(node);
+                let next_node_ptr = self.try_reset_queue_tail(node);
 
                 if state == Node::STATE_DROP_BIT {
                     drop(Box::from_raw(node));
@@ -742,9 +760,6 @@ impl<T> MySensorCore<T> {
 
                 if next_node_ptr.is_null() {
                     // Nothing to do, list is cleared.
-
-                    // Safety: We have two read guards, and can simply decrease the reader count here.
-                    let _ = self.readers.fetch_sub(1, Ordering::Relaxed);
                     return;
                 } else {
                     node = next_node_ptr;
@@ -756,9 +771,6 @@ impl<T> MySensorCore<T> {
 
             // Uncancelled write detected. Stop waking here.
             if (*node).tp == NodeType::Write {
-                // Safety: We have two read guards, and can simply decrease the reader count here.
-                let _ = self.readers.fetch_sub(1, Ordering::Relaxed);
-
                 self.queue_head.store(node, Ordering::Release);
 
                 (*node).state.store(0, Ordering::Release);
@@ -780,6 +792,7 @@ impl<T> MySensorCore<T> {
             waker.wake();
 
             // Implicitly pass the extrenuous read guard to the awoken node.
+            mem::forget(guard);
             return;
         }
     }
@@ -789,13 +802,12 @@ impl<T> MySensorCore<T> {
     /// If `holds_write_guard` is true caller is implicity passing a write guard to this function.
     #[inline(always)]
     unsafe fn wake_next_in_queue(&self, holds_write_guard: bool) {
-        let mut node = self.queue_head.load(Ordering::Relaxed);
-
         // There is something in the queue. Either it is because we are holding a write guard, or it is likely a write
         // following some reads. The common path of this latter case combined with the guarantees we get by having
         // a write guard before setting the sentinel bit, makes this a good place to force a write guard if we do not
         // already have one. If we cannot aqcuire one now, then it becomes whoever is blocking us' responsibility to wake.
         if !holds_write_guard {
+            let node = self.queue_head.load(Ordering::Relaxed);
             if node.is_null() || node == Node::sentinel() {
                 // Either the queue is empty or someone else has taken the responsibility to wake the next element.
                 return;
@@ -807,7 +819,15 @@ impl<T> MySensorCore<T> {
             };
 
             mem::forget(guard);
+        }
+
+        let mut node;
+        loop {
             node = self.queue_head.load(Ordering::Acquire);
+            if node != Node::sentinel() {
+                break;
+            }
+            spin_loop();
         }
 
         if node.is_null() {
@@ -833,6 +853,16 @@ impl<T> MySensorCore<T> {
             }
         }
 
+        self.queue_head.store(null_mut(), Ordering::Relaxed);
+
+        self.wake_next_with_write_guard(node);
+    }
+
+    /// # Safety
+    ///
+    /// If `holds_write_guard` is true caller is implicity passing a write guard to this function.
+    #[inline(always)]
+    unsafe fn wake_next_with_write_guard(&self, mut node: *mut Node) {
         loop {
             let state = Node::lock(node);
 
@@ -840,7 +870,7 @@ impl<T> MySensorCore<T> {
                 debug_assert_eq!(state & !(Node::STATE_DROP_BIT | Node::STATE_CANCEL_BIT), 0);
 
                 // Only now is it our responsibility to find the next element.
-                let next_node = self.try_reset_queue(node);
+                let next_node = self.try_reset_queue_tail(node);
 
                 if state == Node::STATE_DROP_BIT {
                     drop(Box::from_raw(node));
@@ -880,9 +910,9 @@ impl<T> MySensorCore<T> {
 
             debug_assert_eq!(state, 0);
 
-            // Appropriately downgrade the lock for reads.
             if (*node).tp != NodeType::Write {
-                self.readers.store(1, Ordering::Relaxed);
+                // Appropriately downgrade the lock for reads.
+                self.readers.store(1, Ordering::Release);
             }
 
             // Not needed? Instead make it the write future's responsiblity to clear itself from the queue head.
@@ -981,7 +1011,7 @@ impl<'a, T> Deref for ReadGuard<'a, T> {
 
 impl<'a, T> Drop for ReadGuard<'a, T> {
     fn drop(&mut self) {
-        let remaining = self.core.readers.fetch_sub(1, Ordering::Relaxed);
+        let remaining = self.core.readers.fetch_sub(1, Ordering::Release);
 
         debug_assert!(remaining != 0);
 
@@ -1107,9 +1137,13 @@ impl<'a, T> Future for MyReadFut<'a, T> {
             }
 
             unsafe {
-                let next_ptr = self.core.try_reset_queue(node);
+                let next_ptr = self.core.try_reset_queue_tail(node);
                 if !next_ptr.is_null() {
-                    self.core.wake_next_reader(next_ptr, false);
+                    if let Some(guard) = self.core.try_prioritized_read() {
+                        self.core.wake_next_reader(next_ptr, guard);
+                    } else {
+                        self.core.queue_head.store(next_ptr, Ordering::Release);
+                    }
                 }
             }
 
@@ -1132,6 +1166,7 @@ impl<'a, T> Future for MyReadFut<'a, T> {
                 node_type == NodeType::Read,
             )
         } {
+            assert_eq!(*node.state.get_mut(), 0);
             self.static_area.0 = node;
 
             let old_tail = self
@@ -1155,18 +1190,22 @@ impl<'a, T> Future for MyReadFut<'a, T> {
                 // We are the new queue head, see if we can awake immediately, in case the lock has become inactive whilst we were inserted.
                 if let Some(guard) = self.core.try_prioritized_read() {
                     unsafe {
-                        // We were awoken. Have we been removed from the queue?
+                        // We were awoken and it is our responsibility to wake or reset the queue.
                         if Node::cancel(node).is_none() {
                             // No one can jump over us here and we are now responsible for waking the next node.
                             let next_node = self.core.try_reset_queue(node);
-                            if !next_node.is_null() {
-                                self.core.wake_next_reader(next_node, true);
+                            if next_node.is_null() {
+                                // Get rid of the extra guard that was generated for us.
+                                let _ = self.core.readers.fetch_sub(1, Ordering::Relaxed);
+                            } else {
+                                // We are handing the extra readguard to the next reader if possible.
+                                self.core
+                                    .wake_next_reader(next_node, ReadGuard { core: self.core });
                             }
                         }
 
-                        // Safety: We again have exlusive access to our node.
-                        node.waker.assume_init_drop();
-                        *node.state.get_mut() = Node::STATE_COMPLETE_BIT;
+                        // You do not get to do this. You have cancelled.
+                        // *node.state.get_mut() = Node::STATE_COMPLETE_BIT;
 
                         return Poll::Ready(guard);
                     }
@@ -1194,15 +1233,16 @@ impl<'a, T> Drop for MyReadFut<'a, T> {
             return;
         }
 
+        let guard = ReadGuard { core: self.core };
+
         // It is our responsibility to wake the next element in queue if any, and to drop the read guard
         // that was passed to us.
         unsafe {
-            let next_node = self.core.try_reset_queue(node);
+            let next_node = self.core.try_reset_queue_tail(node);
             if !next_node.is_null() {
-                self.core.wake_next_reader(next_node, false);
+                self.core.wake_next_reader(next_node, guard);
             }
         }
-        drop(ReadGuard { core: self.core });
     }
 }
 
@@ -1331,16 +1371,15 @@ impl<'a, T> Future for MyWriteFut<'a, T> {
                 return Poll::Pending;
             }
 
-            self.init = false;
-
             // Update the queue head to point to the next element if any.
-            let next_node = unsafe { self.core.try_reset_queue(node) };
+            let next_node = unsafe { self.core.try_reset_queue_tail(node) };
             if !next_node.is_null() {
                 self.core.queue_head.store(next_node, Ordering::Release);
             }
 
             // Whoever woke us has generated a write guard for us.
             let _ = self.core.writes_queued.fetch_sub(1, Ordering::Relaxed);
+            self.init = false;
             return Poll::Ready(WriteGuard { core: self.core });
         }
 
@@ -1410,13 +1449,20 @@ impl<'a, T> Drop for MyWriteFut<'a, T> {
             return;
         }
 
+        let _ = self.core.writes_queued.fetch_sub(1, Ordering::Relaxed);
+
         if unsafe { Node::cancel(self.static_area.0).is_some() } {
-            let _ = self.core.writes_queued.fetch_sub(1, Ordering::Relaxed);
             return;
         }
 
-        // It is our responsibility to drop the write guard that was passed to us.
-        drop(WriteGuard { core: self.core });
+        let next_node = unsafe { self.core.try_reset_queue_tail(self.static_area.0) };
+
+        // It is our responsibility to drop or pass the write guard that was passed to us.
+        if next_node.is_null() {
+            drop(WriteGuard { core: self.core });
+        } else {
+            unsafe { self.core.wake_next_with_write_guard(next_node) };
+        }
     }
 }
 
@@ -1507,7 +1553,7 @@ impl<'a, T> Drop for MyWaitChangedFut<'a, T> {
 
 #[cfg(test)]
 mod test {
-    use std::thread;
+    use std::{hint::spin_loop, thread};
 
     use futures::executor::block_on;
 
@@ -1517,27 +1563,34 @@ mod test {
     fn test_this() {
         let mut writer = MyWriter::new(5);
 
-        for i in 0..3 {
+        for i in 0..10 {
             let mut reader = writer.subscribe();
 
             thread::spawn(move || {
-                let val = *block_on(reader.wait_for(|x| *x > 100)).0;
-                println!("FOUND {val} > 100 for thread {i}");
+                let mut prev = 100;
+                while prev != 10000 {
+                    prev = *block_on(reader.wait_for(|x| *x > prev)).0;
+
+                    for i in 0..1000 {
+                        spin_loop();
+                    }
+                    if prev == 1000 {
+                        println!("FOUND {prev} for thread {i}");
+                    }
+                }
             });
         }
 
         println!("Heree");
-        for i in -1000..103 {
-            println!("{i} start");
+        for i in -1000..20000 {
+            // println!("{i} start");
             let mut guard = block_on(writer.write());
-
-            println!("THIS");
 
             *guard = i;
             guard.core.bump_version();
 
             drop(guard);
-            println!("{i} end");
+            // println!("{i} end");
         }
     }
 }
