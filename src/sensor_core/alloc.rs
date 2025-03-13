@@ -880,19 +880,22 @@ impl<T> MySensorCore<T> {
     /// If `holds_write_guard` is true caller is implicity passing a write guard to this function.
     #[inline(always)]
     unsafe fn wake_next_in_queue_no_guard(&self) {
-        let node = self.queue_head.load(Ordering::Acquire);
+        // If the queue head is zero, we need to ensure that the dropped read guard is observed properly by any node inserting into the queue.
+        let node = match self.queue_head.compare_exchange(
+            null_mut(),
+            null_mut(),
+            Ordering::Release,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => return,
+            Err(e) => {
+                if e == Node::sentinel() {
+                    return;
+                }
 
-        if node <= Node::sentinel() {
-            // Either the list is empty or someone else is busy waking. We have no lock preventing them and as such they will be
-            // able to do everything we would have been. Safe to return here. Err.. we could be the reason another wake_next_no_guard has failed. We need
-            // be sure we are not the issue.
-            for _ in 0..10 {
-                eprintln!("v: {:?}", self.queue_head.load(Ordering::Acquire));
+                e
             }
-            eprintln!("WNL not relevant {:?}", node);
-
-            return;
-        }
+        };
 
         if self
             .queue_head
