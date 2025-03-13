@@ -35,3 +35,4 @@ harness = false
 alloc = []
 std = ["alloc"]
 default = ["std"]
+dev-miri-logs = []

@@ -11,7 +11,6 @@ use std::{
     future::poll_fn,
     mem,
     ops::{Deref, DerefMut},
-    ptr::NonNull,
     sync::{atomic::AtomicU8, Arc},
 };
 
@@ -25,6 +24,13 @@ use futures::FutureExt;
 use crate::{SymResult, Version};
 
 use super::{SensorCore, SensorCoreAsync, CLOSED_BIT, VERSION_BUMP};
+
+macro_rules! miri_log {
+    ($($arg:tt)*) => {
+        #[cfg(feature = "dev-miri-logs")]
+        println!($($arg)*)
+    };
+}
 
 const INIT_BIT: usize = 1;
 const DROP_BIT: usize = 2;
@@ -582,7 +588,7 @@ struct MySensorCore<T> {
     change_waiters_head: AtomicPtr<Node>,
     num_writers: AtomicUsize,
     writes_queued: AtomicUsize,
-    readers: AtomicUsize,
+    lock_state: AtomicUsize,
     version: AtomicUsize,
     data: UnsafeCell<T>,
 }
@@ -685,22 +691,20 @@ impl<T> MySensorCore<T> {
     /// Get a prioritized read lock.
     #[inline(always)]
     fn try_prioritized_read(&self) -> Option<ReadGuard<T>> {
-        let mut readers = self.readers.load(Ordering::Relaxed);
-        while readers < usize::MAX - 1 {
-            match self.readers.compare_exchange_weak(
-                readers,
-                readers + 1,
+        let mut lock_state = self.lock_state.load(Ordering::Relaxed);
+        while lock_state < usize::MAX - 1 {
+            match self.lock_state.compare_exchange_weak(
+                lock_state,
+                lock_state + 1,
                 Ordering::Acquire,
                 Ordering::Relaxed,
             ) {
                 Ok(_) => return Some(ReadGuard { core: self }),
-                Err(e) => readers = e,
+                Err(e) => lock_state = e,
             }
 
             spin_loop();
         }
-
-        eprintln!("read fail on usize::MAX {}", readers == usize::MAX);
 
         None
     }
@@ -718,12 +722,12 @@ impl<T> MySensorCore<T> {
     #[inline(always)]
     fn try_prioritized_write(&self) -> Option<WriteGuard<T>> {
         match self
-            .readers
+            .lock_state
             .compare_exchange(0, usize::MAX, Ordering::Acquire, Ordering::Relaxed)
         {
             Ok(_) => {}
-            Err(e) => {
-                eprintln!("W acq err {e}");
+            Err(_e) => {
+                miri_log!("write guard acq fail, lock state: {_e}");
                 return None;
             }
         }
@@ -816,7 +820,7 @@ impl<T> MySensorCore<T> {
 
         if node.is_null() {
             // Queue is now empty. Open the lock, and **then** allow new elements into the queue.
-            self.readers.store(0, Ordering::Release);
+            self.lock_state.store(0, Ordering::Release);
             self.queue_head.store(null_mut(), Ordering::Release);
             return;
         }
@@ -851,7 +855,7 @@ impl<T> MySensorCore<T> {
                     continue;
                 }
 
-                self.readers.store(0, Ordering::Release);
+                self.lock_state.store(0, Ordering::Release);
                 self.queue_head.store(null_mut(), Ordering::Release);
                 return;
             }
@@ -860,7 +864,7 @@ impl<T> MySensorCore<T> {
 
             if (*node).tp != NodeType::Write {
                 // Appropriately downgrade the lock for reads.
-                self.readers.store(1, Ordering::Release);
+                self.lock_state.store(1, Ordering::Release);
             }
 
             // Get waker first with a cheap, bit level copy, allow other threads to continue and then spend the potential cost
@@ -881,6 +885,8 @@ impl<T> MySensorCore<T> {
     #[inline(always)]
     unsafe fn wake_next_in_queue_no_guard(&self) {
         // If the queue head is zero, we need to ensure that the dropped read guard is observed properly by any node inserting into the queue.
+        // If we do not do this seemingly redundant CAS, then it is possible for a write to insert itself into the queue and find the lock not
+        // empty
         let node = match self.queue_head.compare_exchange(
             null_mut(),
             null_mut(),
@@ -892,7 +898,6 @@ impl<T> MySensorCore<T> {
                 if e == Node::sentinel() {
                     return;
                 }
-
                 e
             }
         };
@@ -903,7 +908,7 @@ impl<T> MySensorCore<T> {
             .is_err()
         {
             // The list head has changed since last viewed and we are definitely not needed anymore.
-            eprintln!("WNL Head changed");
+            miri_log!("WNIQNG head changed");
             return;
         }
 
@@ -911,6 +916,8 @@ impl<T> MySensorCore<T> {
     }
 
     /// # Safety
+    ///
+    /// Should only be called by the drop of a last read guard on the lock.
     ///
     #[inline(always)]
     unsafe fn wake_next_no_guard(&self, mut node: *mut Node) {
@@ -961,7 +968,7 @@ impl<T> MySensorCore<T> {
             };
 
             if !lock_acquired {
-                eprintln!("WNL Missed lock on {:?} : {:?}", node, (*node).tp);
+                miri_log!("WNNG missed lock on {:?} : {:?}", node, (*node).tp);
                 (*node).state.store(state, Ordering::Release);
                 self.queue_head.store(node, Ordering::Release);
 
@@ -980,7 +987,7 @@ impl<T> MySensorCore<T> {
                 return;
             }
 
-            eprintln!("WNL wake on {:?} : {:?}", node, (*node).tp);
+            miri_log!("WNNG wake on {:?} : {:?}", node, (*node).tp);
             // Get waker first with a cheap, bit level copy, allow other threads to continue and then spend the potential cost
             // of waking.
             let waker = (*node).waker.assume_init_read();
@@ -1049,18 +1056,18 @@ impl<'a, T> Deref for ReadGuard<'a, T> {
 
 impl<'a, T> Drop for ReadGuard<'a, T> {
     fn drop(&mut self) {
-        let remaining = self.core.readers.fetch_sub(1, Ordering::Release);
+        let lock_state = self.core.lock_state.fetch_sub(1, Ordering::Release);
 
-        debug_assert!(remaining != 0);
+        debug_assert!(lock_state != 0);
 
-        eprintln!("RD {remaining}");
+        miri_log!("read guard drop, lock state: {lock_state}");
 
-        if remaining != 1 {
+        if lock_state != 1 {
             return;
         }
 
         unsafe { self.core.wake_next_in_queue_no_guard() };
-        eprintln!("RD End");
+        miri_log!("WNIQNG end");
     }
 }
 
@@ -1084,25 +1091,9 @@ impl<'a, T> DerefMut for WriteGuard<'a, T> {
 
 impl<'a, T> Drop for WriteGuard<'a, T> {
     fn drop(&mut self) {
-        eprintln!(
-            "WD {} {:?}",
-            self.core.version().0,
-            self.core.queue_head.load(Ordering::Relaxed)
-        );
+        miri_log!("write guard drop");
         unsafe { self.core.wake_next_in_queue() };
-        eprintln!("WD End");
     }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
-enum StaticRegionState {
-    Uninitialized = 0,
-    Free = 1,
-    Write = 2,
-    Read = 3,
-    IdleRead = 4,
-    WaitChanged = 5,
 }
 
 struct StaticRegion(*mut Node);
@@ -1180,7 +1171,7 @@ impl<'a, T> Future for MyReadFut<'a, T> {
         let node = self.static_area.0;
         if self.init {
             if unsafe { (*node).state.load(Ordering::Acquire) & Node::STATE_COMPLETE_BIT == 0 } {
-                eprintln!("R Spurious: {:?}", self.static_area.0);
+                miri_log!("read spurious: {:?}", self.static_area.0);
                 return Poll::Pending;
             }
 
@@ -1196,7 +1187,7 @@ impl<'a, T> Future for MyReadFut<'a, T> {
             }
 
             self.init = false;
-            eprintln!("R awoken: {:?}", self.static_area.0);
+            miri_log!("read awoken: {:?}", self.static_area.0);
             // Whoever woke us has generated a read guard for us.
             return Poll::Ready(ReadGuard { core: self.core });
         }
@@ -1248,7 +1239,7 @@ impl<'a, T> Future for MyReadFut<'a, T> {
                         )
                         .is_err()
                     {
-                        eprintln!("R2 Pending: {:?}", self.static_area.0);
+                        miri_log!("read pending 2: {:?}", self.static_area.0);
                         self.init = true;
                         return Poll::Pending;
                     }
@@ -1270,20 +1261,16 @@ impl<'a, T> Future for MyReadFut<'a, T> {
                         (*node).waker.assume_init_drop();
                         *(*node).state.get_mut() = Node::STATE_COMPLETE_BIT;
 
-                        eprintln!("R Self wake: {:?}", self.static_area.0);
+                        miri_log!("read self wake: {:?}", self.static_area.0);
                         return Poll::Ready(guard);
                     }
-                } else {
-                    eprintln!("R failed priority read {:?}", self.static_area.0);
                 }
             } else {
                 unsafe { (*old_tail).next.store(node, Ordering::Release) };
             }
-        } else {
-            eprintln!("R inq reset {:?}", self.static_area.0);
         }
 
-        eprintln!("R Pending: {:?}", self.static_area.0);
+        miri_log!("read pending: {:?}", self.static_area.0);
         self.init = true;
 
         Poll::Pending
@@ -1405,7 +1392,7 @@ impl<T> MyWriter<T, Arc<MySensorCore<T>>> {
                 change_waiters_head: AtomicPtr::new(null_mut()),
                 num_writers: AtomicUsize::new(1),
                 writes_queued: AtomicUsize::new(0),
-                readers: AtomicUsize::new(0),
+                lock_state: AtomicUsize::new(0),
                 version: AtomicUsize::new(0),
                 data: UnsafeCell::new(init),
             }),
@@ -1451,7 +1438,6 @@ impl<'a, T> Future for MyWriteFut<'a, T> {
             let _ = self.core.writes_queued.fetch_sub(1, Ordering::Relaxed);
 
             // Whoever woke us has generated a write guard for us.
-
             self.init = false;
             return Poll::Ready(WriteGuard { core: self.core });
         }
@@ -1469,7 +1455,6 @@ impl<'a, T> Future for MyWriteFut<'a, T> {
                 node_type == NodeType::Write || node_type == NodeType::Read,
             )
         } {
-            assert_ne!(node as *mut _, null_mut());
             self.static_area.0 = node;
 
             let old_tail = self
@@ -1488,7 +1473,6 @@ impl<'a, T> Future for MyWriteFut<'a, T> {
                     .compare_exchange_weak(null_mut(), node, Ordering::AcqRel, Ordering::Relaxed)
                     .is_err()
                 {
-                    eprintln!("loop");
                     spin_loop();
                 }
 
@@ -1524,9 +1508,8 @@ impl<'a, T> Future for MyWriteFut<'a, T> {
 
                     return Poll::Ready(guard);
                 }
-                eprintln!("W empty missed lock");
+                miri_log!("write missed lock: {:?}", self.static_area.0);
             } else {
-                eprintln!("W old tail: {:?}", old_tail);
                 unsafe { (*old_tail).next.store(node, Ordering::Release) };
             }
         }
@@ -1534,7 +1517,7 @@ impl<'a, T> Future for MyWriteFut<'a, T> {
         let _ = self.core.writes_queued.fetch_add(1, Ordering::Relaxed);
         self.init = true;
 
-        eprintln!("W Pending");
+        miri_log!("write pending: {:?}", self.static_area.0);
         Poll::Pending
     }
 }
@@ -1558,7 +1541,7 @@ impl<'a, T> Drop for MyWriteFut<'a, T> {
             // We need to first downgrade to a read guard, then unset the sentinel then drop the read guard. If we do not do
             // it this way free the lock immediately, there is a chance that a reader could have come in as soon as we unlocked,
             // completed and gave up on waking when it saw the sentinel, leading to no awaking even with elements in the queue.
-            self.core.readers.store(1, Ordering::Release);
+            self.core.lock_state.store(1, Ordering::Release);
             self.core.queue_head.store(null_mut(), Ordering::Release);
             drop(ReadGuard { core: self.core });
         } else {
@@ -1676,35 +1659,23 @@ mod test {
                     for i in 0..100 {
                         spin_loop();
                     }
-                    if prev == 1000 {
-                        println!("FOUND {prev} for thread {i}");
-                    }
                 }
             });
 
             threads.push(handle);
         }
 
-        let handle = thread::spawn(move || {
-            println!("Heree");
-            for i in -1000..=80000 {
-                // println!("{i} start");
-                let mut guard = block_on(writer.write());
+        for i in -1000..=80000 {
+            let mut guard = block_on(writer.write());
 
-                *guard = i;
-                guard.core.bump_version();
+            *guard = i;
+            guard.core.bump_version();
 
-                drop(guard);
-                // println!("{i} end");
-            }
+            drop(guard);
+        }
 
-            for t in threads {
-                t.join().unwrap();
-            }
-        });
-
-        while !handle.is_finished() {
-            thread::sleep(Duration::from_millis(1000));
+        for t in threads {
+            t.join().unwrap();
         }
     }
 }
