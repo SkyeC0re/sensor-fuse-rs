@@ -21,7 +21,7 @@ use async_lock::{
 use either::Either;
 use futures::FutureExt;
 
-use crate::{SymResult, Version};
+use crate::{SensorWrite, SensorWriteAsync, SymResult, Version};
 
 use super::{SensorCore, SensorCoreAsync, CLOSED_BIT, VERSION_BUMP};
 
@@ -561,26 +561,28 @@ impl Node {
     unsafe fn lock(node: *mut Self) -> u8 {
         let mut state = (*node).state.load(Ordering::Relaxed);
 
-        // A perceived lock state does not guarantee that we are about to be completed (as is the case for a write node).
-        // Wait until we have a lock to guarantee our state.
         loop {
             while state & Self::STATE_LOCK_BIT != 0 {
                 spin_loop();
                 state = (*node).state.load(Ordering::Relaxed);
             }
 
-            state = (*node)
-                .state
-                .fetch_or(Self::STATE_LOCK_BIT, Ordering::AcqRel);
-
-            if state & Self::STATE_LOCK_BIT == 0 {
-                return state;
+            match (*node).state.compare_exchange(
+                state,
+                state | Self::STATE_LOCK_BIT,
+                Ordering::Acquire,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(e) => state = e,
             }
         }
+
+        state
     }
 }
 
-struct MySensorCore<T> {
+pub struct MySensorCore<T> {
     queue_head: AtomicPtr<Node>,
     queue_tail: AtomicPtr<Node>,
     idle_reads_head: AtomicPtr<Node>,
@@ -598,7 +600,6 @@ unsafe impl<T> Sync for MySensorCore<T> where T: Send + Sync {}
 impl<T> MySensorCore<T> {
     #[inline(always)]
     fn version(&self) -> Version {
-        // Relaxed could work?
         Version(self.version.load(Ordering::Relaxed))
     }
 
@@ -1120,17 +1121,24 @@ impl StaticRegion {
             }));
         }
     }
+
+    #[inline(always)]
+    const fn init(&self) -> bool {
+        !self.0.is_null()
+    }
 }
 
-struct MyObserver<T, R: Deref<Target = MySensorCore<T>>> {
+pub struct MyObserver<T, R: Deref<Target = MySensorCore<T>>> {
     core: R,
     static_area: StaticRegion,
     version: Version,
 }
 
 impl<T, R: Deref<Target = MySensorCore<T>>> MyObserver<T, R> {
+    #[inline]
     pub fn wait_changed(&mut self) -> MyWaitChangedFut<T> {
         self.static_area.ensure_init();
+
         MyWaitChangedFut {
             core: &self.core,
             static_area: &mut self.static_area,
@@ -1148,6 +1156,7 @@ impl<T, R: Deref<Target = MySensorCore<T>>> MyObserver<T, R> {
         }
     }
 
+    #[inline]
     pub fn wait_for<F: FnMut(&T) -> bool>(&mut self, condition: F) -> MyWaitForFut<T, F> {
         self.static_area.ensure_init();
         MyWaitForFut {
@@ -1220,7 +1229,7 @@ impl<'a, T> Future for MyReadFut<'a, T> {
                 while self
                     .core
                     .queue_head
-                    .compare_exchange_weak(null_mut(), node, Ordering::AcqRel, Ordering::Relaxed)
+                    .compare_exchange_weak(null_mut(), node, Ordering::Release, Ordering::Relaxed)
                     .is_err()
                 {
                     spin_loop();
@@ -1304,7 +1313,7 @@ impl<'a, T> Drop for MyReadFut<'a, T> {
     }
 }
 
-struct MyWaitForFut<'a, T, F: FnMut(&T) -> bool> {
+pub struct MyWaitForFut<'a, T, F: FnMut(&T) -> bool> {
     condition: F,
     read: MyReadFut<'a, T>,
     version: Version,
@@ -1365,9 +1374,18 @@ impl<'a, T, F: FnMut(&T) -> bool> Future for MyWaitForFut<'a, T, F> {
     }
 }
 
-struct MyWriter<T, R: Deref<Target = MySensorCore<T>>> {
+pub struct MyWriter<T, R: Deref<Target = MySensorCore<T>>> {
     core: R,
     static_area: StaticRegion,
+}
+
+impl<T, R: Deref<Target = MySensorCore<T>> + Clone> Clone for MyWriter<T, R> {
+    fn clone(&self) -> Self {
+        Self {
+            core: self.core.clone(),
+            static_area: StaticRegion::new(),
+        }
+    }
 }
 
 impl<T, R: Deref<Target = MySensorCore<T>>> MyWriter<T, R> {
@@ -1413,7 +1431,27 @@ impl<T, R: Deref<Target = MySensorCore<T>> + Clone> MyWriter<T, R> {
     }
 }
 
-struct MyWriteFut<'a, T> {
+impl<T, R: Deref<Target = MySensorCore<T>>> Drop for MyWriter<T, R> {
+    fn drop(&mut self) {
+        if self.static_area.init() {
+            unsafe {
+                if Node::cancel(self.static_area.0).is_none() {
+                    drop(Box::from_raw(self.static_area.0));
+                }
+            }
+        }
+
+        if self.core.num_writers.fetch_sub(1, Ordering::Relaxed) != 1 {
+            return;
+        }
+
+        let _ = self.core.version.fetch_or(CLOSED_BIT, Ordering::Relaxed);
+        self.core.wake_waiters();
+        self.core.activate_idle_reads();
+    }
+}
+
+pub struct MyWriteFut<'a, T> {
     static_area: &'a mut StaticRegion,
     core: &'a MySensorCore<T>,
     init: bool,
@@ -1470,7 +1508,7 @@ impl<'a, T> Future for MyWriteFut<'a, T> {
                 while self
                     .core
                     .queue_head
-                    .compare_exchange_weak(null_mut(), node, Ordering::AcqRel, Ordering::Relaxed)
+                    .compare_exchange_weak(null_mut(), node, Ordering::Release, Ordering::Relaxed)
                     .is_err()
                 {
                     spin_loop();
@@ -1550,7 +1588,7 @@ impl<'a, T> Drop for MyWriteFut<'a, T> {
     }
 }
 
-struct MyWaitChangedFut<'a, T> {
+pub struct MyWaitChangedFut<'a, T> {
     static_area: &'a mut StaticRegion,
     core: &'a MySensorCore<T>,
     version: Version,
@@ -1632,6 +1670,50 @@ impl<'a, T> Drop for MyWaitChangedFut<'a, T> {
                 Node::assume_wait_changed_wake(next_node);
             }
         }
+    }
+}
+
+impl<T, R: Deref<Target = MySensorCore<T>>> SensorWrite<T> for MyWriter<T, R> {
+    type WriteGuard<'a>
+        = WriteGuard<'a, T>
+    where
+        Self: 'a;
+
+    #[inline(always)]
+    fn notify_all(&self) {
+        self.core.bump_version();
+    }
+
+    #[inline(always)]
+    fn try_write(&self) -> Option<Self::WriteGuard<'_>> {
+        self.core.try_write()
+    }
+}
+
+impl<T, R: Deref<Target = MySensorCore<T>>> SensorWriteAsync<T> for MyWriter<T, R> {
+    #[allow(refining_impl_trait)]
+    #[inline(always)]
+    fn write(&mut self) -> MyWriteFut<'_, T> {
+        self.write()
+    }
+
+    #[allow(refining_impl_trait)]
+    #[inline(always)]
+    async fn modify<F: FnOnce(&mut T) -> bool>(&mut self, f: F) {
+        let mut guard = self.write().await;
+        if f(&mut guard) {
+            guard.core.bump_version();
+        }
+    }
+
+    #[allow(refining_impl_trait)]
+    #[inline(always)]
+    async fn update(&mut self, value: T) {
+        self.modify(|v| {
+            *v = value;
+            true
+        })
+        .await
     }
 }
 

@@ -116,6 +116,24 @@ impl<'a, C: SensorCore> ShareStrategy<'a> for &'a Arc<C> {
     }
 }
 
+pub trait SensorWrite<T> {
+    type WriteGuard<'a>: DerefMut<Target = T>
+    where
+        Self: 'a;
+
+    fn notify_all(&self);
+
+    fn try_write(&self) -> Option<Self::WriteGuard<'_>>;
+}
+
+pub trait SensorWriteAsync<T>: SensorWrite<T> {
+    fn write(&mut self) -> impl Future<Output = Self::WriteGuard<'_>>;
+
+    fn modify<F: FnOnce(&mut T) -> bool>(&mut self, f: F) -> impl Future<Output = ()>;
+
+    fn update(&mut self, value: T) -> impl Future<Output = ()>;
+}
+
 /*** Sensor Writing ***/
 
 /// The generalized sensor writer.
