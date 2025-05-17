@@ -11,7 +11,10 @@ use std::{
     future::poll_fn,
     mem,
     ops::{Deref, DerefMut},
-    sync::{atomic::AtomicU8, Arc},
+    sync::{
+        atomic::{AtomicU16, AtomicU8},
+        Arc,
+    },
 };
 
 use async_lock::{
@@ -304,50 +307,36 @@ mod tests {
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 #[repr(u8)]
-enum NodeType {
-    Free = 0,
-    WaitChanged = 1,
-    Read = 2,
-    PassiveRead = 3,
-    Write = 4,
+enum WakeQueueType {
+    None = 0,
+    ReadWrite = 1,
+    PassiveRead = 2,
+    WaitChanged = 3,
 }
 
 #[derive(Debug)]
 #[repr(align(4))]
 struct Node {
     waker: MaybeUninit<Waker>,
-    // PTR | IS_LAST_BIT | TYPE_BIT
-    next: AtomicPtr<Node>,
-    // ... | COMPLETE_BIT | CANCEL_BIT | DROP_BIT | LOCK_BIT
+    /// PTR | Next is Idle-Read bit
+    next_rw: [AtomicUsize; 2],
+    next_wc: AtomicPtr<Node>,
+    /// ... | Waker Lock Bit | Dropped bit | Linked Queue 2 bit | Linked Queue 1 bit | Linked Queue 0 bit | Waker Queue (2 bits)
     state: AtomicU8,
-    tp: NodeType,
+    is_write: bool,
 }
 
-/// Static sentinel value, do **not** modify.
-/// TODO: replace with SyncUnsafeCell when it stabilizes.
-static mut SENTINEL: Node = Node {
-    waker: MaybeUninit::uninit(),
-    next: AtomicPtr::new(null_mut()),
-    state: AtomicU8::new(0),
-    tp: NodeType::Free,
-};
-
 impl Node {
-    const STATE_LOCK_BIT: u8 = 0b1;
+    const S_WAKER_QUEUE_MASK: u8 = 0b0000_0011;
+    const S_LQ_0_BIT: u8 = 0b0000_0100;
+    const S_LQ_1_BIT: u8 = 0b0000_1000;
+    const S_LQ_2_BIT: u8 = 0b0001_0000;
+    const S_DROP_BIT: u8 = 0b0010_0000;
+    const S_WKR_LOCK_BIT: u8 = 0b0100_0000;
 
-    // Safety:  `Node::cancel` relies on the fact that these are sequential.
-    const STATE_CANCEL_BIT: u8 = 0b10;
-    const STATE_DROP_BIT: u8 = 0b100;
-
-    const STATE_COMPLETE_BIT: u8 = 0b1000;
-
-    const NEXT_DATA_MASK: usize = 0b11;
-    // Whether the node in the Read-Write is a write node.
-    const NEXT_IS_WRITER_BIT: usize = 0b10;
-    // Sentinal bit used for various purposes depending on what context the node is being used in.
-    const NEXT_SENTINEL_BIT: usize = 0b1;
-    const NEXT_PTR_MASK: usize = !Self::NEXT_DATA_MASK;
-    const WAIT_CHANGED_TAIL: usize = 0b1;
+    const NEXT_DATA_BIT: usize = 0b1;
+    const NEXT_PTR_MASK: usize = !Self::NEXT_DATA_BIT;
+    const SENTINEL: usize = 1;
 
     /// Sentinel pointer. Do **not** access.
     #[inline(always)]
@@ -355,77 +344,24 @@ impl Node {
         1 as _
     }
 
-    /// Attempts to recycle an old allocation or discard it an create a new allocation if that fails.
-    /// If `None` is returned for the node, the waker was reset inside the queue, otherwise exlusive ownership is guaranteed
-    /// over the (potentially newly allocated) Node.
-    ///
-    /// # Safety
-    ///
-    /// After this function returns with a mutable reference, it is up to the caller to ensure that the non-atomic modifications
-    /// made to the node by this function as part of the reset process is appropriately released.
-    ///
-    /// It can be safely assumed that `None` can only ever be returned if `allow_in_queue_reset` is true.
-    #[inline(always)]
-    unsafe fn reuse_or_realloc(
-        node: *mut Self,
-        waker: Waker,
-        new_type: NodeType,
-        allow_in_queue_reset: bool,
-    ) -> Option<&'static mut Self> {
-        // let old_node = &mut *node;
+    #[inline]
+    unsafe fn lock_waker(node: *mut Self) -> u8 {
+        let mut state = (*node)
+            .state
+            .fetch_or(Node::S_WKR_LOCK_BIT, Ordering::Acquire);
 
-        // Write free initial check for completion.
-        let mut state = (*node).state.load(Ordering::Acquire);
-        if state & Self::STATE_COMPLETE_BIT != 0 {
-            // Free to re-use mutably. We are the sole owners.
-            Node::assume_exclusive_reset(node, waker, new_type);
-            return Some(&mut *node);
+        while state & Node::S_WKR_LOCK_BIT != 0 {
+            while state & Node::S_WKR_LOCK_BIT != 0 {
+                spin_loop();
+                state = (*node).state.load(Ordering::Relaxed);
+            }
+
+            state = (*node)
+                .state
+                .fetch_or(Node::S_WKR_LOCK_BIT, Ordering::Acquire);
         }
 
-        state = Self::lock(node);
-
-        if state & Self::STATE_COMPLETE_BIT != 0 {
-            // Free to re-use mutably. We are the sole owners.
-            Node::assume_exclusive_reset(node, waker, new_type);
-            return Some(&mut *node);
-        }
-
-        debug_assert_eq!(state, Self::STATE_CANCEL_BIT);
-
-        if allow_in_queue_reset {
-            // Piggy back off of the fact that the node is still in an appropriate queue.
-            let _ = (*node).waker.write(waker);
-            (*node).tp = new_type;
-            (*node).state.store(0, Ordering::Release);
-
-            return None;
-        }
-
-        // No attempts at recycling the allocation succeeded. Dump it and acquire a new one.
-        (*node).state.store(Self::STATE_DROP_BIT, Ordering::Release);
-
-        let node = Box::new(Node {
-            waker: MaybeUninit::new(waker),
-            next: AtomicPtr::new(Node::sentinel()),
-            state: AtomicU8::new(0),
-            tp: new_type,
-        });
-
-        return Some(unsafe { &mut *Box::into_raw(node) });
-    }
-
-    /// Reset the node's values for a new future that is to be added to a queue.
-    ///
-    /// # Safety
-    ///
-    /// Behaviour is undefined if node is not in a completed (i.e. exclusive) state.
-    #[inline(always)]
-    unsafe fn assume_exclusive_reset(node: *mut Self, waker: Waker, new_type: NodeType) {
-        let node = &mut *node;
-        let _ = node.waker.write(waker);
-        *node.next.get_mut() = Node::sentinel();
-        *node.state.get_mut() = 0;
-        node.tp = new_type;
+        state
     }
 
     /// Cancels or detaches the node if it has not been completed yet.
@@ -437,148 +373,34 @@ impl Node {
     /// # Safety
     ///
     /// It is undefined behaviour to call this twice on the same node without resetting it.
-    ///
-    /// If `detach = true`, it is also undefined behaviour to access the node again if the waker was returned.
     #[inline(always)]
-    unsafe fn cancel(node: *mut Self) -> Option<Waker> {
-        let mut state = (*node).state.load(Ordering::Acquire);
-        debug_assert_eq!(state & Self::STATE_CANCEL_BIT, 0);
+    unsafe fn cancel(node: *mut Self) -> bool {
+        let state = Node::lock_waker(node);
 
-        if state & (Self::STATE_COMPLETE_BIT) != 0 {
-            // We have already been completed. Nothing to do.
-            return None;
+        let drop_waker = !Node::is_completed(state, state & Node::S_WAKER_QUEUE_MASK);
+
+        // Do a quick bit level copy, and only pay the potential cost of dropping the waker after
+        // allowing other threads to continue.
+        let mut waker = MaybeUninit::uninit();
+        core::ptr::copy_nonoverlapping(&(*node).waker, &mut waker, 1);
+
+        const CANCEL_MASK: u8 = !(Node::S_WAKER_QUEUE_MASK | Node::S_WKR_LOCK_BIT);
+        let _ = (*node).state.fetch_and(CANCEL_MASK, Ordering::Release);
+
+        if drop_waker {
+            waker.assume_init_drop();
         }
 
-        // A perceived lock state does not guarantee that we are about to be completed (as is the case for a write node).
-        // Wait until we have a lock to guarantee our state.
-        state = Node::lock(node);
-
-        if state & Self::STATE_COMPLETE_BIT != 0 {
-            // We have already been completed. Nothing to do.
-            return None;
-        }
-
-        // Get waker first with a cheap, bit level copy, allow other threads to continue and then spend the potential cost
-        // of dropping the waker.
-        let waker = (*node).waker.assume_init_read();
-        (*node)
-            .state
-            .store(state | Self::STATE_CANCEL_BIT, Ordering::Release);
-
-        Some(waker)
+        drop_waker
     }
 
-    /// Wake the next element in the wait changed queue, skipping over cancelled nodes and appropriately dropping
-    /// drop requested nodes.
-    ///
     /// # Safety
     ///
-    /// It is undefined behaviour to call this before a node is completed (or being completed) or to call this twice for
-    /// the same node for the same completion.
-    /// After this call completes it is undefined behaviour to access the node again.
+    /// The queue type must be smaller than 4.
     #[inline(always)]
-    unsafe fn assume_wait_changed_wake(mut node: *mut Self) {
-        let mut next_node;
-        loop {
-            next_node = Node::assume_wait_changed_next_node(node);
-
-            // Responsibility was either shifted successfully or we have reached the end of the queue.
-            if Node::complete_and_wake(node, false) || next_node.is_null() {
-                return;
-            }
-
-            node = next_node;
-        }
-    }
-
-    /// Find the next node in the list. Assumes that the node is uncompleted and in the wait changed queue.
-    ///
-    /// # Safety
-    ///
-    /// This function should only be called on nodes that are in queue, and for which the caller either is the sole
-    /// arbiter of the node's completion or can guarantee that the node has been cancelled before this call and has
-    /// not been reset.
-    #[inline(always)]
-    unsafe fn assume_wait_changed_next_node(node: *mut Self) -> *mut Self {
-        let mut next_ptr;
-        loop {
-            next_ptr = (*node).next.load(Ordering::Acquire);
-
-            if next_ptr != Node::sentinel() {
-                return next_ptr;
-            }
-
-            spin_loop();
-        }
-    }
-
-    /// Attempt to complete wake this node if possible, and returns true if it either was successfully completed and awoken (i.e not previously cancelled or dropped), when `retired_only=false`
-    /// or if it would have been successfully completed and awoken when `retired_only=true`.
-    ///
-    /// # Safety
-    ///
-    /// Should only be called on a node that is in a queue and has not been marked as completed (i.e. not previously cancelled or dropped).
-    /// After this call completes it is undefined behaviour to access the node again, except for the case where `retired_only=true` and true is returned.
-    #[inline(always)]
-    unsafe fn complete_and_wake(node: *mut Self, retired_only: bool) -> bool {
-        let state = Node::lock(node);
-
-        if state == Self::STATE_DROP_BIT {
-            drop(Box::from_raw(node));
-            return false;
-        }
-
-        if state == Self::STATE_CANCEL_BIT {
-            (*node)
-                .state
-                .store(state | Self::STATE_COMPLETE_BIT, Ordering::Release);
-            return false;
-        }
-
-        if retired_only {
-            (*node).state.store(state, Ordering::Release);
-            return true;
-        }
-
-        debug_assert_eq!(state, 0);
-
-        // Get waker first with a cheap, bit level copy, allow other threads to continue and then spend the potential cost
-        // of waking.
-        let waker = (*node).waker.assume_init_read();
-        (*node)
-            .state
-            .store(Self::STATE_COMPLETE_BIT, Ordering::Release);
-        waker.wake();
-
-        true
-    }
-
-    /// Locks the given node and returns the state just before the lock bit was set.
-    /// # Safety
-    ///
-    /// Should only be called on nodes that are guaranteed to not get dropped.
-    #[inline(always)]
-    unsafe fn lock(node: *mut Self) -> u8 {
-        let mut state = (*node).state.load(Ordering::Relaxed);
-
-        loop {
-            while state & Self::STATE_LOCK_BIT != 0 {
-                spin_loop();
-                state = (*node).state.load(Ordering::Relaxed);
-            }
-
-            match (*node).state.compare_exchange(
-                state,
-                state | Self::STATE_LOCK_BIT,
-                Ordering::Acquire,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => break,
-                Err(e) => state = e,
-            }
-        }
-
-        state
+    const unsafe fn is_completed(state: u8, queue_type: u8) -> bool {
+        let shift = queue_type + 1;
+        state & (1 << shift) == 0
     }
 }
 
@@ -636,8 +458,7 @@ impl<T> MySensorCore<T> {
         assert_ne!(idle_head, unsafe { Node::sentinel() });
 
         if old_tail.is_null() {
-            // Ensure that the head is also properly zeroed. This will block on both a head still being cleared out and a sentinel bit being set on
-            // a zeroed head.
+            // Ensure that the head is also properly zeroed. This will block on both an old head still being cleared out or a sentinel address being set.
             while self
                 .queue_head
                 .compare_exchange_weak(null_mut(), idle_head, Ordering::AcqRel, Ordering::Relaxed)
@@ -738,31 +559,43 @@ impl<T> MySensorCore<T> {
 
     /// # Safety
     ///
-    /// The caller must have a readguard. `node_ptr` must point to an actual node in the Read-Write queue.
+    /// The caller must have a readguard. `node` must point to an actual node in the Read-Write queue.
     ///
-    /// `node_ptr` must be properly initialized from the perspective of the thread calling this function.
+    /// `node` must be properly initialized from the perspective of the thread calling this function.
     #[inline(always)]
     unsafe fn wake_next_reader(&self, mut node: *mut Node, guard: ReadGuard<T>) {
         loop {
-            let state = Node::lock(node);
+            // `Acquire` ordering required here. In the case that a dropped node is detected,
+            // we must be sure that whoever dropped it will not access it again, which can only be guaranteed
+            // if they set the dropped bit with a release and we load it with aqcuire.
+            let mut state = (*node).state.load(Ordering::Acquire);
 
-            if state & (Node::STATE_DROP_BIT | Node::STATE_CANCEL_BIT) != 0 {
-                debug_assert_eq!(state & !(Node::STATE_DROP_BIT | Node::STATE_CANCEL_BIT), 0);
+            // Uncancelled write detected. Stop waking here.
+            if state & const { Node::STATE_DROP_BIT | Node::STATE_CANCEL_BIT } == 0
+                && (*node).tp == NodeType::Write
+            {
+                self.queue_head.store(node, Ordering::Release);
+                return;
+            }
 
+            let mut waker = MaybeUninit::uninit();
+            core::ptr::copy_nonoverlapping(&(*node).waker, &mut waker, 1);
+
+            // Dropped or cancelled bit could have become set in the meantime.
+            state = (*node)
+                .state
+                .fetch_or(state | Node::STATE_COMPLETE_BIT, Ordering::Acquire);
+
+            if state & const { Node::STATE_DROP_BIT | Node::STATE_CANCEL_BIT } != 0 {
                 let next_node_ptr = self.try_reset_queue_tail(node);
 
-                if state == Node::STATE_DROP_BIT {
+                if state & Node::STATE_DROP_BIT != 0 {
                     drop(Box::from_raw(node));
-                } else {
-                    (*node)
-                        .state
-                        .store(state | Node::STATE_COMPLETE_BIT, Ordering::Release);
                 }
 
                 if next_node_ptr.is_null() {
                     // Nothing to do, list is cleared.
                     self.queue_head.store(null_mut(), Ordering::Release);
-
                     return;
                 } else {
                     node = next_node_ptr;
@@ -772,23 +605,9 @@ impl<T> MySensorCore<T> {
 
             debug_assert_eq!(state, 0);
 
-            // Uncancelled write detected. Stop waking here.
-            if (*node).tp == NodeType::Write {
-                self.queue_head.store(node, Ordering::Release);
+            waker.assume_init().wake();
 
-                (*node).state.store(0, Ordering::Release);
-                return;
-            }
-
-            // Get waker first with a cheap, bit level copy, allow other threads to continue and then spend the potential cost
-            // of waking.
-            let waker = (*node).waker.assume_init_read();
-            (*node)
-                .state
-                .store(Node::STATE_COMPLETE_BIT, Ordering::Release);
-            waker.wake();
-
-            // Implicitly pass the extrenuous read guard to the awoken node.
+            // Implicitly pass the extrenuous read guard to the awoken read node.
             mem::forget(guard);
             return;
         }
