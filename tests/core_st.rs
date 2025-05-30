@@ -1,7 +1,7 @@
 use paste::paste;
 use sensor_fuse::{
     prelude::*,
-    sensor_core::{alloc::AsyncCore, no_alloc::AsyncSingleCore, SensorCore},
+    sensor_core::{alloc::Core, no_alloc::AsyncSingleCore, SensorCore},
     SensorWriter, ShareStrategy,
 };
 use std::sync::Arc;
@@ -67,6 +67,6 @@ where
     assert!(writer.try_read().is_some());
 }
 
-test_core!(alloc_async, AsyncCore<_>);
+test_core!(alloc_async, Core<_>);
 
 test_core!(no_alloc_async, AsyncSingleCore<_>);

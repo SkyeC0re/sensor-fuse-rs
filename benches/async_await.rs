@@ -2,9 +2,7 @@ use async_lock::RwLockReadGuard;
 use criterion::{criterion_main, measurement::WallTime, BenchmarkGroup, Criterion};
 use futures::executor::block_on;
 use rand::random;
-use sensor_fuse::{
-    sensor_core::alloc::AsyncCore, SensorObserveAsync, SensorWriteAsync, SensorWriter,
-};
+use sensor_fuse::{sensor_core::alloc::Core, SensorObserveAsync, SensorWriteAsync, SensorWriter};
 use std::{
     hint::black_box,
     sync::{
@@ -198,7 +196,7 @@ impl Drop for WatchContentionEnvironment {
 struct ContentionEnvironment {
     reader_handles: Vec<tokio::task::JoinHandle<()>>,
     writer_handles: Vec<tokio::task::JoinHandle<()>>,
-    writer: SensorWriter<AsyncCore<ContentionData>, Arc<AsyncCore<ContentionData>>>,
+    writer: SensorWriter<Core<ContentionData>, Arc<Core<ContentionData>>>,
     _runtime: Runtime,
 }
 

@@ -2,7 +2,7 @@ use core::{pin::Pin, task::Poll};
 use paste::paste;
 use sensor_fuse::{
     prelude::*,
-    sensor_core::{alloc::AsyncCore, no_alloc::AsyncSingleCore, SensorCoreAsync},
+    sensor_core::{alloc::Core, no_alloc::AsyncSingleCore, SensorCoreAsync},
     SensorWriter, ShareStrategy,
 };
 use std::sync::Arc;
@@ -560,5 +560,5 @@ where
     assert_eq!(*guard, 0);
 }
 
-test_single_thread!(alloc_async, AsyncCore<_>);
+test_single_thread!(alloc_async, Core<_>);
 test_single_thread!(no_alloc_async, AsyncSingleCore<_>);
