@@ -55,7 +55,7 @@ use core::{
 use core::{mem::MaybeUninit, pin::Pin};
 use derived_deref::{Deref, DerefMut};
 use futures::FutureExt;
-use sensor_core::{closed_bit_set, SensorCore, SensorCoreAsync, CLOSED_BIT, VERSION_BUMP};
+use sensor_core::{CLOSED_BIT, VERSION_BUMP};
 
 #[derive(Deref, DerefMut, Clone, Copy)]
 #[repr(transparent)]
@@ -100,28 +100,25 @@ impl<'a, T> Deref for RefWrapper<'a, T> {
 
 /// Trait for sharing a (most likely heap pointer) wrapped `struct@RawSensorData` with a locking strategy.
 pub trait ShareStrategy: Deref {
-    fn init(init: Self::Target) -> Self;
+    const PERMANENT: bool;
 }
 
 impl<T> ShareStrategy for Wrapper<T> {
-    #[inline(always)]
-    fn init(init: Self::Target) -> Self {
-        Wrapper(init)
-    }
+    const PERMANENT: bool = true;
+}
+
+impl<'a, T> ShareStrategy for RefWrapper<'a, T> {
+    const PERMANENT: bool = false;
 }
 
 #[cfg(feature = "alloc")]
 impl<T> ShareStrategy for Arc<T> {
-    fn init(init: Self::Target) -> Self {
-        Self::new(init)
-    }
+    const PERMANENT: bool = true;
 }
 
 #[cfg(feature = "alloc")]
 impl<T> ShareStrategy for Rc<T> {
-    fn init(init: Self::Target) -> Self {
-        Self::new(init)
-    }
+    const PERMANENT: bool = true;
 }
 
 pub trait SensorWrite {
@@ -138,7 +135,9 @@ pub trait SensorWrite {
 pub trait SensorWriteAsync: SensorWrite {
     fn write(&mut self) -> impl Future<Output = Self::WriteGuard<'_>>;
 
-    fn modify<F: FnOnce(&mut Self::Target) -> bool>(&mut self, f: F) -> impl Future<Output = ()>;
+    fn modify<F>(&mut self, f: F) -> impl Future<Output = ()>
+    where
+        for<'any> F: FnOnce(&'any mut Self::Target) -> bool;
 
     fn update(&mut self, value: Self::Target) -> impl Future<Output = ()>;
 }
@@ -188,160 +187,25 @@ pub trait SensorObserve {
 
 /// Async observer functionality.
 pub trait SensorObserveAsync: SensorObserve {
-    fn read(&self) -> impl Future<Output = Self::ReadGuard<'_>>;
+    fn read(&mut self) -> impl Future<Output = Self::ReadGuard<'_>>;
 
     /// Asynchronously wait until the sensor value is updated. This call will **not** update the observer's version,
     /// as such an additional call to `pull` or `pull_updated` is required.
-    fn wait_until_changed(&self) -> impl Future<Output = SymResult<()>>;
+    fn wait_changed(&mut self) -> impl Future<Output = SymResult<()>>;
 
     /// Asynchronously wait for a particular condition to become true. This method checks the current sensor value even if the current value is marked
     /// as seen by the observer.
-    fn wait_for<F: FnMut(&Self::Target) -> bool>(
-        &mut self,
-        condition: F,
-    ) -> impl Future<Output = SymResult<Self::ReadGuard<'_>>>;
+    fn wait_for<F>(&mut self, condition: F) -> impl Future<Output = SymResult<Self::ReadGuard<'_>>>
+    where
+        F: for<'any> FnMut(&'any Self::Target) -> bool;
 
     /// Asynchronously wait for a particular condition to become true. This method waits for the sensor value to be marked unseen before staring checks.
-    fn wait_for_next<F: FnMut(&Self::Target) -> bool>(
+    fn wait_for_next<F>(
         &mut self,
         condition: F,
-    ) -> impl Future<Output = SymResult<Self::ReadGuard<'_>>>;
-}
-
-#[repr(transparent)]
-#[derive(Clone, Copy, Eq, PartialEq)]
-pub struct Version(usize);
-
-impl Version {
-    #[inline(always)]
-    pub const fn closed_bit_set(self) -> bool {
-        closed_bit_set(self.0)
-    }
-
-    #[inline(always)]
-    pub const fn set_closed_bit(&mut self) {
-        self.0 |= CLOSED_BIT
-    }
-
-    #[inline(always)]
-    pub const fn increment(&mut self) {
-        self.0 = self.0.wrapping_add(VERSION_BUMP);
-    }
-
-    #[inline(always)]
-    pub const fn decrement(&mut self) {
-        self.0 = self.0.wrapping_sub(VERSION_BUMP);
-    }
-
-    #[inline(always)]
-    pub(crate) fn as_result(self) -> SymResult<Self> {
-        match self.closed_bit_set() {
-            true => Err(self),
-            false => Ok(self),
-        }
-    }
-}
-
-pub trait VersionFunctionality: Clone + Unpin {
-    /// Returns true if the sensor is closed and no further updates can occur.
-    fn closed(&self) -> bool;
-}
-
-impl VersionFunctionality for Version {
-    #[inline(always)]
-    fn closed(&self) -> bool {
-        self.closed_bit_set()
-    }
-}
-
-/// The generalized sensor observer.
-pub struct SensorObserver<C: SensorCore, R: Deref<Target = C>> {
-    core: R,
-    version: Version,
-}
-
-impl<C: SensorCore, R: Deref<Target = C>> SensorObserve for SensorObserver<C, R> {
-    type Target = C::Target;
-    type ReadGuard<'read>
-        = C::ReadGuard<'read>
+    ) -> impl Future<Output = SymResult<Self::ReadGuard<'_>>>
     where
-        Self: 'read;
-
-    type Checkpoint = Version;
-
-    #[inline(always)]
-    fn save_checkpoint(&self) -> Self::Checkpoint {
-        self.version
-    }
-
-    fn restore_checkpoint(&mut self, checkpoint: &Self::Checkpoint) {
-        self.version = *checkpoint;
-    }
-
-    #[inline(always)]
-    fn mark_seen(&mut self) {
-        self.version = self.core.version();
-    }
-
-    #[inline(always)]
-    fn mark_unseen(&mut self) {
-        self.version = self.core.version();
-        self.version.decrement();
-    }
-
-    #[inline(always)]
-    fn has_changed(&self) -> bool {
-        self.core.version() != self.version
-    }
-
-    #[inline(always)]
-    fn is_closed(&self) -> bool {
-        self.core.version().closed_bit_set()
-    }
-}
-
-impl<C: SensorCoreAsync, R: Deref<Target = C>> SensorObserveAsync for SensorObserver<C, R> {
-    #[inline(always)]
-    async fn read(&self) -> Self::ReadGuard<'_> {
-        self.core.read().await
-    }
-
-    #[inline]
-    async fn wait_until_changed(&self) -> SymResult<Version> {
-        let version = self.core.wait_changed(self.version).await;
-        match version.closed_bit_set() {
-            true => Err(version),
-            false => Ok(version),
-        }
-    }
-
-    #[inline]
-    async fn wait_for<F: FnMut(&Self::Target) -> bool>(
-        &mut self,
-        condition: F,
-    ) -> SymResult<Self::ReadGuard<'_>> {
-        let mut reference_version = self.core.version();
-        reference_version.decrement();
-        let (guard, latest_version) = self.core.wait_for(condition, reference_version).await;
-        self.version = latest_version;
-        match latest_version.closed_bit_set() {
-            true => Err(guard),
-            false => Ok(guard),
-        }
-    }
-
-    #[inline]
-    async fn wait_for_next<F: FnMut(&Self::Target) -> bool>(
-        &mut self,
-        condition: F,
-    ) -> SymResult<Self::ReadGuard<'_>> {
-        let (guard, latest_version) = self.core.wait_for(condition, self.version).await;
-        self.version = latest_version;
-        match latest_version.closed_bit_set() {
-            true => Err(guard),
-            false => Ok(guard),
-        }
-    }
+        F: for<'any> FnMut(&'any Self::Target) -> bool;
 }
 
 /*** Mapped and Fused Observers ***/
@@ -350,7 +214,7 @@ impl<C: SensorCoreAsync, R: Deref<Target = C>> SensorObserveAsync for SensorObse
 pub struct MappedSensorObserver<A: SensorObserve, T, F: FnMut(&A::Target) -> T> {
     /// The original pre-mapped observer.
     pub inner: A,
-    map: UnsafeCell<F>,
+    map: F,
 }
 
 impl<A, T, F> MappedSensorObserver<A, T, F>
@@ -361,10 +225,7 @@ where
     /// Create a new mapped observer given another observer and an appropriate mapping function.
     #[inline(always)]
     pub const fn map_with(a: A, f: F) -> Self {
-        Self {
-            inner: a,
-            map: UnsafeCell::new(f),
-        }
+        Self { inner: a, map: f }
     }
 }
 
@@ -378,17 +239,6 @@ where
         = OwnedData<T>
     where
         Self: 'read;
-    type Checkpoint = A::Checkpoint;
-
-    #[inline(always)]
-    fn save_checkpoint(&self) -> Self::Checkpoint {
-        self.inner.save_checkpoint()
-    }
-
-    #[inline(always)]
-    fn restore_checkpoint(&mut self, checkpoint: &Self::Checkpoint) {
-        self.inner.restore_checkpoint(checkpoint);
-    }
 
     #[inline(always)]
     fn mark_seen(&mut self) {
@@ -416,15 +266,15 @@ where
     A: SensorObserveAsync,
     F: FnMut(&A::Target) -> T,
 {
-    fn read(&self) -> impl Future<Output = Self::ReadGuard<'_>> {
+    fn read(&mut self) -> impl Future<Output = Self::ReadGuard<'_>> {
         FutureExt::map(self.inner.read(), |inner_value| {
             // Safety: `MappedSensorObserver` is not `Sync`, disallowing race conditions over the mapping function.
-            OwnedData(unsafe { (*self.map.get())(&inner_value) })
+            OwnedData((self.map)(&inner_value))
         })
     }
 
-    fn wait_until_changed(&self) -> impl Future<Output = SymResult<Self::Checkpoint>> {
-        self.inner.wait_until_changed()
+    async fn wait_changed(&mut self) -> SymResult<()> {
+        self.inner.wait_changed().await
     }
 
     async fn wait_for<C: FnMut(&T) -> bool>(
@@ -434,11 +284,11 @@ where
         let MappedSensorObserver { inner, map } = self;
         let mut mapped = MaybeUninit::uninit();
         match inner
-            .wait_for(|guard| condition(mapped.write(OwnedData((map.get_mut())(&guard)))))
+            .wait_for(|guard| condition(mapped.write(OwnedData(map(&guard)))))
             .await
         {
             Ok(_) => Ok(unsafe { mapped.assume_init() }), // Safety: `mapped` is populated on success.
-            Err(guard) => Err(OwnedData((map.get_mut())(&guard))),
+            Err(guard) => Err(OwnedData(map(&guard))),
         }
     }
 
@@ -449,11 +299,11 @@ where
         let MappedSensorObserver { inner, map } = self;
         let mut mapped = MaybeUninit::uninit();
         match inner
-            .wait_for_next(|guard| condition(mapped.write(OwnedData((map.get_mut())(&guard)))))
+            .wait_for_next(|guard| condition(mapped.write(OwnedData(map(&guard)))))
             .await
         {
             Ok(_) => Ok(unsafe { mapped.assume_init() }), // Safety: `mapped` is populated on success.
-            Err(guard) => Err(OwnedData((map.get_mut())(&guard))),
+            Err(guard) => Err(OwnedData(map(&guard))),
         }
     }
 }
@@ -489,19 +339,6 @@ where
     }
 }
 
-#[derive(Clone)]
-pub struct FusedVersion<A: VersionFunctionality, B: VersionFunctionality> {
-    a: A,
-    b: B,
-}
-
-impl<A: VersionFunctionality, B: VersionFunctionality> VersionFunctionality for FusedVersion<A, B> {
-    #[inline]
-    fn closed(&self) -> bool {
-        self.a.closed() && self.b.closed()
-    }
-}
-
 impl<A, B, T, F> SensorObserve for FusedSensorObserver<A, B, T, F>
 where
     A: SensorObserve,
@@ -513,21 +350,6 @@ where
         = OwnedData<T>
     where
         Self: 'read;
-    type Checkpoint = FusedVersion<A::Checkpoint, B::Checkpoint>;
-
-    #[inline]
-    fn save_checkpoint(&self) -> Self::Checkpoint {
-        FusedVersion {
-            a: self.a.save_checkpoint(),
-            b: self.b.save_checkpoint(),
-        }
-    }
-
-    #[inline]
-    fn restore_checkpoint(&mut self, checkpoint: &Self::Checkpoint) {
-        self.a.restore_checkpoint(&checkpoint.a);
-        self.b.restore_checkpoint(&checkpoint.b);
-    }
 
     #[inline(always)]
     fn mark_seen(&mut self) {
@@ -552,163 +374,144 @@ where
     }
 }
 
-struct FusedWaitChangedFut<
-    A: Future<Output = SymResult<CA>>,
-    CA: VersionFunctionality + Clone + Unpin,
-    B: Future<Output = SymResult<CB>>,
-    CB: VersionFunctionality + Clone + Unpin,
-> {
-    a: Option<A>,
-    // Checkpoint for a.
-    ca: CA,
-    // Checkpoint for b.
-    b: B,
-    cb: CB,
-}
+// struct FusedWaitChangedFut<A: Future<Output = SymResult<CA>>, B: Future<Output = SymResult<CB>>> {
+//     a: Option<A>,
+//     b: B,
+// }
 
 // impl<
-// A: Future<Output = SymResult<CA>>,
-// CA: VersionFunctionality + Clone + Unpin,
-// B: Future<Output = SymResult<CB>>,
-// CB: VersionFunctionality + Clone + Unpin,
-// F: Fn() -> bool> Drop for FusedWaitChangedFut<A, CA, B, CB, F> {
-//     fn drop(&mut self) {
+//         A: Future<Output = SymResult<CA>>,
+//         CA: VersionFunctionality + Clone + Unpin,
+//         B: Future<Output = SymResult<CB>>,
+//         CB: VersionFunctionality + Clone + Unpin,
+//     > Future for FusedWaitChangedFut<A, CA, B, CB>
+// {
+//     type Output = SymResult<FusedVersion<CA, CB>>;
 
+//     fn poll(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
+//         let Self { a, ca, b, cb } = unsafe { self.get_unchecked_mut() };
+
+//         if let Some(Poll::Ready(checkpoint_a_res)) = a
+//             .as_mut()
+//             .map(|a| unsafe { Pin::new_unchecked(a).poll(cx) })
+//         {
+//             match checkpoint_a_res {
+//                 Ok(checkpoint) => {
+//                     return Poll::Ready(Ok(FusedVersion {
+//                         a: checkpoint,
+//                         b: cb.clone(),
+//                     }));
+//                 }
+//                 Err(checkpoint) => {
+//                     *ca = checkpoint;
+//                     *a = None;
+//                 }
+//             }
+//         }
+
+//         // From here it is known that `A` is closed, therefore `B`'s result can be propogated without alteration.
+//         unsafe { Pin::new_unchecked(b) }
+//             .poll(cx)
+//             .map(|checkpoint_b_res| {
+//                 let version = match &checkpoint_b_res {
+//                     Ok(checkpoint) | Err(checkpoint) => FusedVersion {
+//                         a: ca.clone(),
+//                         b: checkpoint.clone(),
+//                     },
+//                 };
+
+//                 match checkpoint_b_res {
+//                     Ok(_) => Ok(version),
+//                     Err(_) => Err(version),
+//                 }
+//             })
 //     }
 // }
-impl<
-        A: Future<Output = SymResult<CA>>,
-        CA: VersionFunctionality + Clone + Unpin,
-        B: Future<Output = SymResult<CB>>,
-        CB: VersionFunctionality + Clone + Unpin,
-    > Future for FusedWaitChangedFut<A, CA, B, CB>
-{
-    type Output = SymResult<FusedVersion<CA, CB>>;
 
-    fn poll(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
-        let Self { a, ca, b, cb } = unsafe { self.get_unchecked_mut() };
+// impl<A, B, T, F> FusedSensorObserver<A, B, T, F>
+// where
+//     A: SensorObserve + SensorObserveAsync,
+//     B: SensorObserve + SensorObserveAsync,
+//     F: FnMut(&A::Target, &B::Target) -> T,
+// {
+//     async fn wait_for_inner<C: FnMut(&T) -> bool>(
+//         &mut self,
+//         mut condition: C,
+//         check_current: bool,
+//     ) -> SymResult<<FusedSensorObserver<A, B, T, F> as SensorObserve>::ReadGuard<'_>> {
+//         let checkpoint = self.save_checkpoint();
+//         let mut data = DropFn::new((self, checkpoint), |(s, cp)| s.restore_checkpoint(cp));
 
-        if let Some(Poll::Ready(checkpoint_a_res)) = a
-            .as_mut()
-            .map(|a| unsafe { Pin::new_unchecked(a).poll(cx) })
-        {
-            match checkpoint_a_res {
-                Ok(checkpoint) => {
-                    return Poll::Ready(Ok(FusedVersion {
-                        a: checkpoint,
-                        b: cb.clone(),
-                    }));
-                }
-                Err(checkpoint) => {
-                    *ca = checkpoint;
-                    *a = None;
-                }
-            }
-        }
+//         let (s, restore_checkpoint) = &mut *data;
+//         if !check_current {
+//             let _ = s.wait_until_changed().await;
+//         }
+//         loop {
+//             let guard_a = s.a.read().await;
+//             let checkpoint_a = s.a.save_checkpoint();
 
-        // From here it is known that `A` is closed, therefore `B`'s result can be propogated without alteration.
-        unsafe { Pin::new_unchecked(b) }
-            .poll(cx)
-            .map(|checkpoint_b_res| {
-                let version = match &checkpoint_b_res {
-                    Ok(checkpoint) | Err(checkpoint) => FusedVersion {
-                        a: ca.clone(),
-                        b: checkpoint.clone(),
-                    },
-                };
+//             let guard_b = s.b.read().await;
+//             let checkpoint_b = s.b.save_checkpoint();
 
-                match checkpoint_b_res {
-                    Ok(_) => Ok(version),
-                    Err(_) => Err(version),
-                }
-            })
-    }
-}
+//             let fused_checkpoint = FusedVersion {
+//                 a: checkpoint_a,
+//                 b: checkpoint_b,
+//             };
 
-impl<A, B, T, F> FusedSensorObserver<A, B, T, F>
-where
-    A: SensorObserve + SensorObserveAsync,
-    B: SensorObserve + SensorObserveAsync,
-    F: FnMut(&A::Target, &B::Target) -> T,
-{
-    async fn wait_for_inner<C: FnMut(&T) -> bool>(
-        &mut self,
-        mut condition: C,
-        check_current: bool,
-    ) -> SymResult<<FusedSensorObserver<A, B, T, F> as SensorObserve>::ReadGuard<'_>> {
-        let checkpoint = self.save_checkpoint();
-        let mut data = DropFn::new((self, checkpoint), |(s, cp)| s.restore_checkpoint(cp));
+//             let fused = OwnedData(s.fuse.get_mut()(&guard_a, &guard_b));
 
-        let (s, restore_checkpoint) = &mut *data;
-        if !check_current {
-            let _ = s.wait_until_changed().await;
-        }
-        loop {
-            let guard_a = s.a.read().await;
-            let checkpoint_a = s.a.save_checkpoint();
+//             if condition(&fused) {
+//                 *restore_checkpoint = fused_checkpoint;
+//                 return Ok(fused);
+//             }
 
-            let guard_b = s.b.read().await;
-            let checkpoint_b = s.b.save_checkpoint();
+//             drop(guard_b);
+//             drop(guard_a);
 
-            let fused_checkpoint = FusedVersion {
-                a: checkpoint_a,
-                b: checkpoint_b,
-            };
+//             s.restore_checkpoint(&fused_checkpoint);
+//             let _ = s.wait_until_changed().await;
+//         }
+//     }
+// }
+// impl<A, B, T, F> SensorObserveAsync for FusedSensorObserver<A, B, T, F>
+// where
+//     A: SensorObserve + SensorObserveAsync,
+//     B: SensorObserve + SensorObserveAsync,
+//     F: FnMut(&A::Target, &B::Target) -> T,
+// {
+//     fn read(&self) -> impl Future<Output = Self::ReadGuard<'_>> {
+//         async move {
+//             let a = self.a.read().await;
+//             let b = self.b.read().await;
+//             OwnedData(unsafe { (*self.fuse.get())(&*a, &*b) })
+//         }
+//     }
 
-            let fused = OwnedData(s.fuse.get_mut()(&guard_a, &guard_b));
+//     fn wait_until_changed(&self) -> impl Future<Output = SymResult<Self::Checkpoint>> {
+//         let Self { a, b, .. } = self;
+//         FusedWaitChangedFut {
+//             a: Some(a.wait_until_changed()),
+//             ca: a.save_checkpoint(),
+//             b: self.b.wait_until_changed(),
+//             cb: b.save_checkpoint(),
+//         }
+//     }
 
-            if condition(&fused) {
-                *restore_checkpoint = fused_checkpoint;
-                return Ok(fused);
-            }
+//     async fn wait_for<C: FnMut(&T) -> bool>(
+//         &mut self,
+//         condition: C,
+//     ) -> SymResult<Self::ReadGuard<'_>> {
+//         self.wait_for_inner(condition, true).await
+//     }
 
-            drop(guard_b);
-            drop(guard_a);
-
-            s.restore_checkpoint(&fused_checkpoint);
-            let _ = s.wait_until_changed().await;
-        }
-    }
-}
-impl<A, B, T, F> SensorObserveAsync for FusedSensorObserver<A, B, T, F>
-where
-    A: SensorObserve + SensorObserveAsync,
-    B: SensorObserve + SensorObserveAsync,
-    F: FnMut(&A::Target, &B::Target) -> T,
-{
-    fn read(&self) -> impl Future<Output = Self::ReadGuard<'_>> {
-        async move {
-            let a = self.a.read().await;
-            let b = self.b.read().await;
-            OwnedData(unsafe { (*self.fuse.get())(&*a, &*b) })
-        }
-    }
-
-    fn wait_until_changed(&self) -> impl Future<Output = SymResult<Self::Checkpoint>> {
-        let Self { a, b, .. } = self;
-        FusedWaitChangedFut {
-            a: Some(a.wait_until_changed()),
-            ca: a.save_checkpoint(),
-            b: self.b.wait_until_changed(),
-            cb: b.save_checkpoint(),
-        }
-    }
-
-    async fn wait_for<C: FnMut(&T) -> bool>(
-        &mut self,
-        condition: C,
-    ) -> SymResult<Self::ReadGuard<'_>> {
-        self.wait_for_inner(condition, true).await
-    }
-
-    #[inline(always)]
-    async fn wait_for_next<C: FnMut(&T) -> bool>(
-        &mut self,
-        condition: C,
-    ) -> SymResult<Self::ReadGuard<'_>> {
-        self.wait_for_inner(condition, false).await
-    }
-}
+//     #[inline(always)]
+//     async fn wait_for_next<C: FnMut(&T) -> bool>(
+//         &mut self,
+//         condition: C,
+//     ) -> SymResult<Self::ReadGuard<'_>> {
+//         self.wait_for_inner(condition, false).await
+//     }
+// }
 
 struct DropFn<T, F: FnOnce(&mut T)> {
     v: T,

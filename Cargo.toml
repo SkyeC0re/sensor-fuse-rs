@@ -1,12 +1,12 @@
 [package]
 name = "sensor_fuse"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-async-lock = { version = "3.4.0", default-features = false }
+async-lock = { version = "3.4.0"}
 derived-deref = "2.1.0"
 either = { version = "1.13.0", default-features = false }
 event-listener = "5.3.1"
@@ -18,10 +18,10 @@ wookie = "0.3.2"
 async-std = "1.12.0"
 criterion = { version = "0.5.1", features = ["stable"] }
 futures = { version = "0.3.30" }
-paste = "1.0.15"
+paste = "1.0.14"
 rand = "0.8.5"
 spin_sleep = "1.2.1"
-tokio = { version = "1.39.3", default-features = false, features = [
+tokio = { version = "1.45.1", default-features = false, features = [
     "rt-multi-thread",
     "sync",
     "time",
@@ -35,4 +35,3 @@ harness = false
 alloc = []
 std = ["alloc"]
 default = ["std"]
-dev-miri-logs = []

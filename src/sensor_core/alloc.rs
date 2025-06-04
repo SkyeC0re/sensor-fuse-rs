@@ -1,56 +1,125 @@
-use core::{
-    future::Future,
-    pin::Pin,
-    ptr::null_mut,
-    sync::atomic::{AtomicPtr, AtomicUsize, Ordering},
-    task::{Context, Poll, Waker},
-};
-use core::{hint::spin_loop, mem::MaybeUninit};
-use std::{
-    cell::UnsafeCell,
-    future::poll_fn,
-    mem,
-    ops::{Deref, DerefMut},
-    sync::{atomic::AtomicU8, Arc},
-};
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use async_lock::{
-    futures::{Read, Write},
     RwLock, RwLockReadGuard, RwLockWriteGuard,
+    futures::{Read, Write},
 };
-use either::Either;
-use event_listener::{listener, Event, IntoNotification};
-use futures::FutureExt;
+use event_listener::{Event, IntoNotification, listener};
 
 use crate::{
-    SensorObserve, SensorObserveAsync, SensorWrite, SensorWriteAsync, ShareStrategy, SymResult,
-    Version, Wrapper,
+    RefWrapper, SensorObserve, SensorObserveAsync, SensorWrite, SensorWriteAsync, ShareStrategy,
+    SymResult, Wrapper,
 };
 
-use super::{SensorCore, CLOSED_BIT, VERSION_BUMP};
-
-macro_rules! miri_log {
-    ($($arg:tt)*) => {
-        #[cfg(feature = "dev-miri-logs")]
-        println!($($arg)*)
-    };
-}
+use super::{CLOSED_BIT, VERSION_BUMP, VERSION_INIT};
 
 #[repr(transparent)]
 pub struct Writer<T, R: ShareStrategy<Target = Core<T>>> {
     core: R,
 }
 
-impl<T, R: ShareStrategy<Target = Core<T>>> Writer<T, R> {
+impl<T> Writer<T, Wrapper<Core<T>>> {
     #[inline(always)]
-    pub fn new(init: T) -> Self {
+    pub const fn new_const(init: T) -> Self {
         Self {
-            core: R::init(Core::new(init)),
+            core: Wrapper(Core::new(init)),
+        }
+    }
+
+    #[inline(always)]
+    pub const fn observe_ref_const(&self) -> Observer<T, RefWrapper<Core<T>>> {
+        Observer {
+            core: RefWrapper(&self.core.0),
+            version: VERSION_INIT,
+        }
+    }
+
+    #[inline(always)]
+    pub const fn clone_ref_const(&self) -> Writer<T, RefWrapper<Core<T>>> {
+        Writer {
+            core: RefWrapper(&self.core.0),
         }
     }
 }
 
-impl<T, R: ShareStrategy<Target = Core<T>>> From<T> for Writer<T, R> {
+impl<T, R: ShareStrategy<Target = Core<T>>> Writer<T, R> {
+    pub fn clone_ref(&self) -> Writer<T, RefWrapper<Core<T>>> {
+        Writer {
+            core: RefWrapper(&self.core),
+        }
+    }
+
+    #[inline(always)]
+    pub fn observe_ref(&self) -> Observer<T, RefWrapper<Core<T>>> {
+        Observer {
+            core: RefWrapper(&self.core),
+            version: VERSION_INIT,
+        }
+    }
+}
+
+impl<T, R: ShareStrategy<Target = Core<T>>> Writer<T, R>
+where
+    R: Clone,
+{
+    #[inline(always)]
+    pub fn observe(&self) -> Observer<T, R> {
+        Observer {
+            core: self.core.clone(),
+            version: VERSION_INIT,
+        }
+    }
+}
+
+impl<T, R: ShareStrategy<Target = Core<T>>> Clone for Writer<T, R>
+where
+    R: Clone,
+{
+    fn clone(&self) -> Self {
+        if R::PERMANENT {
+            let writers = self.core.writers.fetch_add(1, Ordering::Relaxed);
+            if writers > usize::MAX >> 1 {
+                panic!("Too many writers");
+            }
+        }
+        Self {
+            core: self.core.clone(),
+        }
+    }
+}
+
+impl<T, R: ShareStrategy<Target = Core<T>>> Drop for Writer<T, R> {
+    fn drop(&mut self) {
+        if R::PERMANENT {
+            if self.core.writers.fetch_sub(1, Ordering::Relaxed) == 1 {
+                let _ = self
+                    .core
+                    .version_data
+                    .v
+                    .fetch_or(CLOSED_BIT, Ordering::Relaxed);
+
+                let _ = self.core.version_data.updated.notify(1.additional());
+            }
+        }
+    }
+}
+
+impl<T, R: ShareStrategy<Target = Core<T>>> Writer<T, R>
+where
+    R: From<Core<T>>,
+{
+    #[inline(always)]
+    pub fn new(init: T) -> Self {
+        Self {
+            core: R::from(Core::new(init)),
+        }
+    }
+}
+
+impl<T, R: ShareStrategy<Target = Core<T>>> From<T> for Writer<T, R>
+where
+    R: From<Core<T>>,
+{
     #[inline(always)]
     fn from(value: T) -> Self {
         Self::new(value)
@@ -109,7 +178,7 @@ impl<T, R: ShareStrategy<Target = Core<T>>> SensorWriteAsync for Writer<T, R> {
 #[derive(Clone, Copy)]
 pub struct Observer<T, R: ShareStrategy<Target = Core<T>>> {
     core: R,
-    version: Version,
+    version: usize,
 }
 
 impl<T, R: ShareStrategy<Target = Core<T>>> SensorObserve for Observer<T, R> {
@@ -122,12 +191,12 @@ impl<T, R: ShareStrategy<Target = Core<T>>> SensorObserve for Observer<T, R> {
 
     #[inline]
     fn mark_seen(&mut self) {
-        self.version.0 = self.core.version_data.v.load(Ordering::Relaxed);
+        self.version = self.core.version_data.v.load(Ordering::Relaxed);
     }
 
     #[inline]
     fn mark_unseen(&mut self) {
-        self.version.0 = self
+        self.version = self
             .core
             .version_data
             .v
@@ -137,7 +206,7 @@ impl<T, R: ShareStrategy<Target = Core<T>>> SensorObserve for Observer<T, R> {
 
     #[inline]
     fn has_changed(&self) -> bool {
-        self.version.0 != self.core.version_data.v.load(Ordering::Relaxed)
+        self.version != self.core.version_data.v.load(Ordering::Relaxed)
     }
 
     #[inline]
@@ -146,62 +215,66 @@ impl<T, R: ShareStrategy<Target = Core<T>>> SensorObserve for Observer<T, R> {
     }
 }
 
-#[allow(refining_impl_trait)]
-impl<T, R: ShareStrategy<Target = Core<T>>> SensorObserveAsync for Observer<T, R> {
-    #[inline]
-    fn read(&self) -> Read<'_, T> {
-        self.core.lock.read()
-    }
-
-    async fn wait_until_changed(&self) -> SymResult<()> {
+impl<T, R: ShareStrategy<Target = Core<T>>> Observer<T, R> {
+    async fn wait_changed_inner(&self) -> SymResult<()> {
         let version_data = &self.core.version_data;
-        let mut curr_version = Version(version_data.v.load(Ordering::Relaxed));
-        while !curr_version.closed_bit_set() && curr_version == self.version {
+        let mut curr_version = version_data.v.load(Ordering::Relaxed);
+        while (curr_version & CLOSED_BIT == 0) && curr_version == self.version {
             listener!(version_data.updated => version_changed);
             version_changed.await;
             let _ = version_data.updated.notify(1.additional());
-            curr_version = Version(version_data.v.load(Ordering::Relaxed));
+            curr_version = version_data.v.load(Ordering::Relaxed);
         }
 
-        return match curr_version.closed_bit_set() {
-            true => Err(()),
-            false => Ok(()),
+        return match curr_version & CLOSED_BIT == 0 {
+            true => Ok(()),
+            false => Err(()),
         };
     }
+}
 
-    async fn wait_for<F: FnMut(&Self::Target) -> bool>(
-        &mut self,
-        mut condition: F,
-    ) -> SymResult<Self::ReadGuard<'_>> {
+#[allow(refining_impl_trait)]
+impl<T, R: ShareStrategy<Target = Core<T>>> SensorObserveAsync for Observer<T, R> {
+    fn read<'a>(&'a mut self) -> Read<'a, T> {
+        self.core.lock.read()
+    }
+
+    async fn wait_changed(&mut self) -> SymResult<()> {
+        self.wait_changed_inner().await
+    }
+
+    async fn wait_for<F>(&mut self, mut condition: F) -> SymResult<Self::ReadGuard<'_>>
+    where
+        F: for<'b> FnMut(&'b Self::Target) -> bool,
+    {
         let mut res = match self.is_closed() {
             true => Err(()),
             false => Ok(()),
         };
 
         loop {
-            let guard = self.read().await;
+            let guard = self.core.lock.read().await;
             if res.is_err() {
                 return Err(guard);
             }
             if condition(&guard) {
                 return Ok(guard);
             }
-            res = self.wait_until_changed().await;
+            drop(guard);
+            res = self.wait_changed_inner().await;
         }
     }
 
-    async fn wait_for_next<F: FnMut(&Self::Target) -> bool>(
-        &mut self,
+    async fn wait_for_next<'a, F: FnMut(&Self::Target) -> bool>(
+        &'a mut self,
         mut condition: F,
-    ) -> SymResult<Self::ReadGuard<'_>> {
+    ) -> SymResult<Self::ReadGuard<'a>> {
         loop {
-            let res = self.wait_until_changed().await;
-
-            let guard = self.read().await;
+            let res = self.wait_changed_inner().await;
+            let guard = self.core.lock.read().await;
             if res.is_err() {
                 return Err(guard);
             }
-
             if condition(&guard) {
                 return Ok(guard);
             }
@@ -215,7 +288,7 @@ struct VersionData {
 }
 
 /// Standard asyncronous sensor core.
-struct Core<T> {
+pub struct Core<T> {
     lock: RwLock<T>,
     writers: AtomicUsize,
     version_data: VersionData,
@@ -236,18 +309,11 @@ impl<T> Core<T> {
     }
 }
 
-impl<T> From<T> for Core<T> {
-    #[inline(always)]
-    fn from(value: T) -> Self {
-        Self::new(value)
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use crate::{sensor_core::SensorCoreAsync, SensorWriteAsync, Version, Wrapper};
+    use crate::{SensorObserveAsync, SensorWriteAsync, Wrapper};
 
-    use super::{Core, Writer};
+    use super::Writer;
 
     #[repr(transparent)]
     struct IsSend<S: Send>(S);
@@ -255,10 +321,16 @@ mod tests {
     /// We prove that all futures relating to `AsyncCore` are inherently `Send`.
     #[test]
     fn send_proofs() {
-        let mut writer = Writer::<_, Wrapper<_>>::new(0);
+        let writer = Writer::<_, Wrapper<_>>::new_const(0);
+        let mut reader = writer.observe_ref();
+        let mut writer = writer.clone_ref();
 
         let _ = IsSend(writer.write());
         let _ = IsSend(writer.modify(|_| true));
+        let _ = IsSend(reader.read());
+        let _ = IsSend(reader.wait_for(|_| true));
+        let _ = IsSend(reader.wait_for_next(|_| true));
+        let _ = IsSend(reader.wait_changed());
     }
 }
 

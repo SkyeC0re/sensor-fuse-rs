@@ -1,13 +1,16 @@
 use async_lock::RwLockReadGuard;
-use criterion::{criterion_main, measurement::WallTime, BenchmarkGroup, Criterion};
+use criterion::{BenchmarkGroup, Criterion, criterion_main, measurement::WallTime};
 use futures::executor::block_on;
 use rand::random;
-use sensor_fuse::{sensor_core::alloc::Core, SensorObserveAsync, SensorWriteAsync, SensorWriter};
+use sensor_fuse::{
+    SensorObserveAsync, SensorWriteAsync,
+    sensor_core::alloc::{Core, Writer},
+};
 use std::{
     hint::black_box,
     sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicUsize, Ordering},
     },
 };
 use tokio::{
@@ -196,13 +199,13 @@ impl Drop for WatchContentionEnvironment {
 struct ContentionEnvironment {
     reader_handles: Vec<tokio::task::JoinHandle<()>>,
     writer_handles: Vec<tokio::task::JoinHandle<()>>,
-    writer: SensorWriter<Core<ContentionData>, Arc<Core<ContentionData>>>,
+    writer: Writer<ContentionData, Arc<Core<ContentionData>>>,
     _runtime: Runtime,
 }
 
 impl ContentionEnvironment {
     fn new(reader_count: usize, writer_count: usize) -> Self {
-        let writer = SensorWriter::from_value(ContentionData::default());
+        let writer = Writer::from(ContentionData::default());
         let runtime = runtime::Builder::new_multi_thread()
             .worker_threads(4)
             .build()
@@ -210,7 +213,7 @@ impl ContentionEnvironment {
 
         let mut reader_handles = Vec::new();
         for _ in 0..reader_count {
-            let mut reader = writer.spawn_observer();
+            let mut reader = writer.observe();
             reader_handles.push(runtime.spawn(async move {
                 let mut test_version = 0;
                 let mut observations = 0;
@@ -267,12 +270,12 @@ impl ContentionEnvironment {
 
         let mut writer_handles = Vec::new();
         for _ in 0..writer_count {
-            let writer = writer.clone();
+            let mut writer = writer.clone();
             writer_handles.push(runtime.spawn_blocking(move || {
                 let mut test_version = 0;
                 let mut writes = 0;
                 loop {
-                    let fut = writer.modify_with(|state: &mut ContentionData| {
+                    let fut = writer.modify(|state: &mut ContentionData| {
                         state.data_version = state.data_version.wrapping_add(1);
                         if test_version != state.test_version {
                             writes = 0;
@@ -310,11 +313,11 @@ impl ContentionEnvironment {
         }
     }
 
-    fn bench_individual_writes_req(&self, required_writes: usize, observer_spin_loops: usize) {
+    fn bench_individual_writes_req(&mut self, required_writes: usize, observer_spin_loops: usize) {
         block_on(async {
-            let mut observer = self.writer.spawn_observer();
+            let mut observer = self.writer.observe();
             self.writer
-                .modify_with(|state| {
+                .modify(|state| {
                     state.test_version += 1;
                     state.observers_completed.fetch_and(0, Ordering::Relaxed);
                     state.writers_completed = 0;
@@ -336,14 +339,14 @@ impl ContentionEnvironment {
     }
 
     fn bench_individual_observations_req(
-        &self,
+        &mut self,
         required_observations: usize,
         writer_spin_loops: usize,
     ) {
         block_on(async {
-            let mut observer = self.writer.spawn_observer();
+            let mut observer = self.writer.observe();
             self.writer
-                .modify_with(|state| {
+                .modify(|state| {
                     state.test_version += 1;
                     state.observers_completed.fetch_and(0, Ordering::Relaxed);
                     state.writers_completed = 0;
@@ -367,7 +370,7 @@ impl Drop for ContentionEnvironment {
     fn drop(&mut self) {
         block_on(async {
             self.writer
-                .modify_with(|state| {
+                .modify(|state| {
                     state.test_version = usize::MAX;
                     true
                 })
@@ -384,7 +387,7 @@ impl Drop for ContentionEnvironment {
 }
 
 fn arc_async_r5_w5_o50_s10_observation(c: &mut BenchmarkGroup<WallTime>) {
-    let env = ContentionEnvironment::new(5, 5);
+    let mut env = ContentionEnvironment::new(5, 5);
 
     c.bench_function("arc_async_alloc_r5_w5_o50_s10_observation", |b| {
         b.iter(|| {
@@ -404,7 +407,7 @@ fn tokio_watch_r5_w5_o50_s10_observation(c: &mut BenchmarkGroup<WallTime>) {
 }
 
 fn arc_async_r5_w5_o50_s50_observation(c: &mut BenchmarkGroup<WallTime>) {
-    let env = ContentionEnvironment::new(5, 5);
+    let mut env = ContentionEnvironment::new(5, 5);
 
     c.bench_function("arc_async_alloc_r5_w5_o50_s50_observation", |b| {
         b.iter(|| {
@@ -424,7 +427,7 @@ fn tokio_watch_r5_w5_o50_s50_observation(c: &mut BenchmarkGroup<WallTime>) {
 }
 
 fn arc_async_r5_w5_o50_s100_observation(c: &mut BenchmarkGroup<WallTime>) {
-    let env = ContentionEnvironment::new(5, 5);
+    let mut env = ContentionEnvironment::new(5, 5);
 
     c.bench_function("arc_async_alloc_r5_w5_o50_s100_observation", |b| {
         b.iter(|| {
@@ -444,7 +447,7 @@ fn tokio_watch_r5_w5_o50_s100_observation(c: &mut BenchmarkGroup<WallTime>) {
 }
 
 fn arc_async_r5_w5_o50_s10_writes(c: &mut BenchmarkGroup<WallTime>) {
-    let env = ContentionEnvironment::new(5, 5);
+    let mut env = ContentionEnvironment::new(5, 5);
 
     c.bench_function("arc_async_alloc_r5_w5_o50_s10_writes", |b| {
         b.iter(|| {
@@ -464,7 +467,7 @@ fn tokio_watch_r5_w5_o50_s10_writes(c: &mut BenchmarkGroup<WallTime>) {
 }
 
 fn arc_async_r5_w5_o50_s50_writes(c: &mut BenchmarkGroup<WallTime>) {
-    let env = ContentionEnvironment::new(5, 5);
+    let mut env = ContentionEnvironment::new(5, 5);
 
     c.bench_function("arc_async_alloc_r5_w5_o50_s50_writes", |b| {
         b.iter(|| {
@@ -484,7 +487,7 @@ fn tokio_watch_r5_w5_o50_s50_writes(c: &mut BenchmarkGroup<WallTime>) {
 }
 
 fn arc_async_r5_w5_o50_s100_writes(c: &mut BenchmarkGroup<WallTime>) {
-    let env = ContentionEnvironment::new(5, 5);
+    let mut env = ContentionEnvironment::new(5, 5);
 
     c.bench_function("arc_async_alloc_r5_w5_o50_s100_writes", |b| {
         b.iter(|| {
@@ -504,7 +507,7 @@ fn tokio_watch_r5_w5_o50_s100_writes(c: &mut BenchmarkGroup<WallTime>) {
 }
 
 fn arc_async_r1_w10_o50_s10_observation(c: &mut BenchmarkGroup<WallTime>) {
-    let env = ContentionEnvironment::new(1, 10);
+    let mut env = ContentionEnvironment::new(1, 10);
 
     c.bench_function("arc_async_alloc_r1_w10_o50_s10_observation", |b| {
         b.iter(|| {
@@ -524,7 +527,7 @@ fn tokio_watch_r1_w10_o50_s10_observation(c: &mut BenchmarkGroup<WallTime>) {
 }
 
 fn arc_async_r1_w10_o50_s50_observation(c: &mut BenchmarkGroup<WallTime>) {
-    let env = ContentionEnvironment::new(1, 10);
+    let mut env = ContentionEnvironment::new(1, 10);
 
     c.bench_function("arc_async_alloc_r1_w10_o50_s50_observation", |b| {
         b.iter(|| {
@@ -544,7 +547,7 @@ fn tokio_watch_r1_w10_o50_s50_observation(c: &mut BenchmarkGroup<WallTime>) {
 }
 
 fn arc_async_r1_w10_o50_s100_observation(c: &mut BenchmarkGroup<WallTime>) {
-    let env = ContentionEnvironment::new(1, 10);
+    let mut env = ContentionEnvironment::new(1, 10);
 
     c.bench_function("arc_async_alloc_r1_w10_o50_s100_observation", |b| {
         b.iter(|| {
@@ -564,7 +567,7 @@ fn tokio_watch_r1_w10_o50_s100_observation(c: &mut BenchmarkGroup<WallTime>) {
 }
 
 fn arc_async_r1_w10_o50_s10_writes(c: &mut BenchmarkGroup<WallTime>) {
-    let env = ContentionEnvironment::new(1, 10);
+    let mut env = ContentionEnvironment::new(1, 10);
 
     c.bench_function("arc_async_alloc_r1_w10_o50_s10_writes", |b| {
         b.iter(|| {
@@ -584,7 +587,7 @@ fn tokio_watch_r1_w10_o50_s10_writes(c: &mut BenchmarkGroup<WallTime>) {
 }
 
 fn arc_async_r1_w10_o50_s50_writes(c: &mut BenchmarkGroup<WallTime>) {
-    let env = ContentionEnvironment::new(1, 10);
+    let mut env = ContentionEnvironment::new(1, 10);
 
     c.bench_function("arc_async_alloc_r1_w10_o50_s50_writes", |b| {
         b.iter(|| {
@@ -604,7 +607,7 @@ fn tokio_watch_r1_w10_o50_s50_writes(c: &mut BenchmarkGroup<WallTime>) {
 }
 
 fn arc_async_r1_w10_o50_s100_writes(c: &mut BenchmarkGroup<WallTime>) {
-    let env = ContentionEnvironment::new(1, 10);
+    let mut env = ContentionEnvironment::new(1, 10);
 
     c.bench_function("arc_async_alloc_r1_w10_o50_s100_writes", |b| {
         b.iter(|| {
@@ -624,7 +627,7 @@ fn tokio_watch_r1_w10_o50_s100_writes(c: &mut BenchmarkGroup<WallTime>) {
 }
 
 fn arc_async_r10_w1_o50_s10_observation(c: &mut BenchmarkGroup<WallTime>) {
-    let env = ContentionEnvironment::new(10, 1);
+    let mut env = ContentionEnvironment::new(10, 1);
 
     c.bench_function("arc_async_alloc_r10_w1_o50_s10_observation", |b| {
         b.iter(|| {
@@ -644,7 +647,7 @@ fn tokio_watch_r10_w1_o50_s10_observation(c: &mut BenchmarkGroup<WallTime>) {
 }
 
 fn arc_async_r10_w1_o50_s50_observation(c: &mut BenchmarkGroup<WallTime>) {
-    let env = ContentionEnvironment::new(10, 1);
+    let mut env = ContentionEnvironment::new(10, 1);
 
     c.bench_function("arc_async_alloc_r10_w1_o50_s50_observation", |b| {
         b.iter(|| {
@@ -664,7 +667,7 @@ fn tokio_watch_r10_w1_o50_s50_observation(c: &mut BenchmarkGroup<WallTime>) {
 }
 
 fn arc_async_r10_w1_o50_s100_observation(c: &mut BenchmarkGroup<WallTime>) {
-    let env = ContentionEnvironment::new(10, 1);
+    let mut env = ContentionEnvironment::new(10, 1);
 
     c.bench_function("arc_async_alloc_r10_w1_o50_s100_observation", |b| {
         b.iter(|| {
@@ -684,7 +687,7 @@ fn tokio_watch_r10_w1_o50_s100_observation(c: &mut BenchmarkGroup<WallTime>) {
 }
 
 fn arc_async_r10_w1_o50_s10_writes(c: &mut BenchmarkGroup<WallTime>) {
-    let env = ContentionEnvironment::new(10, 1);
+    let mut env = ContentionEnvironment::new(10, 1);
 
     c.bench_function("arc_async_alloc_r10_w1_o50_s10_writes", |b| {
         b.iter(|| {
@@ -704,7 +707,7 @@ fn tokio_watch_r10_w1_o50_s10_writes(c: &mut BenchmarkGroup<WallTime>) {
 }
 
 fn arc_async_r10_w1_o50_s50_writes(c: &mut BenchmarkGroup<WallTime>) {
-    let env = ContentionEnvironment::new(10, 1);
+    let mut env = ContentionEnvironment::new(10, 1);
 
     c.bench_function("arc_async_alloc_r10_w1_o50_s50_writes", |b| {
         b.iter(|| {
@@ -724,7 +727,7 @@ fn tokio_watch_r10_w1_o50_s50_writes(c: &mut BenchmarkGroup<WallTime>) {
 }
 
 fn arc_async_r10_w1_o50_s100_writes(c: &mut BenchmarkGroup<WallTime>) {
-    let env = ContentionEnvironment::new(10, 1);
+    let mut env = ContentionEnvironment::new(10, 1);
 
     c.bench_function("arc_async_alloc_r10_w1_o50_s100_writes", |b| {
         b.iter(|| {
