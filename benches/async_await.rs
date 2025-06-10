@@ -212,7 +212,7 @@ impl ContentionEnvironment {
             .unwrap();
 
         let mut reader_handles = Vec::new();
-        for _ in 0..reader_count {
+        for i in 0..reader_count {
             let mut reader = writer.observe();
             reader_handles.push(runtime.spawn(async move {
                 let mut test_version = 0;
@@ -220,6 +220,7 @@ impl ContentionEnvironment {
                 let mut last_observed_data = 0;
                 loop {
                     let mut iteration = 0;
+                    println!("R{i}-S");
                     let guard: RwLockReadGuard<ContentionData> = match reader
                         .wait_for(|state: &ContentionData| {
                             if state.test_version == usize::MAX {
@@ -264,17 +265,20 @@ impl ContentionEnvironment {
                     black_box(for _ in 0..guard.reader_spin_loop_iters {
                         std::hint::spin_loop();
                     });
+
+                    println!("R{i}-E");
                 }
             }));
         }
 
         let mut writer_handles = Vec::new();
-        for _ in 0..writer_count {
+        for i in 0..writer_count {
             let mut writer = writer.clone();
-            writer_handles.push(runtime.spawn_blocking(move || {
+            writer_handles.push(runtime.spawn(async move {
                 let mut test_version = 0;
                 let mut writes = 0;
                 loop {
+                    println!("W{i}-S");
                     let fut = writer.modify(|state: &mut ContentionData| {
                         state.data_version = state.data_version.wrapping_add(1);
                         if test_version != state.test_version {
@@ -295,12 +299,13 @@ impl ContentionEnvironment {
 
                         true
                     });
-
-                    block_on(fut);
+                    fut.await;
 
                     if test_version == usize::MAX {
                         break;
                     }
+
+                    println!("W{i}-E");
                 }
             }));
         }

@@ -8,11 +8,12 @@ edition = "2024"
 [dependencies]
 async-lock = { version = "3.4.0"}
 derived-deref = "2.1.0"
-either = { version = "1.13.0", default-features = false }
-event-listener = "5.3.1"
+event-listener = "5.4.0"
 futures = "0.3.30"
-parking_lot = "0.12.3"
 wookie = "0.3.2"
+tokio = { version = "1.45.1", default-features = false, features = [
+    "sync",
+] }
 
 [dev-dependencies]
 async-std = "1.12.0"

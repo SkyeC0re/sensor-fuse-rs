@@ -161,6 +161,7 @@ impl<T, R: ShareStrategy<Target = Core<T>>> SensorWriteAsync for Writer<T, R> {
     async fn modify<F: FnOnce(&mut Self::Target) -> bool>(&mut self, f: F) {
         let mut guard = self.core.lock.write().await;
         if f(&mut guard) {
+            drop(guard);
             self.notify_all();
         }
     }
@@ -216,7 +217,7 @@ impl<T, R: ShareStrategy<Target = Core<T>>> SensorObserve for Observer<T, R> {
 }
 
 impl<T, R: ShareStrategy<Target = Core<T>>> Observer<T, R> {
-    async fn wait_changed_inner(&self) -> SymResult<()> {
+    async fn wait_changed_inner(&self) -> usize {
         let version_data = &self.core.version_data;
         let mut curr_version = version_data.v.load(Ordering::Relaxed);
         while (curr_version & CLOSED_BIT == 0) && curr_version == self.version {
@@ -226,10 +227,8 @@ impl<T, R: ShareStrategy<Target = Core<T>>> Observer<T, R> {
             curr_version = version_data.v.load(Ordering::Relaxed);
         }
 
-        return match curr_version & CLOSED_BIT == 0 {
-            true => Ok(()),
-            false => Err(()),
-        };
+        println!("S {}", (self as *const Self) as usize);
+        curr_version
     }
 }
 
@@ -240,28 +239,32 @@ impl<T, R: ShareStrategy<Target = Core<T>>> SensorObserveAsync for Observer<T, R
     }
 
     async fn wait_changed(&mut self) -> SymResult<()> {
-        self.wait_changed_inner().await
+        let version = self.wait_changed_inner().await;
+
+        match version & CLOSED_BIT == CLOSED_BIT {
+            true => Err(()),
+            false => Ok(()),
+        }
     }
 
     async fn wait_for<F>(&mut self, mut condition: F) -> SymResult<Self::ReadGuard<'_>>
     where
         F: for<'b> FnMut(&'b Self::Target) -> bool,
     {
-        let mut res = match self.is_closed() {
-            true => Err(()),
-            false => Ok(()),
-        };
+        let mut version = self.core.version_data.v.load(Ordering::Relaxed);
 
         loop {
             let guard = self.core.lock.read().await;
-            if res.is_err() {
+            if version & CLOSED_BIT == CLOSED_BIT {
+                self.version = version;
                 return Err(guard);
             }
             if condition(&guard) {
+                self.version = version;
                 return Ok(guard);
             }
             drop(guard);
-            res = self.wait_changed_inner().await;
+            version = self.wait_changed_inner().await;
         }
     }
 
@@ -270,12 +273,14 @@ impl<T, R: ShareStrategy<Target = Core<T>>> SensorObserveAsync for Observer<T, R
         mut condition: F,
     ) -> SymResult<Self::ReadGuard<'a>> {
         loop {
-            let res = self.wait_changed_inner().await;
+            let version = self.wait_changed_inner().await;
             let guard = self.core.lock.read().await;
-            if res.is_err() {
+            if version & CLOSED_BIT == CLOSED_BIT {
+                self.version = version;
                 return Err(guard);
             }
             if condition(&guard) {
+                self.version = version;
                 return Ok(guard);
             }
         }

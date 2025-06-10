@@ -2,6 +2,7 @@
 //!
 
 pub mod alloc;
+pub mod in_house;
 // pub mod no_alloc;
 
 use core::{

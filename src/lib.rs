@@ -83,6 +83,12 @@ impl<T> Deref for Wrapper<T> {
     }
 }
 
+impl<T> From<T> for Wrapper<T> {
+    fn from(value: T) -> Self {
+        Self(value)
+    }
+}
+
 #[repr(transparent)]
 #[derive(Debug, Clone, Copy)]
 pub struct RefWrapper<'a, T>(pub &'a T);
