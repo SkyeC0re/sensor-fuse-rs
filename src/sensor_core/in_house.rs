@@ -4,7 +4,7 @@ use std::{
     marker::PhantomPinned,
     mem::MaybeUninit,
     pin::Pin,
-    ptr::null_mut,
+    ptr::{self, null_mut},
     sync::{
         MutexGuard,
         atomic::{AtomicPtr, AtomicU8, AtomicUsize, Ordering},
@@ -155,13 +155,32 @@ impl Core {
         &self,
         _guard: MutexGuard<()>,
         node: *mut Node,
+        mut known_tail: *mut Node,
         mut owned_permits: usize,
     ) {
         if owned_permits < MAX_WAKE_CLUSTERING {
             owned_permits += self.get_read_permits(MAX_WAKE_CLUSTERING - owned_permits);
 
             if owned_permits == 0 {
-                unsafe { *(self.rw_head.get()) = node }
+                unsafe {
+                    *(self.rw_head.get()) = node;
+                    (*node).prev = null_mut();
+                    return;
+                }
+            }
+        }
+
+        let mut waker_count = 0;
+        let mut wakers = [const { MaybeUninit::uninit() }; MAX_WAKE_CLUSTERING];
+        let mut curr = node;
+
+        while waker_count < owned_permits {
+            unsafe {
+                ptr::copy_nonoverlapping(&(*curr).waker, wakers.get_unchecked_mut(waker_count), 1);
+                waker_count += 1;
+
+                let mut next = (*curr).next.load(Ordering::Acquire);
+                //  = ;
             }
         }
     }
