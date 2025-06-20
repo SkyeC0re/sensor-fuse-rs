@@ -3,6 +3,7 @@ use std::{
     hint::spin_loop,
     marker::PhantomPinned,
     mem::MaybeUninit,
+    num::NonZero,
     pin::Pin,
     ptr::{self, null_mut},
     sync::{
@@ -24,15 +25,15 @@ struct Node {
     waker: MaybeUninit<Waker>,
     next: AtomicPtr<Node>,
     prev: *mut Node,
-    // ... WAKE_NEXT_BIT | COMPLETE_BIT
+    // ... IS_WRITER_BIT | WAKE_NEXT_BIT | COMPLETE_BIT
     state: AtomicU8,
-
     _p: PhantomPinned,
 }
 
 impl Node {
     const STATE_COMPLETE_BIT: u8 = 0b1;
     const STATE_WAKE_NEXT_BIT: u8 = 0b10;
+    const STATE_IS_WRITER_BIT: u8 = 0b100;
 
     const SENTINEL: usize = 1;
 }
@@ -71,6 +72,10 @@ impl Core {
             spin_loop();
         }
         0
+    }
+
+    fn release_read_permits(&self, amount: usize) {
+        self.lock_state.fetch_add(amount, Ordering::Relaxed);
     }
 
     /// # Safety
@@ -151,13 +156,19 @@ impl Core {
     }
 
     // Head should be zeroed
-    fn wake_rw_queue_from(
+    fn wake_readers_from_reader(
         &self,
         _guard: MutexGuard<()>,
         node: *mut Node,
-        mut known_tail: *mut Node,
         mut owned_permits: usize,
     ) {
+        unsafe {
+            if *(*node).state.get_mut() & Node::STATE_IS_WRITER_BIT != 0 {
+                *self.rw_head.get() = node;
+                return;
+            }
+        }
+
         if owned_permits < MAX_WAKE_CLUSTERING {
             owned_permits += self.get_read_permits(MAX_WAKE_CLUSTERING - owned_permits);
 
@@ -173,14 +184,36 @@ impl Core {
         let mut waker_count = 0;
         let mut wakers = [const { MaybeUninit::uninit() }; MAX_WAKE_CLUSTERING];
         let mut curr = node;
-
         while waker_count < owned_permits {
             unsafe {
                 ptr::copy_nonoverlapping(&(*curr).waker, wakers.get_unchecked_mut(waker_count), 1);
                 waker_count += 1;
 
                 let mut next = (*curr).next.load(Ordering::Acquire);
-                //  = ;
+                if next == null_mut() {
+                    if self
+                        .rw_tail
+                        .compare_exchange(curr, null_mut(), Ordering::Relaxed, Ordering::Relaxed)
+                        .is_ok()
+                    {
+                        (*curr)
+                            .state
+                            .store(Node::STATE_COMPLETE_BIT, Ordering::Release);
+                        break;
+                    }
+
+                    loop {
+                        spin_loop();
+                        next = (*curr).next.load(Ordering::Acquire);
+                        if next != null_mut() {
+                            break;
+                        }
+                    }
+                }
+
+                if *(*next).state.get_mut() & Node::STATE_IS_WRITER_BIT != 0 {
+                    
+                }
             }
         }
     }
