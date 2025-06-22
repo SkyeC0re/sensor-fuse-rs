@@ -16,6 +16,9 @@ use std::{
 use std::sync::Mutex;
 const MAX_WAKE_CLUSTERING: usize = 8;
 
+const WRITE_PERMIT_VALUE: usize = usize::MAX;
+const MAX_READ_PERMITS: usize = WRITE_PERMIT_VALUE >> 1;
+
 const VERSION_BUMP: usize = 2;
 const CLOSED_BIT: usize = 0b1;
 
@@ -25,15 +28,15 @@ struct Node {
     waker: MaybeUninit<Waker>,
     next: AtomicPtr<Node>,
     prev: *mut Node,
-    // ... IS_WRITER_BIT | WAKE_NEXT_BIT | COMPLETE_BIT
+    // ... | WAKE_NEXT_BIT | COMPLETE_BIT
     state: AtomicU8,
+    is_write: bool,
     _p: PhantomPinned,
 }
 
 impl Node {
     const STATE_COMPLETE_BIT: u8 = 0b1;
     const STATE_WAKE_NEXT_BIT: u8 = 0b10;
-    const STATE_IS_WRITER_BIT: u8 = 0b100;
 
     const SENTINEL: usize = 1;
 }
@@ -57,16 +60,16 @@ pub struct Core {
 
 impl Core {
     fn get_read_permits(&self, amount: usize) -> usize {
-        let mut state = self.lock_state.load(Ordering::Relaxed);
-        while state > amount {
+        let mut available_permits = self.lock_state.load(Ordering::Relaxed);
+        while available_permits > amount {
             match self.lock_state.compare_exchange_weak(
-                state,
-                state - amount,
+                available_permits,
+                available_permits - amount,
                 Ordering::Acquire,
                 Ordering::Relaxed,
             ) {
                 Ok(_) => return amount,
-                Err(new_state) => state = new_state,
+                Err(new_state) => available_permits = new_state,
             }
 
             spin_loop();
@@ -82,15 +85,21 @@ impl Core {
     ///
     /// Must already hold a read permit.
     fn increase_read_permits(&self, amount: usize) {
-        if self.lock_state.fetch_sub(amount, Ordering::Relaxed) < usize::MAX << 1 {
+        if self.lock_state.fetch_sub(amount, Ordering::Relaxed)
+            < const { WRITE_PERMIT_VALUE - MAX_READ_PERMITS }
+        {
             panic!("Too many read permits");
         }
     }
 
     fn get_write_permit(&self) -> bool {
         self.lock_state
-            .compare_exchange(usize::MAX, 0, Ordering::Acquire, Ordering::Relaxed)
+            .compare_exchange(WRITE_PERMIT_VALUE, 0, Ordering::Acquire, Ordering::Relaxed)
             .is_ok()
+    }
+
+    fn release_write_permit(&self) {
+        self.lock_state.store(WRITE_PERMIT_VALUE, Ordering::Release);
     }
 
     fn notify_all(&self, mut owned_permits: usize) {
@@ -126,68 +135,53 @@ impl Core {
                 (*rw_tail).next = AtomicPtr::new(pr_head);
                 return;
             }
-
-            // *self.rw_head.get() = null_mut();
-
-            // let required_permits = if pr_head == pr_tail {
-            //     1
-            // } else {
-            //     MAX_WAKE_CLUSTERING
-            // };
-
-            // if owned_permits < required_permits {
-            //     owned_permits += self.get_read_permits(required_permits - owned_permits);
-
-            //     if owned_permits == 0 {
-
-            //     }
-            // }
-
-            // // Safety: Only the node's state can be accessed whilst we hold the mutex guard.
-            // (*pr_tail).next = AtomicPtr::new(Node::SENTINEL as *mut _);
-
-            // let mut waker_count = 0;
-            // let wakers = [MaybeUninit::uninit(); MAX_WAKE_CLUSTERING];
-            // let mut next = wc_head;
-            // while waker_count < MAX_WAKE_CLUSTERING {
-            //     *wakers.get_unchecked_mut(waker_count) =
-            // }
         }
     }
 
-    // Head should be zeroed
-    fn wake_readers_from_reader(
+    // Wake the next waiting cluster of reads from the current wake set.
+    //
+    // # Safety
+    //
+    // Head should be zeroed. Permits should either be non-zero, or the caller must be holding on to a permit that it is not giving away.
+    unsafe fn wake_next_read(
         &self,
-        _guard: MutexGuard<()>,
+        // The first read in the cluster.
         node: *mut Node,
-        mut owned_permits: usize,
+        // Main queue lock guard.
+        guard: MutexGuard<()>,
+        // Read permits that are being given away to this function.
+        mut permits: usize,
     ) {
         unsafe {
-            if *(*node).state.get_mut() & Node::STATE_IS_WRITER_BIT != 0 {
-                *self.rw_head.get() = node;
-                return;
-            }
-        }
+            if permits < MAX_WAKE_CLUSTERING {
+                self.increase_read_permits(MAX_WAKE_CLUSTERING - permits);
+                permits = MAX_WAKE_CLUSTERING;
 
-        if owned_permits < MAX_WAKE_CLUSTERING {
-            owned_permits += self.get_read_permits(MAX_WAKE_CLUSTERING - owned_permits);
-
-            if owned_permits == 0 {
-                unsafe {
+                if permits == 0 {
                     *(self.rw_head.get()) = node;
                     (*node).prev = null_mut();
                     return;
                 }
             }
-        }
 
-        let mut waker_count = 0;
-        let mut wakers = [const { MaybeUninit::uninit() }; MAX_WAKE_CLUSTERING];
-        let mut curr = node;
-        while waker_count < owned_permits {
-            unsafe {
-                ptr::copy_nonoverlapping(&(*curr).waker, wakers.get_unchecked_mut(waker_count), 1);
-                waker_count += 1;
+            let mut cluster_size = 0;
+            let mut wakers = [const { MaybeUninit::uninit() }; MAX_WAKE_CLUSTERING];
+            let mut curr = node;
+            loop {
+                ptr::copy_nonoverlapping(&(*curr).waker, wakers.get_unchecked_mut(cluster_size), 1);
+                cluster_size += 1;
+
+                if cluster_size == MAX_WAKE_CLUSTERING {
+                    (*curr).state.store(
+                        Node::STATE_COMPLETE_BIT | Node::STATE_WAKE_NEXT_BIT,
+                        Ordering::Release,
+                    );
+                    break;
+                }
+
+                (*curr)
+                    .state
+                    .store(Node::STATE_COMPLETE_BIT, Ordering::Release);
 
                 let mut next = (*curr).next.load(Ordering::Acquire);
                 if next == null_mut() {
@@ -196,9 +190,6 @@ impl Core {
                         .compare_exchange(curr, null_mut(), Ordering::Relaxed, Ordering::Relaxed)
                         .is_ok()
                     {
-                        (*curr)
-                            .state
-                            .store(Node::STATE_COMPLETE_BIT, Ordering::Release);
                         break;
                     }
 
@@ -211,24 +202,74 @@ impl Core {
                     }
                 }
 
-                if *(*next).state.get_mut() & Node::STATE_IS_WRITER_BIT != 0 {
-                    
+                if (*next).is_write {
+                    *self.rw_head.get() = next;
+                    break;
                 }
+
+                curr = next;
+            }
+
+            drop(guard);
+
+            let releasable_permits = permits - cluster_size;
+            if releasable_permits > 0 {
+                self.release_read_permits(releasable_permits);
+            }
+
+            for waker in wakers.get_unchecked((cluster_size - 1)..=0) {
+                waker.assume_init_read().wake();
             }
         }
     }
 
-    /// Insert a node into a queue via a standard procedure.
-    unsafe fn insert_at_queue(queue: &AtomicPtr<Node>, elem: Pin<&mut Node>) -> *mut Node {
+    fn wake_next_wait_changed(
+        &self,
+        node: *mut Node,
+        // Changed lock guard.
+        guard: MutexGuard<()>,
+    ) {
         unsafe {
-            let elem: *mut Node = elem.get_unchecked_mut();
-            let prev = queue.swap(elem, Ordering::AcqRel);
+            let mut cluster_size = 0;
+            let mut wakers = [const { MaybeUninit::uninit() }; MAX_WAKE_CLUSTERING];
+            let mut curr = node;
+            loop {
+                ptr::copy_nonoverlapping(&(*curr).waker, wakers.get_unchecked_mut(cluster_size), 1);
+                cluster_size += 1;
 
-            if prev != null_mut() {
-                (*prev).next.store(elem, Ordering::Release);
+                if cluster_size == MAX_WAKE_CLUSTERING {
+                    (*curr).state.store(
+                        Node::STATE_COMPLETE_BIT | Node::STATE_WAKE_NEXT_BIT,
+                        Ordering::Release,
+                    );
+                    break;
+                }
+
+                (*curr)
+                    .state
+                    .store(Node::STATE_COMPLETE_BIT, Ordering::Release);
+
+                let mut next;
+                loop {
+                    next = (*curr).next.load(Ordering::Acquire);
+
+                    if next != null_mut() {
+                        break;
+                    }
+                    spin_loop();
+                }
+
+                if next == Node::SENTINEL as _ {
+                    break;
+                }
+
+                curr = next;
             }
 
-            prev
+            drop(guard);
+            for waker in wakers.get_unchecked((cluster_size - 1)..=0) {
+                waker.assume_init_read().wake();
+            }
         }
     }
 }
