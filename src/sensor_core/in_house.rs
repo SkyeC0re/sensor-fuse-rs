@@ -59,6 +59,7 @@ pub struct Core {
 }
 
 impl Core {
+    /// Read permits acquired will be either 0 or the requested amount.
     fn get_read_permits(&self, amount: usize) -> usize {
         let mut available_permits = self.lock_state.load(Ordering::Relaxed);
         while available_permits > amount {
@@ -270,6 +271,59 @@ impl Core {
             for waker in wakers.get_unchecked((cluster_size - 1)..=0) {
                 waker.assume_init_read().wake();
             }
+        }
+    }
+
+    fn wake_rw_queue(&self, holds_write_permit: bool) {
+        let guard = self.main_queue_lock.lock().unwrap();
+        unsafe {
+            let node = *self.rw_head.get();
+            if node == null_mut() {
+                return;
+            }
+
+            if !(*node).is_write {
+                let permits = if holds_write_permit {
+                    WRITE_PERMIT_VALUE
+                } else if self.get_read_permits(MAX_WAKE_CLUSTERING) == MAX_WAKE_CLUSTERING {
+                    MAX_WAKE_CLUSTERING
+                } else {
+                    return;
+                };
+
+                *self.rw_head.get() = null_mut();
+                self.wake_next_read(node, guard, permits);
+                return;
+            }
+
+            if !holds_write_permit {
+                if !self.get_write_permit() {
+                    return;
+                }
+            }
+
+            let mut next = (*node).next.load(Ordering::Relaxed);
+
+            if next == null_mut() {
+                if self
+                    .rw_tail
+                    .compare_exchange(node, null_mut(), Ordering::Relaxed, Ordering::Relaxed)
+                    .is_err()
+                {
+                    loop {
+                        next = self.rw_tail.load(Ordering::Relaxed);
+                        if next != null_mut() {
+                            break;
+                        }
+                        spin_loop();
+                    }
+                }
+            }
+            *self.rw_head.get() = next;
+
+            (*node)
+                .state
+                .store(Node::STATE_COMPLETE_BIT, Ordering::Release);
         }
     }
 }
