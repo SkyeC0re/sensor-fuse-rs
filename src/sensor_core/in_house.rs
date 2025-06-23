@@ -4,6 +4,7 @@ use std::{
     marker::PhantomPinned,
     mem::MaybeUninit,
     num::NonZero,
+    ops::{Deref, DerefMut},
     pin::Pin,
     ptr::{self, null_mut},
     sync::{
@@ -14,6 +15,8 @@ use std::{
 };
 
 use std::sync::Mutex;
+
+use crate::SensorWrite;
 const MAX_WAKE_CLUSTERING: usize = 8;
 
 const WRITE_PERMIT_VALUE: usize = usize::MAX;
@@ -41,7 +44,7 @@ impl Node {
     const SENTINEL: usize = 1;
 }
 
-pub struct Core {
+pub struct Core<T> {
     // Permits available
     lock_state: AtomicUsize,
     version: AtomicUsize,
@@ -56,9 +59,11 @@ pub struct Core {
 
     changed_queue_lock: Mutex<()>,
     wc_head: AtomicPtr<Node>,
+
+    data: UnsafeCell<T>,
 }
 
-impl Core {
+impl<T> Core<T> {
     /// Read permits acquired will be either 0 or the requested amount.
     fn get_read_permits(&self, amount: usize) -> usize {
         let mut available_permits = self.lock_state.load(Ordering::Relaxed);
@@ -103,9 +108,11 @@ impl Core {
         self.lock_state.store(WRITE_PERMIT_VALUE, Ordering::Release);
     }
 
-    fn notify_all(&self, mut owned_permits: usize) {
+    unsafe fn notify_all(&self, mut owned_permits: usize) {
         let _ = self.version.fetch_add(VERSION_BUMP, Ordering::Relaxed);
 
+        // `AcqRel`, because the next wait changed element that inserts itself should be made aware
+        // of the version bump that just ocurred,
         let wc_head = self.wc_head.swap(null_mut(), Ordering::AcqRel);
         if wc_head != null_mut() {
             unsafe {
@@ -118,24 +125,35 @@ impl Core {
             }
         }
 
-        let _guard = self.main_queue_lock.lock().unwrap();
+        let guard = self.main_queue_lock.lock().unwrap();
         unsafe {
             let pr_head = &mut *self.pr_head.get();
 
             if *pr_head == null_mut() {
                 return;
             }
-
             *pr_head = null_mut();
-            let pr_head = *pr_head;
-            let pr_tail = self.pr_tail.swap(null_mut(), Ordering::AcqRel);
 
+            let pr_head = *pr_head;
+            let pr_tail = self.pr_tail.swap(null_mut(), Ordering::Acquire);
             let rw_tail = self.rw_tail.swap(pr_tail, Ordering::Acquire);
             if rw_tail != null_mut() {
                 // Safety: Only the node's state can be accessed whilst we hold the mutex guard.
                 (*rw_tail).next = AtomicPtr::new(pr_head);
                 return;
             }
+
+            // See if we can wake immediately
+            if owned_permits == 0 {
+                owned_permits += self.get_read_permits(MAX_WAKE_CLUSTERING);
+            }
+
+            if owned_permits == 0 {
+                *self.rw_head.get() = pr_head;
+                return;
+            }
+
+            self.wake_next_read(pr_head, guard, owned_permits);
         }
     }
 
@@ -324,6 +342,74 @@ impl Core {
             (*node)
                 .state
                 .store(Node::STATE_COMPLETE_BIT, Ordering::Release);
+        }
+    }
+}
+
+pub struct WriteGuard<'a, T> {
+    core: &'a Core<T>,
+}
+
+impl<'a, T> Deref for WriteGuard<'a, T> {
+    type Target = T;
+
+    #[inline(always)]
+    fn deref(&self) -> &Self::Target {
+        unsafe { &*self.core.data.get() }
+    }
+}
+
+impl<'a, T> DerefMut for WriteGuard<'a, T> {
+    #[inline(always)]
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        unsafe { &mut *self.core.data.get() }
+    }
+}
+
+impl<'a, T> Drop for WriteGuard<'a, T> {
+    #[inline]
+    fn drop(&mut self) {
+        self.core.wake_rw_queue(true);
+    }
+}
+
+pub struct ReadGuard<'a, T> {
+    core: &'a Core<T>,
+}
+
+impl<'a, T> Deref for ReadGuard<'a, T> {
+    type Target = T;
+
+    #[inline(always)]
+    fn deref(&self) -> &Self::Target {
+        unsafe { &*self.core.data.get() }
+    }
+}
+
+impl<'a, T> Drop for ReadGuard<'a, T> {
+    #[inline]
+    fn drop(&mut self) {
+        self.core.wake_rw_queue(false);
+    }
+}
+
+impl<T> SensorWrite for Core<T> {
+    type Target = T;
+
+    type WriteGuard<'a>
+        = WriteGuard<'a, T>
+    where
+        Self: 'a;
+
+    fn notify_all(&self) {
+        unsafe { self.notify_all(0) };
+    }
+
+    fn try_write(&self) -> Option<Self::WriteGuard<'_>> {
+        if self.get_write_permit() {
+            Some(WriteGuard { core: self })
+        } else {
+            None
         }
     }
 }
