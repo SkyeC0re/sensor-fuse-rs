@@ -16,7 +16,7 @@ use std::{
 
 use std::sync::Mutex;
 
-use crate::SensorWrite;
+use crate::{SensorObserve, SensorWrite, ShareStrategy};
 const MAX_WAKE_CLUSTERING: usize = 8;
 
 const WRITE_PERMIT_VALUE: usize = usize::MAX;
@@ -393,7 +393,12 @@ impl<'a, T> Drop for ReadGuard<'a, T> {
     }
 }
 
-impl<T> SensorWrite for Core<T> {
+#[repr(transparent)]
+pub struct Writer<T, R: ShareStrategy<Target = Core<T>>> {
+    core: R,
+}
+
+impl<T, R: ShareStrategy<Target = Core<T>> > SensorWrite for Writer<T, R> {
     type Target = T;
 
     type WriteGuard<'a>
@@ -402,14 +407,54 @@ impl<T> SensorWrite for Core<T> {
         Self: 'a;
 
     fn notify_all(&self) {
-        unsafe { self.notify_all(0) };
+        unsafe { self.core.notify_all(0) };
     }
 
     fn try_write(&self) -> Option<Self::WriteGuard<'_>> {
-        if self.get_write_permit() {
-            Some(WriteGuard { core: self })
+        if self.core.get_write_permit() {
+            Some(WriteGuard { core: &self.core })
         } else {
             None
         }
+    }
+}
+
+
+#[derive(Clone, Copy)]
+pub struct Observer<T, R: ShareStrategy<Target = Core<T>>> {
+    core: R,
+    version: usize,
+}
+
+impl<T, R: ShareStrategy<Target = Core<T>>> SensorObserve for Observer<T, R> {
+    type Target = T;
+
+    type ReadGuard<'read>
+        = ReadGuard<'read, T>
+    where
+        Self: 'read;
+
+    #[inline]
+    fn mark_seen(&mut self) {
+        self.version = self.core.version.load(Ordering::Relaxed);
+    }
+
+    #[inline]
+    fn mark_unseen(&mut self) {
+        self.version = self
+            .core
+            .version
+            .load(Ordering::Relaxed)
+            .wrapping_sub(VERSION_BUMP);
+    }
+
+    #[inline]
+    fn has_changed(&self) -> bool {
+        self.version != self.core.version.load(Ordering::Relaxed)
+    }
+
+    #[inline]
+    fn is_closed(&self) -> bool {
+        self.core.version.load(Ordering::Relaxed) & CLOSED_BIT != 0
     }
 }
