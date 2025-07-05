@@ -126,6 +126,18 @@ impl<T> Core<T> {
         Some(ReadGuard { core: self })
     }
 
+    fn try_write(&self) -> Option<WriteGuard<T>> {
+        if self.writes_queued.load(Ordering::Acquire) != 0 {
+            return None;
+        }
+
+        if !self.try_upgrade_permits(0) {
+            return None;
+        }
+
+        Some(WriteGuard { core: self })
+    }
+
     unsafe fn notify_all(&self, mut owned_permits: usize) {
         let _ = self.version.fetch_add(VERSION_BUMP, Ordering::Relaxed);
 
@@ -428,20 +440,14 @@ impl<T, R: ShareStrategy<Target = Core<T>>> SensorWrite for Writer<T, R> {
     where
         Self: 'a;
 
+    #[inline(always)]
     fn notify_all(&self) {
         unsafe { self.core.notify_all(0) };
     }
 
+    #[inline(always)]
     fn try_write(&self) -> Option<Self::WriteGuard<'_>> {
-        if self.core.writes_queued.load(Ordering::Relaxed) != 0 {
-            return None;
-        }
-
-        if !self.core.try_upgrade_permits(0) {
-            return None;
-        }
-
-        Some(WriteGuard { core: &self.core })
+        self.core.try_write()
     }
 }
 
@@ -505,30 +511,34 @@ impl<'a, T> Future for Read<'a, T> {
 
                 let read_guard = ReadGuard { core: s.core };
                 if state & Node::STATE_WAKE_NEXT_BIT == 0 {
+                    s.node = None;
                     return Poll::Ready(read_guard);
                 }
 
                 let queue_guard = s.core.main_queue_lock.lock().unwrap();
+
                 let mut next = (*node).next.load(Ordering::Acquire);
                 if next == null_mut() {
-                    match s.core.rw_tail.compare_exchange(
+                    if let Err(new_next) = s.core.rw_tail.compare_exchange(
                         node,
                         null_mut(),
-                        Ordering::Acquire,
                         Ordering::Relaxed,
+                        Ordering::Acquire,
                     ) {
-                        Ok(_) => return Poll::Ready(read_guard),
-                        Err(new_next) => next = new_next,
+                        next = new_next;
                     }
                 }
-                s.core.wake_next_read(next, queue_guard, 0);
+
+                if next != null_mut() {
+                    s.core.wake_next_read(next, queue_guard, 0);
+                }
 
                 s.node = None;
                 return Poll::Ready(read_guard);
             }
 
-            if let Some(guard) = s.core.try_read() {
-                return Poll::Ready(guard);
+            if let Some(read_guard) = s.core.try_read() {
+                return Poll::Ready(read_guard);
             }
 
             s.node = Some(UnsafeCell::new(Node {
@@ -554,17 +564,20 @@ impl<'a, T> Future for Read<'a, T> {
             if let Some(read_guard) = s.core.try_read() {
                 let mut next = (*node).next.load(Ordering::Acquire);
                 if next == null_mut() {
-                    match s.core.rw_tail.compare_exchange(
+                    if let Err(new_next) = s.core.rw_tail.compare_exchange(
                         node,
                         null_mut(),
-                        Ordering::Acquire,
                         Ordering::Relaxed,
+                        Ordering::Acquire,
                     ) {
-                        Ok(_) => return Poll::Ready(read_guard),
-                        Err(new_next) => next = new_next,
+                        next = new_next;
                     }
                 }
-                s.core.wake_next_read(next, queue_guard, 0);
+
+                if next != null_mut() {
+                    s.core.wake_next_read(next, queue_guard, 0);
+                }
+
                 (*node).waker.assume_init_drop();
                 s.node = None;
                 return Poll::Ready(read_guard);
@@ -592,8 +605,8 @@ impl<'a, T> Drop for Read<'a, T> {
                 if let Err(new_next) = self.core.rw_tail.compare_exchange(
                     node,
                     null_mut(),
-                    Ordering::Acquire,
                     Ordering::Relaxed,
+                    Ordering::Acquire,
                 ) {
                     next = new_next;
                 }
@@ -619,8 +632,8 @@ impl<'a, T> Drop for Read<'a, T> {
                 return;
             }
 
-            if (state & Node::STATE_WAKE_NEXT_BIT == 0) {
-                // Indpendent drop of readguard occurs here, but we already have a queue lock,
+            if state & Node::STATE_WAKE_NEXT_BIT == 0 {
+                // Indpendent drop of read guard occurs here, but we already have a queue lock,
                 // so we can unconditionally try to wake other elements in the queue.
                 self.core.wake_rw_queue(queue_guard, 1);
                 return;
@@ -631,6 +644,140 @@ impl<'a, T> Drop for Read<'a, T> {
             }
 
             self.core.wake_next_read(next, queue_guard, 1);
+        }
+    }
+}
+
+struct Write<'a, T> {
+    core: &'a Core<T>,
+    node: Option<UnsafeCell<Node>>,
+}
+
+impl<'a, T> Future for Write<'a, T> {
+    type Output = WriteGuard<'a, T>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
+        unsafe {
+            let s = self.get_unchecked_mut();
+
+            if let Some(node) = &s.node {
+                let node = node.get();
+                let state = (*node).state.load(Ordering::Acquire);
+                if state & Node::STATE_COMPLETE_BIT == 0 {
+                    return Poll::Pending;
+                }
+
+                s.node = None;
+                return Poll::Ready(WriteGuard { core: s.core });
+            }
+
+            if let Some(write_guard) = s.core.try_write() {
+                return Poll::Ready(write_guard);
+            }
+
+            s.node = Some(UnsafeCell::new(Node {
+                waker: MaybeUninit::new(cx.waker().clone()),
+                next: AtomicPtr::new(null_mut()),
+                prev: null_mut(),
+                state: AtomicU8::new(0),
+                is_write: true,
+                _p: PhantomPinned,
+            }));
+
+            let node = s.node.as_mut().unwrap_unchecked().get();
+
+            let tail = s.core.rw_tail.swap(node, Ordering::AcqRel);
+            if tail != null_mut() {
+                (*node).prev = tail;
+                (*tail).next.store(node, Ordering::Release);
+                // We need `Release` ordering here to ensure that we are inserted before announcing ourselves,
+                // such that we cannot possibly have an unlucky read node see our announcement early and
+                // insert itself in front of us, slowing everything down compared to if
+                // it had just acquired a lock or inserted after us.
+                let _ = s.core.writes_queued.fetch_add(1, Ordering::Release);
+                return Poll::Pending;
+            }
+
+            let queue_guard = s.core.main_queue_lock.lock().unwrap();
+
+            if let Some(write_guard) = s.core.try_write() {
+                let mut next = (*node).next.load(Ordering::Acquire);
+                if next == null_mut() {
+                    if let Err(new_next) = s.core.rw_tail.compare_exchange(
+                        node,
+                        null_mut(),
+                        Ordering::Relaxed,
+                        Ordering::Acquire,
+                    ) {
+                        next = new_next;
+                    }
+                }
+                *s.core.rw_head.get() = next;
+                drop(queue_guard);
+
+                (*node).waker.assume_init_drop();
+                s.node = None;
+                return Poll::Ready(write_guard);
+            }
+
+            *s.core.rw_head.get() = node;
+            drop(queue_guard);
+
+            // See previous comment about `Release` ordering on here.
+            let _ = s.core.writes_queued.fetch_add(1, Ordering::Release);
+            Poll::Pending
+        }
+    }
+}
+
+impl<'a, T> Drop for Write<'a, T> {
+    fn drop(&mut self) {
+        unsafe {
+            let node = if let Some(node) = &self.node {
+                node.get()
+            } else {
+                return;
+            };
+            let _ = self.core.writes_queued.fetch_sub(1, Ordering::Relaxed);
+
+            let queue_guard = self.core.main_queue_lock.lock().unwrap();
+
+            let mut next = (*node).next.load(Ordering::Acquire);
+            if next == null_mut() {
+                if let Err(new_next) = self.core.rw_tail.compare_exchange(
+                    node,
+                    null_mut(),
+                    Ordering::Relaxed,
+                    Ordering::Acquire,
+                ) {
+                    next = new_next;
+                }
+            }
+
+            let state = *(*node).state.get_mut();
+            if state == 0 {
+                if next != null_mut() {
+                    (*next).prev = (*node).prev;
+                }
+
+                let prev = (*node).prev;
+                if prev == null_mut() {
+                    *self.core.rw_head.get() = null_mut();
+                } else {
+                    // Safety: we have exclusive access to `prev.next`, the owner of that
+                    // node will not touch it until it has a queue lock.
+                    (*prev).next = AtomicPtr::new(next);
+                }
+
+                drop(queue_guard);
+                (*node).waker.assume_init_drop();
+                return;
+            }
+
+            // Indpendent drop of write guard occurs here, but we already have a queue lock,
+            // so we can unconditionally try to wake other elements in the queue.
+            self.core.wake_rw_queue(queue_guard, WRITE_PERMIT_VALUE);
+            return;
         }
     }
 }
